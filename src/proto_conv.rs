@@ -22,7 +22,7 @@ use crate::sim::order::{
     ExecutionOption, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType, Side,
     StateDetail, StateReason,
 };
-use crate::sim::trade::TradeState;
+use crate::sim::trade::{PublicTrade, Trade, TradeId, TradeState};
 
 /// Errors that can occur converting from the wire into sim types.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -712,6 +712,127 @@ impl TryFrom<&proto_trading::OrderDetail> for OrderDetail {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trade / PublicTrade bridges. Both flatten currency the same way
+// Order does — the conv pulls it back out of the price submessage.
+// ---------------------------------------------------------------------------
+
+impl From<&Trade> for proto_trading::Trade {
+    fn from(t: &Trade) -> Self {
+        Self {
+            id: t.id.0,
+            order_id: t.order_id.0,
+            side: proto_trading::MarketSide::from(t.side) as i32,
+            delivery_area: Some((&t.area).into()),
+            delivery_period: Some(t.period.into()),
+            execution_time: Some(timestamp_to_proto(t.execution_time)),
+            price: Some(price_to_proto(t.price, t.currency)),
+            quantity: Some(power_to_proto(t.quantity)),
+            state: proto_trading::TradeState::from(t.state) as i32,
+        }
+    }
+}
+
+impl TryFrom<&proto_trading::Trade> for Trade {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_trading::Trade) -> Result<Self, Self::Error> {
+        let area_proto = p
+            .delivery_area
+            .as_ref()
+            .ok_or(ConvError::MissingField("Trade.delivery_area"))?;
+        let period_proto = p
+            .delivery_period
+            .as_ref()
+            .ok_or(ConvError::MissingField("Trade.delivery_period"))?;
+        let exec_proto = p
+            .execution_time
+            .as_ref()
+            .ok_or(ConvError::MissingField("Trade.execution_time"))?;
+        let price_proto = p
+            .price
+            .as_ref()
+            .ok_or(ConvError::MissingField("Trade.price"))?;
+        let qty_proto = p
+            .quantity
+            .as_ref()
+            .ok_or(ConvError::MissingField("Trade.quantity"))?;
+
+        let (price, currency) = price_from_proto(price_proto)?;
+        Ok(Self {
+            id: TradeId(p.id),
+            order_id: OrderId(p.order_id),
+            side: sim_enum_from_i32::<proto_trading::MarketSide, Side>(p.side, "MarketSide")?,
+            area: Area::try_from(area_proto)?,
+            period: DeliveryPeriod::try_from(period_proto)?,
+            execution_time: timestamp_from_proto(exec_proto)?,
+            price,
+            currency,
+            quantity: power_from_proto(qty_proto)?,
+            state: sim_enum_from_i32::<proto_trading::TradeState, TradeState>(p.state, "TradeState")?,
+        })
+    }
+}
+
+impl From<&PublicTrade> for proto_trading::PublicTrade {
+    fn from(t: &PublicTrade) -> Self {
+        Self {
+            id: t.id.0,
+            buy_delivery_area: Some((&t.buy_area).into()),
+            sell_delivery_area: Some((&t.sell_area).into()),
+            delivery_period: Some(t.period.into()),
+            execution_time: Some(timestamp_to_proto(t.execution_time)),
+            price: Some(price_to_proto(t.price, t.currency)),
+            quantity: Some(power_to_proto(t.quantity)),
+            state: proto_trading::TradeState::from(t.state) as i32,
+        }
+    }
+}
+
+impl TryFrom<&proto_trading::PublicTrade> for PublicTrade {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_trading::PublicTrade) -> Result<Self, Self::Error> {
+        let buy_proto = p
+            .buy_delivery_area
+            .as_ref()
+            .ok_or(ConvError::MissingField("PublicTrade.buy_delivery_area"))?;
+        let sell_proto = p
+            .sell_delivery_area
+            .as_ref()
+            .ok_or(ConvError::MissingField("PublicTrade.sell_delivery_area"))?;
+        let period_proto = p
+            .delivery_period
+            .as_ref()
+            .ok_or(ConvError::MissingField("PublicTrade.delivery_period"))?;
+        let exec_proto = p
+            .execution_time
+            .as_ref()
+            .ok_or(ConvError::MissingField("PublicTrade.execution_time"))?;
+        let price_proto = p
+            .price
+            .as_ref()
+            .ok_or(ConvError::MissingField("PublicTrade.price"))?;
+        let qty_proto = p
+            .quantity
+            .as_ref()
+            .ok_or(ConvError::MissingField("PublicTrade.quantity"))?;
+
+        let (price, currency) = price_from_proto(price_proto)?;
+        Ok(Self {
+            id: TradeId(p.id),
+            buy_area: Area::try_from(buy_proto)?,
+            sell_area: Area::try_from(sell_proto)?,
+            period: DeliveryPeriod::try_from(period_proto)?,
+            execution_time: timestamp_from_proto(exec_proto)?,
+            price,
+            currency,
+            quantity: power_from_proto(qty_proto)?,
+            state: sim_enum_from_i32::<proto_trading::TradeState, TradeState>(p.state, "TradeState")?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,6 +1135,63 @@ mod tests {
         assert_eq!(back.filled_quantity, sim.filled_quantity);
         assert_eq!(back.create_time, sim.create_time);
         assert_eq!(back.modification_time, sim.modification_time);
+    }
+
+    #[test]
+    fn trade_round_trip() {
+        let area = Area::eic("10Y1001A1001A82H");
+        let sim = Trade {
+            id: TradeId(7),
+            order_id: OrderId(42),
+            side: Side::Sell,
+            area: area.clone(),
+            period: DeliveryPeriod {
+                start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+                duration: DeliveryDuration::Hour,
+            },
+            execution_time: Utc.with_ymd_and_hms(2026, 5, 13, 11, 59, 50).unwrap(),
+            price: dec!(85.50),
+            currency: Currency::Eur,
+            quantity: dec!(1.0),
+            state: TradeState::Active,
+        };
+        let proto = proto_trading::Trade::from(&sim);
+        let back = Trade::try_from(&proto).unwrap();
+        assert_eq!(back.id, sim.id);
+        assert_eq!(back.order_id, sim.order_id);
+        assert_eq!(back.side, sim.side);
+        assert_eq!(back.area, sim.area);
+        assert_eq!(back.period, sim.period);
+        assert_eq!(back.execution_time, sim.execution_time);
+        assert_eq!(back.price, sim.price);
+        assert_eq!(back.currency, sim.currency);
+        assert_eq!(back.quantity, sim.quantity);
+        assert_eq!(back.state, sim.state);
+    }
+
+    #[test]
+    fn public_trade_round_trip_cross_area() {
+        let sim = PublicTrade {
+            id: TradeId(9001),
+            buy_area: Area::eic("10YFR-RTE------C"),
+            sell_area: Area::eic("10Y1001A1001A82H"),
+            period: DeliveryPeriod {
+                start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+                duration: DeliveryDuration::Hour,
+            },
+            execution_time: Utc.with_ymd_and_hms(2026, 5, 13, 11, 59, 45).unwrap(),
+            price: dec!(85.75),
+            currency: Currency::Eur,
+            quantity: dec!(2.5),
+            state: TradeState::Active,
+        };
+        let proto = proto_trading::PublicTrade::from(&sim);
+        let back = PublicTrade::try_from(&proto).unwrap();
+        assert_eq!(back.buy_area, sim.buy_area);
+        assert_eq!(back.sell_area, sim.sell_area);
+        assert_eq!(back.price, sim.price);
+        assert_eq!(back.quantity, sim.quantity);
+        assert_eq!(back.state, sim.state);
     }
 
     #[test]
