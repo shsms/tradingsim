@@ -1,0 +1,1001 @@
+#+TITLE: tradingsim — design and implementation plan
+#+AUTHOR: Sahas Subramanian
+#+OPTIONS: toc:2 num:t
+
+* Mission
+
+A configurable simulator of a continuous intraday electricity exchange,
+exposing the Frequenz Electricity Trading gRPC API. The reference market
+behaviour is a continuous intraday electricity exchange for the DE-LU bidding
+zone, but every market knob is data-driven so the same binary can stand
+in for FR, AT, NL, BE, or any made-up zone a scenario calls for.
+
+Same operating model as [[file:../switchyard][switchyard]]:
+
+- Rust owns the deterministic machinery: order book, matching engine,
+  state transitions, stream multiplexing, time.
+- Lisp (tulisp) owns the world: which gridpools exist, what background
+  liquidity looks like, how prices drift, what scenarios fire when. The
+  config file is hot-reloadable and is the only place a user-visible
+  knob lives.
+- An axum-backed SPA shows the order book, trade tape, per-gridpool
+  positions, scenario timeline, and a live REPL.
+- A =tsctl= CLI mirrors =swctl=: invoke RPCs, run scenarios, dump
+  state.
+
+The simulator is for: testing trading-bot code without a real exchange
+account; running deterministic ML-training replays; demoing
+forecasting/strategy work; rehearsing operational playbooks for
+gate-closure crunches.
+
+** Why "tradingsim"?
+
+Plain, descriptive, hard to mistake. The CLI binary is =tsctl=. The
+crate name and the binary names are unambiguous.
+
+* External references
+
+- API spec: =submodules/frequenz-api-electricity-trading/proto/frequenz/api/electricity_trading/v1/electricity_trading.proto=
+  (~1385 lines, single =ElectricityTradingService=, 11 RPCs).
+- Common types: =submodules/frequenz-api-electricity-trading/submodules/frequenz-api-common/proto/frequenz/api/common/v1alpha8/=
+  — =grid.DeliveryArea=, =grid.DeliveryPeriod=, =grid.DeliveryDuration=,
+  =market.Price=, =market.Power=, =types.Decimal=, =types.Interval=,
+  =pagination.PaginationParams=/=PaginationInfo=.
+- the continuous matching algorithm (public description): used as the
+  reference for price-time priority, AON/FOK/IOC/NON semantics, iceberg
+  slice add behaviour.
+- intraday lead times: 30 minutes pre-delivery cross-border;
+  continuously down to 0 min locally for DE.
+- DE-LU EIC: =10Y1001A1001A82H=. Default delivery area for v0.1.
+
+* Architecture overview
+
+** Module layout (parallel to switchyard)
+
+#+begin_example
+src/
+  lib.rs                      mod roots
+  proto.rs                    tonic::include_proto!
+  proto_conv.rs               proto <-> internal types (Decimal, Price, Power, Period, Order, Trade)
+  server.rs                   ElectricityTradingService gRPC impl
+  timeout_tracker.rs          valid_until / IOC kill timers (mirrors switchyard's)
+  ui_log.rs                   ring-buffer log tap (copy of switchyard's pattern)
+  bin/
+    tradingsim.rs             headless server binary
+    tsctl.rs                  client CLI (clap)
+    tradingsim-etags.rs       etags helper for tulisp-fmt
+  sim/
+    mod.rs                    re-exports
+    clock.rs                  SimClock — wallclock / accelerated / frozen modes
+    decimal.rs                Decimal wrapper (newtype around rust_decimal::Decimal)
+    market.rs                 DeliveryArea, DeliveryPeriod, market metadata, tick/qty rules
+    order.rs                  Order, OrderDetail, OrderState, OrderType, MarketSide, restrictions
+    trade.rs                  Trade, PublicTrade, TradeState
+    book.rs                   one OrderBook per (delivery_area, delivery_period); sorted half-books
+    matching.rs               continuous matcher; price-time priority; AON / iceberg handling
+    gridpool.rs               Gridpool registry (id, areas, owner-side state, tag index)
+    public.rs                 public order book / public trade tape (broadcast topics)
+    streams.rs                tokio broadcast channels + filter evaluation
+    counterparty.rs           synthetic counterparty runtime (driven by Lisp)
+    scenario.rs               scenario lifecycle (modeled on switchyard/src/sim/scenario.rs)
+    history.rs                rolling history for UI charts
+    auctions.rs               IDA1/2/3 call-auction matcher (later phase)
+  lisp/
+    mod.rs                    Config, defuns, tulisp-async wiring, watch-file glue
+    make.rs                   %make-gridpool, %make-counterparty primitives
+    handle.rs                 Tulisp value <-> Rust handle round-trip
+    runtime_modes.rs          enum <-> tulisp symbol adapters (OrderType, Side, etc.)
+    value.rs                  LispValue passthrough wrapper (same shape as switchyard)
+    csv_profile.rs            csv-load, csv-lookup (mirrors switchyard's)
+  ui/
+    mod.rs                    axum router, ws hub, REPL, /api/* JSON
+    tests.rs                  axum oneshot tests
+sim/
+  common.lisp                 every, reset-state, now-seconds, window-elapsed (shared with switchyard)
+  defaults.lisp               *-defaults alists + bare-name make- wrappers
+  scenarios.lisp              built-in scenario library
+config.lisp                   sample top-level config
+build.rs                      tonic-prost-build
+submodules/
+  frequenz-api-electricity-trading/   git submodule
+ui-assets/                    embedded SPA (rust-embed)
+#+end_example
+
+** Pipeline diagram
+
+#+begin_example
+                ┌──────────────────────────────────────────┐
+                │            tulisp config.lisp            │
+                │  gridpools, counterparties, scenarios,   │
+                │  price curves, scheduled (every …) calls │
+                └─────────────────┬────────────────────────┘
+                                  │ Lisp Config::new + watch
+                                  ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │                       sim::World                          │
+   │  ┌──────────┐  ┌──────────────────────┐  ┌─────────────┐  │
+   │  │ Gridpool │  │  OrderBook (per      │  │ SimClock    │  │
+   │  │ registry │  │  area/period)        │  │ tick driver │  │
+   │  └──────────┘  └──────────┬───────────┘  └─────────────┘  │
+   │                            │ matches                       │
+   │                            ▼                               │
+   │  ┌─────────────────────────────────────────────────────┐   │
+   │  │  Trade stream (private) + Public trade tape +       │   │
+   │  │  Public order book event stream (broadcast)         │   │
+   │  └─────────────────────┬───────────────────────────────┘   │
+   └────────────────────────┼───────────────────────────────────┘
+                            │
+       ┌────────────────────┴───────────────────────┐
+       ▼                                            ▼
+ ┌────────────────────────────┐         ┌──────────────────────────┐
+ │ tonic ElectricityTrading-  │         │   axum UI / WebSocket    │
+ │       Service              │         │   /api/* + /ws/events    │
+ │  - 11 RPCs                 │         │  + embedded SPA          │
+ │  - per-subscription filter │         │  + REPL                  │
+ └────────────────────────────┘         └──────────────────────────┘
+              ▲                                       ▲
+              │                                       │
+       gRPC clients,                            browser, tsctl ui
+       tsctl, trading bots                      scenario commands
+#+end_example
+
+* The market model
+
+** Delivery products
+
+| Product | DeliveryDuration enum    | Start alignment              |
+|---------|--------------------------|------------------------------|
+| 5-min   | =DELIVERY_DURATION_5=    | multiples of 5 min past hour |
+| 15-min  | =DELIVERY_DURATION_15=   | :00 :15 :30 :45              |
+| 30-min  | =DELIVERY_DURATION_30=   | :00 :30                      |
+| 60-min  | =DELIVERY_DURATION_60=   | :00                          |
+
+Each contract = (delivery area, delivery period). Has its own order
+book. =market::contract_id(area, period) -> ContractId= is the key.
+v0.1 supports 60-min only; v0.3 expands.
+
+** Delivery areas (initial supported set)
+
+| EIC                | Symbol     | Currency |
+|--------------------|------------|----------|
+| 10Y1001A1001A82H   | DE_LU      | EUR      |
+| 10YFR-RTE------C   | FR         | EUR      |
+| 10YAT-APG------L   | AT         | EUR      |
+| 10YNL----------L   | NL         | EUR      |
+| 10YBE----------2   | BE         | EUR      |
+
+Stored as data in =market.rs= so adding zones is config, not code. The
+proto =DeliveryArea {string code, EnergyMarketCodeType code_type}=
+maps to an internal =Area= newtype that the sim keeps interned.
+
+** Tick + quantity conventions
+
+| Param          | Default       |
+|----------------|---------------|
+| Price tick     | 0.01 EUR/MWh  |
+| Min quantity   | 0.1 MW        |
+| Quantity step  | 0.1 MW        |
+| Price domain   | -9999 .. 9999 EUR/MWh |
+
+All are per-area knobs in lisp (=(set-tick-size 'de-lu 0.01)=, etc.).
+Pre-trade validation rejects out-of-grid prices/quantities and reports
+=STATE_REASON_VALIDATION_FAIL=.
+
+** Order types (proto =OrderType=)
+
+| Enum             | v0.1 | v0.2 | v0.3 | Notes |
+|------------------|------|------|------|-------|
+| LIMIT            | ✓    | ✓    | ✓    | resting w/ optional valid_until |
+| STOP_LIMIT       |      | ✓    | ✓    | activated when public last price crosses stop_price |
+| ICEBERG          |      | ✓    | ✓    | display_quantity + peak_price_delta; new slice on slice fill |
+| BLOCK            |      |      | v0.6 | linked periods, executed at common ratio |
+| BALANCE          |      |      |      | deferred — not in proto MVP |
+| PREARRANGED      |      |      |      | deferred |
+| PRIVATE          |      |      |      | deferred |
+
+** Execution restrictions (proto =OrderExecutionOption=)
+
+| Enum  | Behaviour                                                                                  |
+|-------|--------------------------------------------------------------------------------------------|
+| (none)| stays on book until filled, cancelled, expired                                              |
+| AON   | only matches if a counter-side aggregate exists ≥ full qty; never partially filled          |
+| FOK   | match in full immediately or reject; never sits on book                                     |
+| IOC   | match what you can immediately; cancel the rest; never sits on book                         |
+
+** Order state machine (proto =OrderState=)
+
+#+begin_example
+                ┌──────────┐
+   CreateOrder ─┤ PENDING  │── validation OK ─►┌────────┐
+                └────┬─────┘                   │ ACTIVE │
+                     │ validation fail          └───┬────┘
+                     ▼                              │
+                ┌────────┐    ┌──────────────────┬──┴────────┬───────────┐
+                │ FAILED │    ▼                  ▼           ▼           ▼
+                └────────┘ ┌──────┐         ┌────────┐  ┌─────────┐  ┌──────────┐
+                           │FILLED│         │CANCELED│  │ EXPIRED │  │HIBERNATE │ (stop unarmed)
+                           └──────┘         └────────┘  └─────────┘  └──────────┘
+#+end_example
+
+PENDING -> ACTIVE happens on the next match tick (one tick of book
+admission). HIBERNATE is reserved for stop orders waiting for their
+trigger. Every transition emits an =OrderDetail= update on the gridpool
+stream and (if the order is publicly visible) a
+=PublicOrderBookRecord= event.
+
+** Trade state machine (proto =TradeState=)
+
+v0.1 supports =ACTIVE= only. Cancel / recall workflows
+(=CANCEL_REQUESTED=, =RECALLED=, =APPROVAL_REQUESTED=) come in v0.6+
+once we have a "market operator" actor surface in lisp.
+
+** Continuous matching algorithm
+
+Per the continuous-matching algorithm spec, the bidyard^Wtradingsim matching
+engine is:
+
+1. Incoming order =O= validated (price tick, qty step, currency match,
+   valid_until in future, area belongs to the gridpool, etc.).
+2. If FOK/IOC/AON, attempt immediate sweep against the resting opposite
+   half-book; FOK rolls back any partial fill if the full qty isn't
+   reachable.
+3. Otherwise, sweep against the resting half-book in price-time priority
+   (best price first; among same price, oldest first).
+4. Each match emits two private =Trade= rows (one per side's gridpool)
+   plus one =PublicTrade= row visible globally.
+5. If qty remains and =O= is restable, insert it at the price-time tail
+   of its side and emit =PublicOrderBookRecord= with =STATE_REASON_ADD=.
+6. Iceberg: only the =display_quantity= slice is on the book; on slice
+   fill, the next slice is inserted at the current
+   =price + peak_price_delta= (sell) or =price - peak_price_delta=
+   (buy), with a =STATE_REASON_ICEBERG_SLICE_ADD=, losing time priority.
+7. Order modify: any update that increases qty or improves price loses
+   time priority (this matches intraday-market behaviour). Quantity decrease and
+   tag/payload changes preserve priority.
+
+Determinism: matching is single-threaded inside =World::tick=, so two
+orders submitted in the same tick are ordered by their arrival sequence
+(monotonic =u64= assigned at admission). Tests rely on this.
+
+** Gate closure + delivery clock
+
+A contract is "open for trading" between =gate_open_at(period)= and
+=gate_close_at(period)=. Both are functions of (area, duration) and are
+configurable from lisp; defaults match DE-LU as of 2026:
+
+| Duration | Default gate open                  | Default gate close       |
+|----------|------------------------------------|--------------------------|
+| 60-min   | day-ahead 15:00 D-1 (CET)          | delivery start           |
+| 30-min   | day-ahead 15:30 D-1                | delivery start           |
+| 15-min   | 2 h before delivery hour           | delivery start           |
+| 5-min    | 1 h before delivery 5-min slot     | delivery start           |
+
+(For cross-border / SIDC traffic the gate closes 30 min before
+delivery; v0.3 introduces a =cross-border= flag on the contract.)
+
+At =gate_close_at=, all remaining ACTIVE orders on the contract are
+forcibly transitioned to =EXPIRED= with =STATE_REASON_DELETE=,
+=MARKET_ACTOR_SYSTEM=. Iceberg slices behind the visible one also
+expire.
+
+** Synthetic counterparties (the "environment animation" layer)
+
+In switchyard, lisp animates voltage / consumer load / solar
+irradiance; here lisp animates counterparties. A counterparty is a
+synthetic trader that posts orders against the public book.
+
+Counterparties are =SimulatedAgent= objects ticked once per
+=physics_tick_ms=. Each one has a Lisp closure that decides what to
+post on a given tick. Hooks Rust gives the closure:
+
+- =(post-public-order …)=  - inserts an order from a non-gridpool source
+- =(cancel-public-order id)= - cancels by id
+- =(best-bid AREA PERIOD)=, =(best-ask AREA PERIOD)=, =(mid AREA PERIOD)=,
+  =(last-trade AREA PERIOD)= - read-only book inspection
+- =(qty-on-bid AREA PERIOD price)= / =(qty-on-ask …)= - depth at a price level
+- =(seconds-to-gate-close AREA PERIOD)= - drives last-minute behaviour
+
+A handful of canned strategies live in =sim/counterparties.lisp=
+("market-maker", "spike-trader", "renewable-iceberg-seller",
+"battery-arb"). User configs can drop them in by name or define their
+own.
+
+** Public order book stream semantics
+
+Per the proto:
+
+- One record per visible book event (add/modify/match/delete).
+- Records may be batched per response.
+- =update_time= drives replay range.
+- Filter on (delivery_period, delivery_area, side).
+
+Implementation: a single =tokio::sync::broadcast= channel of
+=PublicBookEvent= covers the whole sim. Per-subscription filters live
+in the stream task. Historical replay uses an in-memory ring (default
+24 h, configurable) with timestamps; the stream task drains the ring up
+to =now()=, then switches over to the live broadcast.
+
+** Pre-trade validation matrix
+
+| Rule                              | Error code on fail        |
+|-----------------------------------|---------------------------|
+| qty > 0 and multiple of step      | =VALIDATION_FAIL=         |
+| price multiple of tick            | =VALIDATION_FAIL=         |
+| currency matches area's default   | =VALIDATION_FAIL=         |
+| delivery start aligned to duration| =VALIDATION_FAIL=         |
+| period.start in (gate_open,close) | =VALIDATION_FAIL=         |
+| area ∈ gridpool's allowed areas   | =VALIDATION_FAIL=         |
+| valid_until in future or unset    | =VALIDATION_FAIL=         |
+| ICEBERG: display_qty in (0, qty)  | =VALIDATION_FAIL=         |
+| ICEBERG: peak_price_delta ≥ 0     | =VALIDATION_FAIL=         |
+| STOP_LIMIT: stop_price set        | =VALIDATION_FAIL=         |
+
+Rules live in =sim::order::validate(...)=. Server returns
+=tonic::Status::invalid_argument= or yields a =FAILED= =OrderDetail=
+with =StateDetail.state_reason=VALIDATION_FAIL=, mirroring the proto
+notes.
+
+* The Lisp DSL
+
+Mirror switchyard's two-layer split:
+
+- =%make-*= primitives in =src/lisp/make.rs= take =:config <alist>=
+  defaults + per-call plist args, last-wins.
+- =make-*= wrappers in =sim/defaults.lisp= prepend
+  =:config <cat>-defaults= and forward to =%make-*=. Topology code uses
+  the wrappers.
+
+** Top-level shape of a config
+
+#+begin_src lisp
+;; --- runtime setup ---
+(unless (boundp 'tradingsim-loaded)
+  (setq tradingsim-loaded t)
+  (load "sim/common.lisp")
+  (load "sim/counterparties.lisp"))
+
+(load "sim/defaults.lisp")
+(watch-file "sim/defaults.lisp")
+
+(reset-state)
+
+(set-physics-tick-ms 100)
+(set-clock-mode 'sim-time)            ; 'wall-clock or 'sim-time
+(set-sim-time-multiplier 60.0)        ; 1 sim-min per real-sec
+(set-sim-time-start "2026-05-13T08:00:00Z")
+(set-socket-addr "[::1]:8810")
+(set-ui-addr "127.0.0.1:8811")
+
+;; --- markets ---
+(make-market
+ :area 'de-lu
+ :code "10Y1001A1001A82H"
+ :currency 'eur
+ :tick 0.01
+ :qty-step 0.1
+ :durations '(60 15)                  ; 60-min + 15-min products
+ :gate-open-h-before '((60 . 39)
+                       (15 . 2))      ; 60-min opens 15:00 D-1 ≈ 39h
+ :gate-close-min-before '((60 . 0)
+                          (15 . 0)))
+
+;; --- gridpools ---
+(make-gridpool
+ :id 1
+ :name "battery-arb-pool"
+ :areas '(de-lu)
+ :tag-defaults '("strategy=arb"))
+
+;; --- counterparties / background liquidity ---
+(make-counterparty
+ :name "mm-de-lu"
+ :areas '(de-lu)
+ :strategy 'market-maker              ; canned strategy from counterparties.lisp
+ :params '((spread . 0.4)
+           (size . 5.0)
+           (refresh-ms . 1500)))
+
+(make-counterparty
+ :name "iceberg-pv-seller"
+ :areas '(de-lu)
+ :strategy 'renewable-iceberg-seller
+ :params '((peak-mw . 25.0)
+           (display-mw . 1.0)
+           (peak-price-delta . 0.5)
+           (target-price-fn 'pv-price-curve)))
+
+;; --- price reference curves ---
+(defun pv-price-curve (delivery-period)
+  ;; midprice forecast that decays through the day
+  (let ((h (delivery-hour-of-day delivery-period)))
+    (cond ((< h 6) 95.0)
+          ((< h 12) (- 95.0 (* (- h 6) 8.0)))
+          ((< h 18) (+ 47.0 (* (- h 12) 6.0)))
+          (t 83.0))))
+
+;; --- scheduled animation ---
+(every
+ :seconds 60
+ :call (lambda ()
+         ;; nudge mid-price baseline by a small AR(1) noise
+         (set-area-baseline 'de-lu
+                            (+ (* 0.97 (area-baseline 'de-lu))
+                               (* 0.03 95.0)
+                               (- (/ (random 100) 25.0) 2.0)))))
+
+(run-with-timer
+ 30  ; sim-seconds
+ (lambda ()
+   ;; one-shot scenario kick
+   (start-scenario 'gate-closure-crunch)))
+#+end_src
+
+** Defun catalogue (Rust-implemented)
+
+*** Market & clock
+- =(set-physics-tick-ms N)=
+- =(set-clock-mode 'wall-clock | 'sim-time)=
+- =(set-sim-time-start ISO8601)=, =(set-sim-time-multiplier X)=
+- =(now-seconds)=, =(now-iso)=, =(advance-time SECONDS)=
+- =(set-socket-addr STR)=, =(set-ui-addr STR)=
+
+*** Markets
+- =(%make-market …)= / =(make-market …)=
+- =(set-tick-size AREA TICK)=, =(set-qty-step AREA STEP)=
+- =(set-gate-open-h-before AREA DURATION HOURS)= etc.
+- =(set-area-baseline AREA EUR-PER-MWH)=, =(area-baseline AREA)=
+
+*** Gridpools
+- =(%make-gridpool …)= / =(make-gridpool …)=
+- =(set-default-request-lifetime SECONDS)=
+
+*** Counterparties
+- =(%make-counterparty …)= / =(make-counterparty …)=
+- =(post-public-order …)=, =(cancel-public-order ID)=
+- =(best-bid AREA PERIOD)=, =(best-ask AREA PERIOD)=, =(mid AREA PERIOD)=,
+  =(last-trade AREA PERIOD)=, =(qty-on-bid AREA PERIOD PRICE)=
+
+*** Scenarios
+- =(define-scenario NAME …)=  - timeline of timed actions, like switchyard
+- =(start-scenario NAME)=, =(stop-scenario NAME)=
+- =(scenario-status NAME)=
+
+*** Reload + state
+- =(reset-state)=  - cancels pending timers, clears world, ready for re-eval
+- =(watch-file PATH)=  - re-trigger reload on save (notify-rs)
+- =(csv-load PATH)=, =(csv-lookup HANDLE COL T)=
+
+*** Symbol enums (TulispConvertible)
+- Sides: ='buy='sell=
+- Order types: ='limit='stop-limit='iceberg='block=
+- Execution opts: ='aon='fok='ioc=
+- Order states: ='pending='active='filled='canceled='expired='failed='hibernate=
+- Trade states: ='active='canceled=...
+- Areas: ='de-lu='fr='at='nl='be= (extensible)
+
+** Reload semantics
+
+Same model as switchyard. =(reset-state)= drops the World, cancels
+tulisp-async timers, and the next eval rebuilds. Counterparties and
+their lisp closures are re-registered with their =:every= cadences.
+Orders that were already on the book disappear on reload — they're not
+intended to be durable. (A v0.4 option is =:preserve-book= for hot
+config edits.)
+
+* gRPC service implementation
+
+All 11 RPCs of =ElectricityTradingService=. Each entry: =[scope]= what
+state it touches, key validation, output shape, stream semantics.
+
+** CreateGridpoolOrder
+- Validate: order.delivery_area ∈ gridpool.areas; price/qty grid;
+  duration/start alignment; FOK/IOC ⇒ no =valid_until=.
+- Stamp =order_id= (monotonic), =create_time=, =modification_time=,
+  set =OrderState=PENDING=.
+- Push to admit-queue. Next tick: validate gate window, hand to the
+  matcher, transition to ACTIVE / FILLED / CANCELED.
+- Response: =OrderDetail= at first observable state. (FOK/IOC clients
+  see the post-match state in the same call; LIMIT clients see ACTIVE
+  with whatever immediate fills were synthesised.)
+
+** UpdateGridpoolOrder
+- Field mask gating on UpdateOrder fields per the proto comments
+  ("not in update_mask: leave unchanged; present in payload: set;
+  absent in payload: clear").
+- Price/qty/exec changes that improve nothing keep priority; otherwise
+  the order is removed and re-inserted at the tail.
+- valid_until updates re-anchor the expiry tracker.
+- Reject updates on terminal orders (FILLED/CANCELED/EXPIRED/FAILED)
+  with =NOT_FOUND= (matches typical exchange behaviour).
+
+** CancelGridpoolOrder / CancelAllGridpoolOrders
+- Remove from book, transition to CANCELED with
+  =STATE_REASON_DELETE=, =MARKET_ACTOR_USER=.
+- =CancelAll=: walk the gridpool's order index, cancel every non-terminal
+  order; one stream emission per order.
+
+** GetGridpoolOrder
+- O(1) lookup in the gridpool's order index. =NOT_FOUND= if missing.
+
+** ListGridpoolOrders
+- Filter: state(s), side, =DeliveryTimeFilter=, area, tag, ids.
+- Pagination: cursor-based, opaque token = base64(=last_order_id=);
+  page size capped (config; default 200, max 1000).
+
+** ReceiveGridpoolOrdersStream
+- Per-stream task: subscribe to the gridpool's broadcast topic;
+  evaluate the filter; emit =ReceiveGridpoolOrdersStreamResponse=.
+- Stream-lifetime contract per the proto: close when
+  =delivery_time_filter.time_interval.end_time= has passed and the
+  filter is exhausted (we know this because we know all contracts up
+  to end_time and can tell when none of them have pending order
+  state updates). Best-effort.
+
+** ListGridpoolTrades / ReceiveGridpoolTradesStream
+- Analogous to orders: filter on states/side/period/area/tag/ids.
+- Stream-task subscribes to the per-gridpool =trade_broadcast= topic.
+
+** ReceivePublicTradesStream
+- replay window over =execution_time=, then live.
+- Filter: states (always ACTIVE for v0.4; cancel/recall later),
+  delivery_period, buy_area, sell_area.
+
+** ReceivePublicOrderBookStream
+- Replay window over =update_time=, then live. Filter: period, area,
+  side. Records may be batched.
+
+** Auth (HMAC-SHA256)
+The proto notes auth on all RPCs is HMAC-SHA256 + key id in metadata.
+For the simulator:
+- =(set-auth-mode 'off | 'log-only | 'strict)= in lisp.
+- =(define-auth-key ID SECRET …)= adds a key.
+- =strict= mode rejects with =UNAUTHENTICATED= when missing/invalid.
+- Default: =off= — most users want frictionless local sim.
+v0.7+.
+
+* The UI
+
+Same shape as switchyard: axum HTTP + WS; rust-embed for assets; the
+SPA is plain HTML/JS with =vis-network= for any graph view. Pages:
+
+** =/= dashboard
+- Status header: clock mode, sim-time, gridpool count, contract count,
+  trades / orders today, last-tick latency.
+- Per-area "best bid / best ask / mid / last" panel.
+
+** =/book/:area/:period= live order book
+- Two-column ladder (bids descending, asks ascending), depth bars.
+- Last 50 trades on the right rail.
+- WS push on every book change.
+
+** =/gridpool/:id=
+- Open orders table (id, side, period, price, qty open/filled, state, tag).
+- Trade tape for this gridpool.
+- Position chart per delivery period: net MW × time-to-delivery.
+
+** =/scenarios=
+- Defined scenarios + their state.
+- Start / stop / restart buttons (POSTs to /api/scenarios/:name/start
+  etc.).
+
+** =/repl=
+- Tulisp REPL with autocomplete + electric-pair + rainbow brackets,
+  same component as switchyard.
+- Read-only "log tail" panel (uses =ui_log::LogTap=).
+
+** =/api/*=
+JSON endpoints feeding the SPA: =/api/markets=, =/api/gridpools=,
+=/api/orders=, =/api/trades=, =/api/book/:area/:period=,
+=/api/scenarios=, =/api/clock=, =/api/topology=. Mirrors switchyard's
+naming.
+
+** =/ws/events=
+WebSocket multiplex: subscriptions for clock, book, trades, orders,
+scenarios, logs. Same protocol shape switchyard uses
+(={ topic, payload }=).
+
+* The CLI: =tsctl=
+
+Clap-derived. Default endpoint =http://[::1]:8810= (gRPC) and
+=http://127.0.0.1:8811= (UI HTTP). Sub-commands:
+
+| Command                                         | RPC / Endpoint                              |
+|-------------------------------------------------|---------------------------------------------|
+| =tsctl info=                                    | =GET /api/info= (sim version, clock)        |
+| =tsctl markets=                                 | =GET /api/markets=                          |
+| =tsctl pools=                                   | =GET /api/gridpools=                        |
+| =tsctl book <area> <period>=                    | =GET /api/book/...=                         |
+| =tsctl trades --area … --period … [--live]=     | =ReceivePublicTradesStream= or list         |
+| =tsctl orders <pool-id> [--state …] [--live]=   | =ReceiveGridpoolOrdersStream= or list       |
+| =tsctl place <pool-id> --side --price --qty …=  | =CreateGridpoolOrder=                       |
+| =tsctl modify <pool-id> <order-id> --price …=   | =UpdateGridpoolOrder=                       |
+| =tsctl cancel <pool-id> <order-id>=             | =CancelGridpoolOrder=                       |
+| =tsctl cancel-all <pool-id>=                    | =CancelAllGridpoolOrders=                   |
+| =tsctl scenario <name> {start,stop,status}=     | =POST /api/scenarios/:name/...=             |
+| =tsctl clock {advance,freeze,resume}=           | =POST /api/clock/...=                       |
+
+Scenario commands go through HTTP (no proto surface), same trick
+switchyard uses for non-gRPC actions.
+
+* Scenarios
+
+A scenario in switchyard is a named, timed series of world mutations.
+Same shape here. Built-in scenarios in =sim/scenarios.lisp=:
+
+** =calm-day=
+Quiet baseline. Two MMs, one renewables seller, one consumer buyer.
+Mid drifts slowly. Useful for "does my bot send and cancel cleanly?"
+
+** =morning-ramp=
+Demand picks up between 06:00–09:00 sim-time. Best-ask climbs ~25%.
+Liquidity stays thick. Stresses STOP_LIMIT triggers.
+
+** =gate-closure-crunch=
+Last 15 minutes before a 60-min contract's gate: depth thins, spreads
+widen, MMs cancel resting orders, prints get sparse. Catches
+"my-bot-trusts-thick-book" bugs.
+
+** =unbalanced-fleet=
+A counterparty starts dumping 50 MW of forced sell at -50 EUR
+(curtailment); trading bots that assume positive prices break.
+
+** =cross-zone-arb=
+v0.3+. DE-LU and FR diverge by €10/MWh; cross-area public trades
+appear (different =buy_delivery_area= and =sell_delivery_area=).
+Lets users test multi-area position trackers.
+
+Scenarios are declared via =(define-scenario NAME …)= with the same
+verb set as switchyard's: list of =:at SECONDS :do (lambda () …)=
+entries. Internally a scenario is a per-name struct with a timer
+handle; =start-scenario= installs the timers, =stop-scenario= cancels
+them.
+
+* Testing strategy
+
+** Unit tests (=cargo test=, =src/sim/*= and =src/lisp/*=)
+
+- =matching.rs= — price-time priority, AON, FOK rollback, IOC partial,
+  iceberg slice add, modify-loses-priority, cross-spread inserts.
+- =book.rs= — insert/cancel/replace are O(log n); ordered iteration is
+  stable.
+- =order.rs::validate= — every row of the validation matrix.
+- =clock.rs= — sim-time multiplier, freeze, advance jumps.
+- =proto_conv.rs= — Decimal/Price/Power/Period round-trips.
+- =lisp::make= — every =%make-*= primitive parses defaults and
+  per-call args correctly (=test_lisp_make_*= patterns from switchyard).
+- =lisp::runtime_modes= — every enum symbol ↔ Rust enum round-trip.
+
+** Integration tests (=tests/=)
+
+Out-of-process pattern from switchyard:
+
+- =tests/grpc_e2e.rs= — boot the binary on a free port with a small
+  config, drive a generated gRPC client through full lifecycles:
+  place → match → trade → stream consumes the event.
+- =tests/replay.rs= — boot with a fixture =scenarios/replay.lisp= that
+  schedules deterministic order injection at sim-time T0, T1, …;
+  assert the public trade tape matches a golden file.
+- =tests/reload.rs= — write =config.lisp=, save, rewrite with one
+  added counterparty, save again; assert the reload watcher picked up
+  the change without dropping the gRPC server.
+- =tests/ui_oneshot.rs= — axum =oneshot()= each =/api/*= endpoint
+  with a fixture =Config=. No live port. (Switchyard pattern.)
+
+** Property tests (=proptest=)
+
+- For any random sequence of (place, modify, cancel) operations on a
+  single contract, =sum(filled_qty)= ≤ =sum(initial_qty)= for buys and
+  for sells, and the public trade tape's sum equals the gridpool
+  trade tape's sum per side.
+- For any random pair of overlapping LIMITs, exactly one =PublicTrade=
+  is emitted with =min(qty_a, qty_b)=, at the earlier order's price.
+
+** Browser-driven tests (v0.5+, deferred)
+
+Playwright harness modeled on switchyard's =tests-browser/=. First
+target: load =/=, place an order via the REPL, see it in the book
+panel, cancel it from the UI.
+
+* Phased roadmap
+
+The user's commit convention: ~100-line commits, introduce → rewire →
+remove → cleanup as separate commits. Phases below are
+~weekend-of-work chunks each; commits per phase are listed.
+
+** Phase 0 — bootstrap (done in this conversation)
+- [X] =cargo init --name tradingsim --vcs git=
+- [X] Add =frequenz-api-electricity-trading= submodule (which pulls
+  =frequenz-api-common= as a nested submodule).
+- [X] Write =plan.org= (this file).
+
+** Phase 1 — proto + skeleton
+- =Cargo.toml=: same deps as switchyard, minus microgrid-specific
+  ones (no =rand=… actually keep rand for jittery counterparties).
+  Tonic 0.14, tulisp/tulisp-async/tulisp-fmt, axum 0.8 (ws), clap 4,
+  serde + serde_json, rust-embed, =rust_decimal=, =chrono=,
+  =parking_lot=, =futures=, =log=/=simplelog=, =notify=,
+  =tokio-stream=, =reqwest= (for =tsctl='s scenario HTTP commands).
+  =[build-dependencies] tonic-prost-build=.
+- =build.rs=: configure tonic-prost-build with
+  =compile_protos(&[electricity_trading.proto],
+  &[proto_root, common_proto_root])=. =include_file("proto_v1.rs")=.
+  =rerun-if-changed= for both. Env override =TRADINGSIM_PROTO_ROOT=.
+- =src/lib.rs=: module roots (=pub mod proto; pub mod proto_conv;
+  pub mod sim; pub mod lisp; pub mod server; pub mod ui; pub mod
+  ui_log;=).
+- =src/proto.rs=: =tonic::include_proto!("…")= with a re-export tree
+  that mirrors switchyard's =proto.rs= style.
+- =src/bin/tradingsim.rs=: stub that calls =Config::new(…)= and
+  blocks on =Server::builder()= even though no service is wired yet.
+- =cargo build= must pass.
+
+Estimated 4–6 commits.
+
+** Phase 2 — Decimal / Price / Power / Period plumbing
+- =sim/decimal.rs=: newtype around =rust_decimal::Decimal= with
+  tick-snapping helpers.
+- =sim/market.rs=: =Area=, =MarketRules { tick, qty_step, currency,
+  durations, gate_… }=, =MarketRegistry=.
+- =sim/order.rs=: =Order=, =OrderId=, =OrderState=, =OrderType=,
+  =MarketSide=, =OrderExecutionOption= as Rust enums. =OrderDetail=
+  with =StateDetail=.
+- =sim/trade.rs=: =Trade=, =PublicTrade=, =TradeState=, =TradeId=.
+- =proto_conv.rs=: =From/TryFrom= between proto and the above.
+  Round-trip unit tests for every type.
+
+Estimated 5–7 commits.
+
+** Phase 3 — book + matching
+- =sim/book.rs=: =OrderBook= per contract; price-keyed BTreeMap of
+  FIFO queues per side; admit/cancel/modify.
+- =sim/matching.rs=: continuous matcher. LIMIT only this phase.
+  Property tests for invariants. No iceberg, no AON/FOK/IOC, no
+  STOP_LIMIT, no expiry timer yet.
+- =sim/world.rs= (~switchyard's): aggregates =MarketRegistry= +
+  =GridpoolRegistry= + =BookSet= + clock; =tick_once()= runs the
+  match loop.
+
+Estimated 6–8 commits.
+
+** Phase 4 — gridpools + minimum viable gRPC
+- =sim/gridpool.rs=: =Gridpool { id, name, areas, order_index,
+  trade_index, broadcast: Sender<…> }=.
+- =sim/streams.rs=: broadcast channels + filter eval.
+- =server.rs=: implement =CreateGridpoolOrder=, =GetGridpoolOrder=,
+  =CancelGridpoolOrder=, =ListGridpoolOrders=,
+  =ReceiveGridpoolOrdersStream=. Hardcoded gridpool 1 for now.
+- =bin/tsctl.rs= with =info=, =place=, =cancel=, =orders --live=,
+  =orders=.
+- =tests/grpc_e2e.rs= round-trips a LIMIT order.
+
+Estimated 8–10 commits. v0.1 demo lands here.
+
+** Phase 5 — Lisp config + counterparties
+- =lisp/mod.rs=, =lisp/make.rs=, =lisp/handle.rs=,
+  =lisp/runtime_modes.rs=, =lisp/value.rs= — mirror switchyard.
+- =Config::new(path)= compiles the file, wires tulisp-async,
+  installs the pre-tick mailbox drain.
+- =%make-market=, =%make-gridpool=, =%make-counterparty=.
+- =(every …)=, =(run-with-timer …)=, =(reset-state)=, =(watch-file …)=
+  are reused as-is from switchyard's commons.
+- =counterparties.lisp= built-ins: =market-maker=, =renewable-iceberg-seller=
+  (degraded to plain LIMITs for v0.1; full ICEBERG arrives v0.2).
+- =bin/tradingsim.rs= now actually loads =config.lisp=.
+
+Estimated 8–12 commits.
+
+** Phase 6 — execution options + iceberg + STOP_LIMIT + update + expiry
+- =matching.rs=: handle =AON=, =FOK=, =IOC=; rollback on FOK
+  shortfall.
+- =book.rs=: hidden iceberg "tail" queue per visible slice.
+- =matching.rs=: iceberg slice add on slice fill; emit
+  =STATE_REASON_ICEBERG_SLICE_ADD=.
+- =sim/stop_orders.rs= (new): activation index keyed by
+  =stop_price=; on each public print, check both sides.
+- =timeout_tracker.rs=: =valid_until= scheduler.
+- =server.rs::update_gridpool_order=: field mask interpretation per
+  proto comments; priority recompute.
+- =server.rs::cancel_all_gridpool_orders=: bulk cancel.
+
+Estimated 10–14 commits.
+
+** Phase 7 — trades stream + multi-area + 15-min products
+- =ListGridpoolTrades=, =ReceiveGridpoolTradesStream=.
+- Make =DeliveryTimeFilter= a first-class type with the half-open
+  semantics codified.
+- Add FR / AT / NL / BE areas. Cross-area public trades (different
+  =buy_delivery_area=/=sell_delivery_area=) via a separately
+  configured "coupling" object: =(make-coupling :a 'de-lu :b 'fr
+  :capacity-mw 4000)= — when an order in DE-LU matches one in FR,
+  it consumes coupling capacity and produces a cross-area
+  =PublicTrade=.
+- 15-min products: just a new duration variant + gate-time defaults.
+
+Estimated 12–16 commits.
+
+** Phase 8 — public market data streams
+- =ReceivePublicTradesStream= w/ replay window.
+- =ReceivePublicOrderBookStream= w/ batched response and replay.
+- History ring (=sim/history.rs=): bounded vec of
+  =PublicTradeRow= / =PublicBookEventRow= w/ timestamps;
+  configurable retention from lisp (default 24 sim-hours).
+
+Estimated 6–8 commits.
+
+** Phase 9 — UI
+- =ui/mod.rs=: axum router, =/api/*=, =/ws/events=, =/= SPA, log tap
+  binding.
+- =ui-assets/=: =index.html=, =app.js=, =style.css=,
+  =vis-network= vendor. Layout: dashboard, book panel, gridpool
+  detail, scenarios, REPL.
+- =ui/tests.rs=: oneshot tests for each =/api/*= endpoint.
+- =bin/tradingsim.rs= spawns =ui::serve= in its own task.
+
+Estimated 12–16 commits.
+
+** Phase 10 — scenarios + integration tests
+- =sim/scenario.rs= (port from switchyard with light edits).
+- =sim/scenarios.lisp= with =calm-day=, =morning-ramp=,
+  =gate-closure-crunch=, =unbalanced-fleet=.
+- =tests/grpc_e2e.rs= grown to full lifecycle. =tests/replay.rs= for
+  deterministic golden-file replay. =tests/reload.rs= for hot reload.
+
+Estimated 8–10 commits.
+
+** Phase 11 — IDA call auctions (deferred, v0.6)
+- =sim/auctions.rs= — IDA1 / IDA2 / IDA3 cron points (=15:00 D-1=,
+  =22:00 D-1=, =10:00 D=); collect orders into the auction book in
+  the run-up; uniform-price call-auction matcher at gate close.
+- BLOCK order type (linked-periods, execute-at-common-ratio).
+- Smart blocks (linked, curtailable, profile) — deferred again.
+
+** Phase 12 — auth, hardening, perf
+- HMAC-SHA256 in metadata (=tonic::Interceptor=); =(set-auth-mode …)=
+  in lisp.
+- Pagination tokens become signed (HMAC) to prevent forgery on
+  long-lived list calls.
+- Bench: matching throughput at 10k LIMIT/s, single core.
+- Stress: a scenario that posts 1M cancels in a sim-minute.
+
+* Open design questions
+
+** Q1. Determinism vs wall-clock?
+Switchyard runs in wall-clock. For trading sims, users want both:
+  - fast, deterministic replays for tests / ML training;
+  - wall-clock or near-wall-clock for live demos against real bots.
+
+The plan above gives both via =(set-clock-mode 'sim-time)= +
+=(set-sim-time-multiplier X)=. Open question: do scheduled tulisp
+=(every …)= timers fire on sim-time or wall-time? Switchyard's
+tulisp-async runs against tokio's wall clock today. Option A: leave
+=(every …)= as wall-time, expose =(every-sim …)= for sim-time.
+Option B: rewrite tulisp-async timer source. A is cheap and the
+common case.
+
+** Q2. Iceberg slice price-step semantics?
+The proto comment for =peak_price_delta= says "price difference
+between the peak price and the limit price". The continuous-matching spec
+treats it as the increment applied per slice. v0.2 implements
+"each new slice is inserted at the next price level
+=limit ± peak_price_delta=", which matches a common reading; the
+intent is auditable in =matching.rs::insert_next_iceberg_slice=.
+Worth re-validating against an actual production trace before v0.2 ships.
+
+** Q3. Cross-zone coupling capacity granularity?
+Real SIDC capacity is per-direction, per-15-min, per-coupling. v0.3
+starts with a single =:capacity-mw= number; the next step is
+=(set-coupling-schedule …)= taking a CSV-driven schedule, mirroring
+the =csv-load= pattern.
+
+** Q4. Should counterparties own their lisp closures, or are they
+data?
+Switchyard's pre-tick mailbox drain calls user-provided closures.
+We can either (a) reuse exactly that mechanism for counterparties
+(closure per counterparty, called every N ms), or (b) have
+counterparties as data with a fixed Rust strategy chosen by symbol
+and read params from an alist. Plan: support both; canned
+strategies in =counterparties.lisp= are sugar over the raw closure
+form.
+
+** Q5. Where do the audit-grade order/trade logs live?
+For real-money trading sims, users want a replayable log of every
+order/trade with hash chaining. Out of scope for v0.1; planned for
+v0.7 as =(set-audit-log PATH)= writing JSONL with HMAC-chained
+records.
+
+* Initial Cargo.toml (target shape, lands in Phase 1)
+
+#+begin_src toml
+[package]
+name = "tradingsim"
+version = "0.1.0"
+edition = "2024"
+default-run = "tradingsim"
+
+[dependencies]
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream = "0.1"
+tulisp = { git = "https://github.com/shsms/tulisp", features = ["sync", "etags"] }
+tulisp-fmt = { git = "https://github.com/tulisp/tulisp-fmt" }
+tulisp-async = { git = "https://github.com/tulisp/tulisp-async" }
+notify = "6"
+futures = "0.3"
+log = "0.4"
+simplelog = "0.12"
+rand = { version = "0.8", features = ["small_rng"] }
+rust_decimal = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive"] }
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust-embed = "8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14", features = ["cleanup-markdown"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+proptest = "1"
+
+[lib]
+name = "tradingsim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tradingsim"
+path = "src/bin/tradingsim.rs"
+
+[[bin]]
+name = "tsctl"
+path = "src/bin/tsctl.rs"
+
+[[bin]]
+name = "tradingsim-etags"
+path = "src/bin/tradingsim-etags.rs"
+#+end_src
+
+* Initial build.rs (Phase 1 target)
+
+#+begin_src rust
+use std::path::PathBuf;
+
+fn main() -> Result<(), std::io::Error> {
+    let proto_root = std::env::var("TRADINGSIM_PROTO_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("submodules/frequenz-api-electricity-trading"));
+
+    let api_proto = proto_root
+        .join("proto/frequenz/api/electricity_trading/v1/electricity_trading.proto");
+    let common_proto_root = proto_root.join("submodules/frequenz-api-common/proto");
+
+    println!("cargo:rerun-if-env-changed=TRADINGSIM_PROTO_ROOT");
+    println!("cargo:rerun-if-changed={}", api_proto.display());
+
+    tonic_prost_build::configure()
+        .disable_comments(["."])
+        .include_file("proto_v1.rs")
+        .compile_well_known_types(false)
+        .compile_protos(
+            &[api_proto.as_path()],
+            &[proto_root.join("proto").as_path(), common_proto_root.as_path()],
+        )
+        .inspect_err(|e| eprintln!("Could not compile protobuf files. Error: {:?}", e))
+}
+#+end_src
+
+* References
+
+- [[https://github.com/frequenz-floss/frequenz-api-electricity-trading][frequenz-api-electricity-trading]] (proto under
+  =proto/frequenz/api/electricity_trading/v1/=).
+- [[https://www.entsoe.eu/network_codes/cacm/implementation/ida/][ENTSO-E — Intraday Auctions on SIDC]] (IDA1 / IDA2 / IDA3 timings).
+- [[https://www.example.invalid][Deutsche Börse — intraday trading system]].
+- [[file:../switchyard/CLAUDE.md][../switchyard/CLAUDE.md]] — the architectural model this project mirrors.
