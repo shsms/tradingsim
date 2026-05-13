@@ -6,10 +6,11 @@
 use std::collections::HashMap;
 
 use crate::sim::book::OrderBook;
+use crate::sim::gridpool::{Gridpool, GridpoolRegistry};
 use crate::sim::market::{Area, DeliveryPeriod, MarketRegistry};
 use crate::sim::matching::{LimitMatchOutcome, match_limit};
 use crate::sim::matching::IncomingLimit;
-use crate::sim::order::OrderId;
+use crate::sim::order::{GridpoolId, OrderId};
 
 /// (delivery area, delivery period) — the identity of a contract.
 /// Cheap to clone; the area code is short and the period is `Copy`.
@@ -21,7 +22,14 @@ pub struct ContractKey {
 
 pub struct World {
     markets: MarketRegistry,
+    gridpools: GridpoolRegistry,
     books: HashMap<ContractKey, OrderBook>,
+    /// Reverse index from a resting OrderId to the gridpool that owns
+    /// it. Populated when an order rests on the book; cleared on full
+    /// fill or cancel. The matcher returns `Fill { maker_id, .. }`
+    /// and the World needs this map to credit the maker's trade to
+    /// its gridpool.
+    order_to_gridpool: HashMap<OrderId, GridpoolId>,
     /// Monotonic source of `OrderId`s. Allocated at admit time, so a
     /// rejected order never burns an id.
     next_order_id: u64,
@@ -31,13 +39,45 @@ impl World {
     pub fn new(markets: MarketRegistry) -> Self {
         Self {
             markets,
+            gridpools: GridpoolRegistry::new(),
             books: HashMap::new(),
+            order_to_gridpool: HashMap::new(),
             next_order_id: 1,
         }
     }
 
     pub fn markets(&self) -> &MarketRegistry {
         &self.markets
+    }
+
+    pub fn gridpools(&self) -> &GridpoolRegistry {
+        &self.gridpools
+    }
+
+    pub fn gridpools_mut(&mut self) -> &mut GridpoolRegistry {
+        &mut self.gridpools
+    }
+
+    pub fn register_gridpool(&mut self, gp: Gridpool) {
+        self.gridpools.insert(gp);
+    }
+
+    /// Record that `order_id` is now resting on the book and belongs
+    /// to `gridpool_id`. Called by the admit path when a LIMIT
+    /// remainder lands on the book; the matcher uses the reverse
+    /// lookup to credit maker-side trades.
+    pub fn bind_resting_order(&mut self, order_id: OrderId, gridpool_id: GridpoolId) {
+        self.order_to_gridpool.insert(order_id, gridpool_id);
+    }
+
+    pub fn owner_of(&self, order_id: OrderId) -> Option<GridpoolId> {
+        self.order_to_gridpool.get(&order_id).copied()
+    }
+
+    /// Remove the resting-id binding (full fill or cancel). Returns
+    /// the previously-bound gridpool, if any.
+    pub fn unbind_resting_order(&mut self, order_id: OrderId) -> Option<GridpoolId> {
+        self.order_to_gridpool.remove(&order_id)
     }
 
     /// Mint the next monotonic id. Server-side admit path is the
@@ -117,6 +157,29 @@ mod tests {
         );
         assert!(w.book(&k).is_some());
         assert_eq!(w.book(&k).unwrap().best_bid(), Some(dec!(85.0)));
+    }
+
+    #[test]
+    fn register_and_lookup_gridpool() {
+        let mut w = World::new(MarketRegistry::new());
+        let area = Area::eic("10Y1001A1001A82H");
+        w.register_gridpool(Gridpool::new(
+            GridpoolId(1),
+            "battery-arb",
+            vec![area.clone()],
+        ));
+        assert_eq!(w.gridpools().len(), 1);
+        let gp = w.gridpools().get(GridpoolId(1)).unwrap();
+        assert!(gp.allows_area(&area));
+    }
+
+    #[test]
+    fn bind_and_unbind_resting_order() {
+        let mut w = World::new(MarketRegistry::new());
+        w.bind_resting_order(OrderId(7), GridpoolId(2));
+        assert_eq!(w.owner_of(OrderId(7)), Some(GridpoolId(2)));
+        assert_eq!(w.unbind_resting_order(OrderId(7)), Some(GridpoolId(2)));
+        assert_eq!(w.owner_of(OrderId(7)), None);
     }
 
     #[test]
