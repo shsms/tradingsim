@@ -5,12 +5,19 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+
 use crate::sim::book::OrderBook;
+use crate::sim::decimal::is_multiple_of;
 use crate::sim::gridpool::{Gridpool, GridpoolRegistry};
 use crate::sim::market::{Area, DeliveryPeriod, MarketRegistry};
-use crate::sim::matching::{LimitMatchOutcome, match_limit};
-use crate::sim::matching::IncomingLimit;
-use crate::sim::order::{GridpoolId, OrderId};
+use crate::sim::matching::{IncomingLimit, LimitMatchOutcome, match_limit};
+use crate::sim::order::{
+    ExecutionOption, GridpoolId, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType,
+    StateDetail, StateReason,
+};
+use crate::sim::trade::{Trade, TradeId, TradeState};
 
 /// (delivery area, delivery period) — the identity of a contract.
 /// Cheap to clone; the area code is short and the period is `Copy`.
@@ -33,6 +40,34 @@ pub struct World {
     /// Monotonic source of `OrderId`s. Allocated at admit time, so a
     /// rejected order never burns an id.
     next_order_id: u64,
+    /// Monotonic source of `TradeId`s. Each Fill from the matcher
+    /// produces one PublicTrade and two private Trades — all three
+    /// share this id (one trade event, two views).
+    next_trade_id: u64,
+}
+
+/// Why submit_order can reject. Maps onto the proto's
+/// `STATE_REASON_VALIDATION_FAIL` at the gRPC layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubmitError {
+    UnknownGridpool,
+    UnknownArea,
+    AreaNotAllowedForGridpool,
+    UnsupportedDurationForMarket,
+    UnalignedDeliveryPeriod,
+    PriceOffGrid,
+    NonPositivePrice,
+    QuantityOffGrid,
+    NonPositiveQuantity,
+    CurrencyMismatch,
+    /// Phase 4 only handles LIMIT; the others land in Phase 6+.
+    UnsupportedOrderType(OrderType),
+    /// Phase 4 ignores execution options; Phase 6 wires AON/FOK/IOC.
+    UnsupportedExecutionOption(ExecutionOption),
+    /// Cancel: id isn't on the gridpool at all.
+    OrderNotFound,
+    /// Cancel: id is on the gridpool but already in a terminal state.
+    OrderAlreadyTerminal,
 }
 
 impl World {
@@ -43,6 +78,7 @@ impl World {
             books: HashMap::new(),
             order_to_gridpool: HashMap::new(),
             next_order_id: 1,
+            next_trade_id: 1,
         }
     }
 
@@ -114,12 +150,237 @@ impl World {
     pub fn contracts(&self) -> impl Iterator<Item = &ContractKey> {
         self.books.keys()
     }
+
+    fn next_trade_id(&mut self) -> TradeId {
+        let id = TradeId(self.next_trade_id);
+        self.next_trade_id += 1;
+        id
+    }
+
+    /// Validate-and-admit pipeline. Mirrors the gRPC layer's
+    /// CreateGridpoolOrder: rejects with SubmitError for any
+    /// pre-trade violation; otherwise mints an id, runs the matcher,
+    /// records the resulting trades + state on both sides, and
+    /// returns the taker's OrderDetail.
+    pub fn submit_order(
+        &mut self,
+        gridpool_id: GridpoolId,
+        order: Order,
+        now: DateTime<Utc>,
+    ) -> Result<OrderDetail, SubmitError> {
+        // 1. Gridpool exists and accepts the area.
+        let gp = self
+            .gridpools
+            .get(gridpool_id)
+            .ok_or(SubmitError::UnknownGridpool)?;
+        if !gp.allows_area(&order.area) {
+            return Err(SubmitError::AreaNotAllowedForGridpool);
+        }
+
+        // 2. Market exists for the area.
+        let rules = self
+            .markets
+            .get(&order.area)
+            .ok_or(SubmitError::UnknownArea)?;
+
+        // 3. Type / execution-option gating (Phase 4 = LIMIT only).
+        if order.order_type != OrderType::Limit {
+            return Err(SubmitError::UnsupportedOrderType(order.order_type));
+        }
+        if let Some(e) = order.execution_option {
+            return Err(SubmitError::UnsupportedExecutionOption(e));
+        }
+
+        // 4. Currency / duration / alignment / grid checks.
+        if order.currency != rules.currency {
+            return Err(SubmitError::CurrencyMismatch);
+        }
+        if !rules.allows(order.period.duration) {
+            return Err(SubmitError::UnsupportedDurationForMarket);
+        }
+        if !order.period.is_aligned() {
+            return Err(SubmitError::UnalignedDeliveryPeriod);
+        }
+        if order.price <= Decimal::ZERO {
+            return Err(SubmitError::NonPositivePrice);
+        }
+        if !is_multiple_of(order.price, rules.price_tick) {
+            return Err(SubmitError::PriceOffGrid);
+        }
+        if order.quantity <= Decimal::ZERO {
+            return Err(SubmitError::NonPositiveQuantity);
+        }
+        if !is_multiple_of(order.quantity, rules.qty_step) {
+            return Err(SubmitError::QuantityOffGrid);
+        }
+
+        // 5. Admit. Mint id; build the contract key.
+        let taker_id = self.next_id();
+        let key = ContractKey {
+            area: order.area.clone(),
+            period: order.period,
+        };
+        let taker_side = order.side;
+        let taker_price = order.price;
+        let taker_currency = order.currency;
+        let total_qty = order.quantity;
+
+        // 6. Match.
+        let outcome = self.match_limit_in(
+            key,
+            IncomingLimit {
+                id: taker_id,
+                side: taker_side,
+                price: taker_price,
+                quantity: total_qty,
+            },
+        );
+
+        // 7. Record trades on both sides + update maker order state.
+        for fill in &outcome.fills {
+            let trade_id = self.next_trade_id();
+            let maker_id = fill.maker_id;
+            // Taker-side trade for *this* gridpool.
+            self.gridpools
+                .get_mut(gridpool_id)
+                .expect("gridpool existed at start of submit")
+                .record_trade(Trade {
+                    id: trade_id,
+                    order_id: taker_id,
+                    side: taker_side,
+                    area: order.area.clone(),
+                    period: order.period,
+                    execution_time: now,
+                    price: fill.price,
+                    currency: taker_currency,
+                    quantity: fill.quantity,
+                    state: TradeState::Active,
+                });
+            // Maker-side trade + open_qty decrement on the maker's gridpool.
+            let maker_gridpool = self
+                .owner_of(maker_id)
+                .expect("resting order had no gridpool binding");
+            let gp = self
+                .gridpools
+                .get_mut(maker_gridpool)
+                .expect("bound gridpool exists");
+            gp.record_trade(Trade {
+                id: trade_id,
+                order_id: maker_id,
+                side: taker_side.opposite(),
+                area: order.area.clone(),
+                period: order.period,
+                execution_time: now,
+                price: fill.price,
+                currency: taker_currency,
+                quantity: fill.quantity,
+                state: TradeState::Active,
+            });
+            let mut maker_fully_filled = false;
+            gp.update_order(maker_id, |d| {
+                d.filled_quantity += fill.quantity;
+                d.open_quantity -= fill.quantity;
+                d.modification_time = now;
+                d.state.actor = MarketActor::System;
+                if d.open_quantity.is_zero() {
+                    d.state.state = OrderState::Filled;
+                    d.state.reason = StateReason::FullExecution;
+                    maker_fully_filled = true;
+                } else {
+                    d.state.reason = StateReason::PartialExecution;
+                }
+            });
+            // Drop the gridpool binding once the maker is off the book.
+            // For LIMIT-only the matcher already popped it from the book;
+            // we just clear the reverse index here.
+            if maker_fully_filled {
+                self.unbind_resting_order(maker_id);
+            }
+        }
+
+        // 8. Build the taker's OrderDetail.
+        let filled: Decimal = outcome.fills.iter().map(|f| f.quantity).sum();
+        let open = total_qty - filled;
+        let (state, reason) = match outcome.rested {
+            Some(_) if filled.is_zero() => (OrderState::Active, StateReason::Add),
+            Some(_) => (OrderState::Active, StateReason::PartialExecution),
+            None => (OrderState::Filled, StateReason::FullExecution),
+        };
+        let detail = OrderDetail {
+            id: taker_id,
+            order,
+            state: StateDetail {
+                state,
+                reason,
+                actor: MarketActor::User,
+            },
+            open_quantity: open,
+            filled_quantity: filled,
+            create_time: now,
+            modification_time: now,
+        };
+
+        // 9. Record on taker's gridpool; bind if it rests.
+        self.gridpools
+            .get_mut(gridpool_id)
+            .expect("gridpool still exists")
+            .record_order(detail.clone());
+        if outcome.rested.is_some() {
+            self.bind_resting_order(taker_id, gridpool_id);
+        }
+
+        Ok(detail)
+    }
+
+    /// Cancel a non-terminal order. Returns the cancelled detail
+    /// (state CANCELED + Delete reason). Errors:
+    /// `UnknownGridpool`, `OrderNotFound`, `OrderAlreadyTerminal`.
+    pub fn cancel_order(
+        &mut self,
+        gridpool_id: GridpoolId,
+        order_id: OrderId,
+        now: DateTime<Utc>,
+    ) -> Result<OrderDetail, SubmitError> {
+        if self.gridpools.get(gridpool_id).is_none() {
+            return Err(SubmitError::UnknownGridpool);
+        }
+        let current_state = self
+            .gridpools
+            .get(gridpool_id)
+            .and_then(|g| g.get_order(order_id))
+            .map(|d| d.state.state);
+        match current_state {
+            None => return Err(SubmitError::OrderNotFound),
+            Some(s) if s.is_terminal() => return Err(SubmitError::OrderAlreadyTerminal),
+            Some(_) => {}
+        }
+        // Remove from the book if still resting. For LIMIT-only we
+        // can scan books by id since the resting set is small and
+        // there's no Phase-4 contract index yet.
+        if self.owner_of(order_id) == Some(gridpool_id) {
+            self.unbind_resting_order(order_id);
+            for book in self.books.values_mut() {
+                if book.contains(order_id) {
+                    book.cancel(order_id);
+                    break;
+                }
+            }
+        }
+        let gp = self.gridpools.get_mut(gridpool_id).unwrap();
+        gp.update_order(order_id, |d| {
+            d.state.state = OrderState::Canceled;
+            d.state.reason = StateReason::Delete;
+            d.state.actor = MarketActor::User;
+            d.modification_time = now;
+        });
+        Ok(gp.get_order(order_id).cloned().unwrap())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::market::{DeliveryDuration, MarketRules};
+    use crate::sim::market::{Currency, DeliveryDuration, MarketRules};
     use crate::sim::order::Side;
     use chrono::{TimeZone, Utc};
     use rust_decimal::dec;
@@ -180,6 +441,200 @@ mod tests {
         assert_eq!(w.owner_of(OrderId(7)), Some(GridpoolId(2)));
         assert_eq!(w.unbind_resting_order(OrderId(7)), Some(GridpoolId(2)));
         assert_eq!(w.owner_of(OrderId(7)), None);
+    }
+
+    fn setup_world_with_pool() -> (World, GridpoolId) {
+        let mut markets = MarketRegistry::new();
+        markets.insert(MarketRules::de_lu());
+        let mut w = World::new(markets);
+        let area = Area::eic("10Y1001A1001A82H");
+        w.register_gridpool(Gridpool::new(GridpoolId(1), "test", vec![area]));
+        (w, GridpoolId(1))
+    }
+
+    fn sample_buy(qty: Decimal, price: Decimal) -> Order {
+        Order {
+            area: Area::eic("10Y1001A1001A82H"),
+            period: DeliveryPeriod {
+                start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+                duration: DeliveryDuration::Hour,
+            },
+            order_type: OrderType::Limit,
+            side: Side::Buy,
+            price,
+            currency: Currency::Eur,
+            quantity: qty,
+            stop_price: None,
+            peak_price_delta: None,
+            display_quantity: None,
+            execution_option: None,
+            valid_until: None,
+            payload: None,
+            tag: None,
+        }
+    }
+
+    fn sample_sell(qty: Decimal, price: Decimal) -> Order {
+        Order {
+            side: Side::Sell,
+            ..sample_buy(qty, price)
+        }
+    }
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn submit_admits_resting_order() {
+        let (mut w, gp) = setup_world_with_pool();
+        let d = w.submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0()).unwrap();
+        assert_eq!(d.state.state, OrderState::Active);
+        assert_eq!(d.state.reason, StateReason::Add);
+        assert_eq!(d.open_quantity, dec!(1.0));
+        assert_eq!(d.filled_quantity, dec!(0));
+        assert_eq!(w.owner_of(d.id), Some(gp));
+        assert_eq!(w.book(&de_lu_hour()).unwrap().best_bid(), Some(dec!(85.0)));
+    }
+
+    #[test]
+    fn submit_cross_match_fills_both_sides() {
+        let (mut w, gp) = setup_world_with_pool();
+        let buy = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let sell = w
+            .submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+
+        // Taker (sell) fully filled.
+        assert_eq!(sell.state.state, OrderState::Filled);
+        assert_eq!(sell.filled_quantity, dec!(1.0));
+        assert_eq!(sell.open_quantity, dec!(0));
+
+        // Maker (buy) updated in-place to Filled.
+        let buy_after = w.gridpools().get(gp).unwrap().get_order(buy.id).unwrap();
+        assert_eq!(buy_after.state.state, OrderState::Filled);
+        assert_eq!(buy_after.state.reason, StateReason::FullExecution);
+        assert_eq!(buy_after.filled_quantity, dec!(1.0));
+
+        // Two private trades (one per side); shared trade id.
+        let trades = w.gridpools().get(gp).unwrap().trades();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].id, trades[1].id);
+
+        // Book empty + binding cleared.
+        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+        assert!(w.owner_of(buy.id).is_none());
+    }
+
+    #[test]
+    fn submit_partial_cross_leaves_taker_active() {
+        let (mut w, gp) = setup_world_with_pool();
+        w.submit_order(gp, sample_sell(dec!(0.5), dec!(85.0)), t0()).unwrap();
+        let buy = w
+            .submit_order(gp, sample_buy(dec!(2.0), dec!(85.0)), t0())
+            .unwrap();
+        assert_eq!(buy.state.state, OrderState::Active);
+        assert_eq!(buy.state.reason, StateReason::PartialExecution);
+        assert_eq!(buy.filled_quantity, dec!(0.5));
+        assert_eq!(buy.open_quantity, dec!(1.5));
+        assert_eq!(w.owner_of(buy.id), Some(gp));
+    }
+
+    #[test]
+    fn submit_validation_errors() {
+        let (mut w, gp) = setup_world_with_pool();
+
+        let cases: Vec<(Order, SubmitError)> = vec![
+            (
+                Order {
+                    area: Area::eic("XXXX"),
+                    ..sample_buy(dec!(1.0), dec!(85.0))
+                },
+                SubmitError::AreaNotAllowedForGridpool,
+            ),
+            (sample_buy(dec!(1.0), dec!(85.005)), SubmitError::PriceOffGrid),
+            (sample_buy(dec!(1.05), dec!(85.0)), SubmitError::QuantityOffGrid),
+            (sample_buy(dec!(0), dec!(85.0)), SubmitError::NonPositiveQuantity),
+            (
+                Order {
+                    currency: Currency::Usd,
+                    ..sample_buy(dec!(1.0), dec!(85.0))
+                },
+                SubmitError::CurrencyMismatch,
+            ),
+            (
+                Order {
+                    period: DeliveryPeriod {
+                        start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 15, 0).unwrap(),
+                        duration: DeliveryDuration::Hour,
+                    },
+                    ..sample_buy(dec!(1.0), dec!(85.0))
+                },
+                SubmitError::UnalignedDeliveryPeriod,
+            ),
+            (
+                Order {
+                    order_type: OrderType::Iceberg,
+                    ..sample_buy(dec!(1.0), dec!(85.0))
+                },
+                SubmitError::UnsupportedOrderType(OrderType::Iceberg),
+            ),
+            (
+                Order {
+                    execution_option: Some(ExecutionOption::Fok),
+                    ..sample_buy(dec!(1.0), dec!(85.0))
+                },
+                SubmitError::UnsupportedExecutionOption(ExecutionOption::Fok),
+            ),
+        ];
+        for (order, want) in cases {
+            let err = w.submit_order(gp, order, t0()).unwrap_err();
+            assert_eq!(err, want);
+        }
+
+        let err = w
+            .submit_order(GridpoolId(99), sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap_err();
+        assert_eq!(err, SubmitError::UnknownGridpool);
+    }
+
+    #[test]
+    fn cancel_active_order_removes_from_book() {
+        let (mut w, gp) = setup_world_with_pool();
+        let d = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let cancelled = w.cancel_order(gp, d.id, t0()).unwrap();
+        assert_eq!(cancelled.state.state, OrderState::Canceled);
+        assert_eq!(cancelled.state.reason, StateReason::Delete);
+        assert!(w.owner_of(d.id).is_none());
+        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancel_errors() {
+        let (mut w, gp) = setup_world_with_pool();
+        let d = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+
+        assert_eq!(
+            w.cancel_order(GridpoolId(99), d.id, t0()).unwrap_err(),
+            SubmitError::UnknownGridpool
+        );
+        assert_eq!(
+            w.cancel_order(gp, OrderId(9999), t0()).unwrap_err(),
+            SubmitError::OrderNotFound
+        );
+
+        // First cancel succeeds; second errors out as already-terminal.
+        w.cancel_order(gp, d.id, t0()).unwrap();
+        assert_eq!(
+            w.cancel_order(gp, d.id, t0()).unwrap_err(),
+            SubmitError::OrderAlreadyTerminal
+        );
     }
 
     #[test]
