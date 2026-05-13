@@ -15,7 +15,13 @@ use std::str::FromStr;
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 
-use crate::proto::common::types as proto_types;
+use crate::proto::common::{grid as proto_grid, market as proto_market, types as proto_types};
+use crate::proto::trading as proto_trading;
+use crate::sim::market::{Currency, CodeType, DeliveryDuration};
+use crate::sim::order::{
+    ExecutionOption, MarketActor, OrderState, OrderType, Side, StateReason,
+};
+use crate::sim::trade::TradeState;
 
 /// Errors that can occur converting from the wire into sim types.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +84,343 @@ pub fn timestamp_to_proto(dt: DateTime<Utc>) -> prost_types::Timestamp {
     }
 }
 
+/// Helper for the struct-conversion layer: take the raw i32 the proto
+/// stores for an enum field, lift it to the typed proto enum, then
+/// translate to the sim enum. The two failure modes both surface as
+/// `ConvError::UnknownEnum`.
+pub fn sim_enum_from_i32<P, S>(value: i32, field: &'static str) -> Result<S, ConvError>
+where
+    P: TryFrom<i32>,
+    S: TryFrom<P, Error = ConvError>,
+{
+    let proto = P::try_from(value).map_err(|_| ConvError::UnknownEnum { field, value })?;
+    S::try_from(proto)
+}
+
+// ---------------------------------------------------------------------------
+// Enum bridges. Pattern for each pair:
+//   - From<sim_enum> for proto_enum     — lossless, doesn't yield Unspecified
+//   - TryFrom<proto_enum> for sim_enum  — Unspecified / unknown -> ConvError
+// ---------------------------------------------------------------------------
+
+impl From<Side> for proto_trading::MarketSide {
+    fn from(s: Side) -> Self {
+        match s {
+            Side::Buy => Self::Buy,
+            Side::Sell => Self::Sell,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::MarketSide> for Side {
+    type Error = ConvError;
+
+    fn try_from(p: proto_trading::MarketSide) -> Result<Self, Self::Error> {
+        match p {
+            proto_trading::MarketSide::Buy => Ok(Self::Buy),
+            proto_trading::MarketSide::Sell => Ok(Self::Sell),
+            proto_trading::MarketSide::Unspecified => Err(ConvError::UnknownEnum {
+                field: "MarketSide",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<OrderType> for proto_trading::OrderType {
+    fn from(t: OrderType) -> Self {
+        match t {
+            OrderType::Limit => Self::Limit,
+            OrderType::StopLimit => Self::StopLimit,
+            OrderType::Iceberg => Self::Iceberg,
+            OrderType::Block => Self::Block,
+            OrderType::Balance => Self::Balance,
+            OrderType::Prearranged => Self::Prearranged,
+            OrderType::Private => Self::Private,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::OrderType> for OrderType {
+    type Error = ConvError;
+
+    fn try_from(p: proto_trading::OrderType) -> Result<Self, Self::Error> {
+        match p {
+            proto_trading::OrderType::Limit => Ok(Self::Limit),
+            proto_trading::OrderType::StopLimit => Ok(Self::StopLimit),
+            proto_trading::OrderType::Iceberg => Ok(Self::Iceberg),
+            proto_trading::OrderType::Block => Ok(Self::Block),
+            proto_trading::OrderType::Balance => Ok(Self::Balance),
+            proto_trading::OrderType::Prearranged => Ok(Self::Prearranged),
+            proto_trading::OrderType::Private => Ok(Self::Private),
+            proto_trading::OrderType::Unspecified => Err(ConvError::UnknownEnum {
+                field: "OrderType",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<ExecutionOption> for proto_trading::OrderExecutionOption {
+    fn from(e: ExecutionOption) -> Self {
+        match e {
+            ExecutionOption::Aon => Self::Aon,
+            ExecutionOption::Fok => Self::Fok,
+            ExecutionOption::Ioc => Self::Ioc,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::OrderExecutionOption> for ExecutionOption {
+    type Error = ConvError;
+
+    fn try_from(p: proto_trading::OrderExecutionOption) -> Result<Self, Self::Error> {
+        match p {
+            proto_trading::OrderExecutionOption::Aon => Ok(Self::Aon),
+            proto_trading::OrderExecutionOption::Fok => Ok(Self::Fok),
+            proto_trading::OrderExecutionOption::Ioc => Ok(Self::Ioc),
+            proto_trading::OrderExecutionOption::Unspecified => Err(ConvError::UnknownEnum {
+                field: "OrderExecutionOption",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<OrderState> for proto_trading::OrderState {
+    fn from(s: OrderState) -> Self {
+        match s {
+            OrderState::Pending => Self::Pending,
+            OrderState::Active => Self::Active,
+            OrderState::Filled => Self::Filled,
+            OrderState::Canceled => Self::Canceled,
+            OrderState::Expired => Self::Expired,
+            OrderState::Failed => Self::Failed,
+            OrderState::Hibernate => Self::Hibernate,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::OrderState> for OrderState {
+    type Error = ConvError;
+
+    fn try_from(p: proto_trading::OrderState) -> Result<Self, Self::Error> {
+        match p {
+            proto_trading::OrderState::Pending => Ok(Self::Pending),
+            proto_trading::OrderState::Active => Ok(Self::Active),
+            proto_trading::OrderState::Filled => Ok(Self::Filled),
+            proto_trading::OrderState::Canceled => Ok(Self::Canceled),
+            proto_trading::OrderState::Expired => Ok(Self::Expired),
+            proto_trading::OrderState::Failed => Ok(Self::Failed),
+            proto_trading::OrderState::Hibernate => Ok(Self::Hibernate),
+            proto_trading::OrderState::Unspecified => Err(ConvError::UnknownEnum {
+                field: "OrderState",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<StateReason> for proto_trading::order_detail::state_detail::StateReason {
+    fn from(r: StateReason) -> Self {
+        use proto_trading::order_detail::state_detail::StateReason as P;
+        match r {
+            StateReason::Add => P::Add,
+            StateReason::Modify => P::Modify,
+            StateReason::Delete => P::Delete,
+            StateReason::Deactivate => P::Deactivate,
+            StateReason::Reject => P::Reject,
+            StateReason::FullExecution => P::FullExecution,
+            StateReason::PartialExecution => P::PartialExecution,
+            StateReason::IcebergSliceAdd => P::IcebergSliceAdd,
+            StateReason::ValidationFail => P::ValidationFail,
+            StateReason::UnknownState => P::UnknownState,
+            StateReason::QuoteAdd => P::QuoteAdd,
+            StateReason::QuoteFullExecution => P::QuoteFullExecution,
+            StateReason::QuotePartialExecution => P::QuotePartialExecution,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::order_detail::state_detail::StateReason> for StateReason {
+    type Error = ConvError;
+
+    fn try_from(
+        p: proto_trading::order_detail::state_detail::StateReason,
+    ) -> Result<Self, Self::Error> {
+        use proto_trading::order_detail::state_detail::StateReason as P;
+        match p {
+            P::Add => Ok(Self::Add),
+            P::Modify => Ok(Self::Modify),
+            P::Delete => Ok(Self::Delete),
+            P::Deactivate => Ok(Self::Deactivate),
+            P::Reject => Ok(Self::Reject),
+            P::FullExecution => Ok(Self::FullExecution),
+            P::PartialExecution => Ok(Self::PartialExecution),
+            P::IcebergSliceAdd => Ok(Self::IcebergSliceAdd),
+            P::ValidationFail => Ok(Self::ValidationFail),
+            P::UnknownState => Ok(Self::UnknownState),
+            P::QuoteAdd => Ok(Self::QuoteAdd),
+            P::QuoteFullExecution => Ok(Self::QuoteFullExecution),
+            P::QuotePartialExecution => Ok(Self::QuotePartialExecution),
+            P::Unspecified => Err(ConvError::UnknownEnum {
+                field: "StateReason",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<MarketActor> for proto_trading::order_detail::state_detail::MarketActor {
+    fn from(a: MarketActor) -> Self {
+        use proto_trading::order_detail::state_detail::MarketActor as P;
+        match a {
+            MarketActor::User => P::User,
+            MarketActor::MarketOperator => P::MarketOperator,
+            MarketActor::System => P::System,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::order_detail::state_detail::MarketActor> for MarketActor {
+    type Error = ConvError;
+
+    fn try_from(
+        p: proto_trading::order_detail::state_detail::MarketActor,
+    ) -> Result<Self, Self::Error> {
+        use proto_trading::order_detail::state_detail::MarketActor as P;
+        match p {
+            P::User => Ok(Self::User),
+            P::MarketOperator => Ok(Self::MarketOperator),
+            P::System => Ok(Self::System),
+            P::Unspecified => Err(ConvError::UnknownEnum {
+                field: "MarketActor",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<TradeState> for proto_trading::TradeState {
+    fn from(s: TradeState) -> Self {
+        match s {
+            TradeState::Active => Self::Active,
+            TradeState::CancelRequested => Self::CancelRequested,
+            TradeState::CancelRejected => Self::CancelRejected,
+            TradeState::Canceled => Self::Canceled,
+            TradeState::Recalled => Self::Recalled,
+            TradeState::RecallRequested => Self::RecallRequested,
+            TradeState::RecallRejected => Self::RecallRejected,
+            TradeState::ApprovalRequested => Self::ApprovalRequested,
+        }
+    }
+}
+
+impl TryFrom<proto_trading::TradeState> for TradeState {
+    type Error = ConvError;
+
+    fn try_from(p: proto_trading::TradeState) -> Result<Self, Self::Error> {
+        match p {
+            proto_trading::TradeState::Active => Ok(Self::Active),
+            proto_trading::TradeState::CancelRequested => Ok(Self::CancelRequested),
+            proto_trading::TradeState::CancelRejected => Ok(Self::CancelRejected),
+            proto_trading::TradeState::Canceled => Ok(Self::Canceled),
+            proto_trading::TradeState::Recalled => Ok(Self::Recalled),
+            proto_trading::TradeState::RecallRequested => Ok(Self::RecallRequested),
+            proto_trading::TradeState::RecallRejected => Ok(Self::RecallRejected),
+            proto_trading::TradeState::ApprovalRequested => Ok(Self::ApprovalRequested),
+            proto_trading::TradeState::Unspecified => Err(ConvError::UnknownEnum {
+                field: "TradeState",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<Currency> for proto_market::price::Currency {
+    fn from(c: Currency) -> Self {
+        match c {
+            Currency::Eur => Self::Eur,
+            Currency::Usd => Self::Usd,
+            Currency::Gbp => Self::Gbp,
+            Currency::Chf => Self::Chf,
+        }
+    }
+}
+
+impl TryFrom<proto_market::price::Currency> for Currency {
+    type Error = ConvError;
+
+    fn try_from(p: proto_market::price::Currency) -> Result<Self, Self::Error> {
+        match p {
+            proto_market::price::Currency::Eur => Ok(Self::Eur),
+            proto_market::price::Currency::Usd => Ok(Self::Usd),
+            proto_market::price::Currency::Gbp => Ok(Self::Gbp),
+            proto_market::price::Currency::Chf => Ok(Self::Chf),
+            // CAD/CNY/JPY/AUD/NZD/SGD are valid proto values but the
+            // sim doesn't model them yet; treat as unknown so the
+            // server returns InvalidArgument rather than silently
+            // mismapping.
+            other => Err(ConvError::UnknownEnum {
+                field: "Currency",
+                value: other as i32,
+            }),
+        }
+    }
+}
+
+impl From<CodeType> for proto_grid::EnergyMarketCodeType {
+    fn from(c: CodeType) -> Self {
+        match c {
+            CodeType::EuropeEic => Self::EuropeEic,
+            CodeType::UsNerc => Self::UsNerc,
+        }
+    }
+}
+
+impl TryFrom<proto_grid::EnergyMarketCodeType> for CodeType {
+    type Error = ConvError;
+
+    fn try_from(p: proto_grid::EnergyMarketCodeType) -> Result<Self, Self::Error> {
+        match p {
+            proto_grid::EnergyMarketCodeType::EuropeEic => Ok(Self::EuropeEic),
+            proto_grid::EnergyMarketCodeType::UsNerc => Ok(Self::UsNerc),
+            proto_grid::EnergyMarketCodeType::Unspecified => Err(ConvError::UnknownEnum {
+                field: "EnergyMarketCodeType",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
+impl From<DeliveryDuration> for proto_grid::DeliveryDuration {
+    fn from(d: DeliveryDuration) -> Self {
+        match d {
+            DeliveryDuration::FiveMin => Self::DeliveryDuration5,
+            DeliveryDuration::QuarterHour => Self::DeliveryDuration15,
+            DeliveryDuration::HalfHour => Self::DeliveryDuration30,
+            DeliveryDuration::Hour => Self::DeliveryDuration60,
+        }
+    }
+}
+
+impl TryFrom<proto_grid::DeliveryDuration> for DeliveryDuration {
+    type Error = ConvError;
+
+    fn try_from(p: proto_grid::DeliveryDuration) -> Result<Self, Self::Error> {
+        match p {
+            proto_grid::DeliveryDuration::DeliveryDuration5 => Ok(Self::FiveMin),
+            proto_grid::DeliveryDuration::DeliveryDuration15 => Ok(Self::QuarterHour),
+            proto_grid::DeliveryDuration::DeliveryDuration30 => Ok(Self::HalfHour),
+            proto_grid::DeliveryDuration::DeliveryDuration60 => Ok(Self::Hour),
+            proto_grid::DeliveryDuration::Unspecified => Err(ConvError::UnknownEnum {
+                field: "DeliveryDuration",
+                value: p as i32,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +466,91 @@ mod tests {
         assert_eq!(proto.nanos, 789);
         let back = timestamp_from_proto(&proto).unwrap();
         assert_eq!(back, dt);
+    }
+
+    #[test]
+    fn enum_round_trips_via_i32_helper() {
+        // Every sim variant -> proto enum -> i32 -> back through the
+        // i32 helper yields the same sim variant. Catches dropped
+        // arms in any of the impls above.
+        fn check<S, P>(s: S, field: &'static str)
+        where
+            S: Copy + PartialEq + std::fmt::Debug + Into<P> + TryFrom<P, Error = ConvError>,
+            P: Into<i32> + TryFrom<i32> + Copy,
+        {
+            let p: P = s.into();
+            let back: S = sim_enum_from_i32::<P, S>(p.into(), field).unwrap();
+            assert_eq!(back, s);
+        }
+
+        check::<Side, proto_trading::MarketSide>(Side::Buy, "MarketSide");
+        check::<Side, proto_trading::MarketSide>(Side::Sell, "MarketSide");
+        for t in [
+            OrderType::Limit,
+            OrderType::StopLimit,
+            OrderType::Iceberg,
+            OrderType::Block,
+            OrderType::Balance,
+            OrderType::Prearranged,
+            OrderType::Private,
+        ] {
+            check::<OrderType, proto_trading::OrderType>(t, "OrderType");
+        }
+        for e in [ExecutionOption::Aon, ExecutionOption::Fok, ExecutionOption::Ioc] {
+            check::<ExecutionOption, proto_trading::OrderExecutionOption>(e, "OrderExecutionOption");
+        }
+        for s in [
+            OrderState::Pending,
+            OrderState::Active,
+            OrderState::Filled,
+            OrderState::Canceled,
+            OrderState::Expired,
+            OrderState::Failed,
+            OrderState::Hibernate,
+        ] {
+            check::<OrderState, proto_trading::OrderState>(s, "OrderState");
+        }
+        for t in [
+            TradeState::Active,
+            TradeState::CancelRequested,
+            TradeState::CancelRejected,
+            TradeState::Canceled,
+            TradeState::Recalled,
+            TradeState::RecallRequested,
+            TradeState::RecallRejected,
+            TradeState::ApprovalRequested,
+        ] {
+            check::<TradeState, proto_trading::TradeState>(t, "TradeState");
+        }
+        for c in [Currency::Eur, Currency::Usd, Currency::Gbp, Currency::Chf] {
+            check::<Currency, proto_market::price::Currency>(c, "Currency");
+        }
+        for c in [CodeType::EuropeEic, CodeType::UsNerc] {
+            check::<CodeType, proto_grid::EnergyMarketCodeType>(c, "EnergyMarketCodeType");
+        }
+        for d in [
+            DeliveryDuration::FiveMin,
+            DeliveryDuration::QuarterHour,
+            DeliveryDuration::HalfHour,
+            DeliveryDuration::Hour,
+        ] {
+            check::<DeliveryDuration, proto_grid::DeliveryDuration>(d, "DeliveryDuration");
+        }
+    }
+
+    #[test]
+    fn unspecified_proto_enum_errors() {
+        let err = Side::try_from(proto_trading::MarketSide::Unspecified).unwrap_err();
+        assert!(matches!(err, ConvError::UnknownEnum { field: "MarketSide", .. }));
+        let err = OrderState::try_from(proto_trading::OrderState::Unspecified).unwrap_err();
+        assert!(matches!(err, ConvError::UnknownEnum { field: "OrderState", .. }));
+    }
+
+    #[test]
+    fn unmodelled_currency_errors() {
+        // CAD is in the proto but not in the sim's Currency.
+        let err = Currency::try_from(proto_market::price::Currency::Cad).unwrap_err();
+        assert!(matches!(err, ConvError::UnknownEnum { field: "Currency", .. }));
     }
 
     #[test]
