@@ -708,7 +708,7 @@ remove → cleanup as separate commits. Phases below are
   =frequenz-api-common= as a nested submodule).
 - [X] Write =plan.org= (this file).
 
-** Phase 1 — proto + skeleton
+** [X] Phase 1 — proto + skeleton
 - =Cargo.toml=: same deps as switchyard, minus microgrid-specific
   ones (no =rand=… actually keep rand for jittery counterparties).
   Tonic 0.14, tulisp/tulisp-async/tulisp-fmt, axum 0.8 (ws), clap 4,
@@ -731,7 +731,7 @@ remove → cleanup as separate commits. Phases below are
 
 Estimated 4–6 commits.
 
-** Phase 2 — Decimal / Price / Power / Period plumbing
+** [X] Phase 2 — Decimal / Price / Power / Period plumbing
 - =sim/decimal.rs=: newtype around =rust_decimal::Decimal= with
   tick-snapping helpers.
 - =sim/market.rs=: =Area=, =MarketRules { tick, qty_step, currency,

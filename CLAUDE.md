@@ -19,16 +19,24 @@ build; use this file to figure out how to work in the repo.
 
 ## Layout
 
-This is early — most of plan.org is unbuilt. Current shape:
+Phases 0–2 landed; matcher/world/server still to come. Current
+shape:
 
 - `src/lib.rs` — module roots
 - `src/proto.rs` — tonic include of the generated proto; re-exports
   `proto::common` = `frequenz.api.common.v1alpha8` and
   `proto::trading` = `frequenz.api.electricity_trading.electricity_trading.v1`
+- `src/proto_conv.rs` — the only file that knows both halves; scalar
+  / enum / struct bridges with `ConvError` for fallible directions
 - `src/sim/decimal.rs` — `snap_to_tick`, `is_multiple_of`, default
   tick / step constants
-- `src/sim/market.rs` — `Area`, `Currency`, `DeliveryDuration`,
-  `DeliveryPeriod`, `MarketRules`, `MarketRegistry`
+- `src/sim/market.rs` — `Area`, `Currency`, `CodeType`,
+  `DeliveryDuration`, `DeliveryPeriod`, `MarketRules`,
+  `MarketRegistry`
+- `src/sim/order.rs` — `Order`, `OrderDetail`, `StateDetail`, and the
+  state-machine enums (`Side`, `OrderType`, `ExecutionOption`,
+  `OrderState`, `StateReason`, `MarketActor`)
+- `src/sim/trade.rs` — `Trade`, `PublicTrade`, `TradeState`
 - `src/bin/tradingsim.rs` — stub server entry (logs and exits)
 - `src/bin/tsctl.rs` — stub client (clap scaffolding)
 
