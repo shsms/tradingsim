@@ -745,7 +745,7 @@ Estimated 4–6 commits.
 
 Estimated 5–7 commits.
 
-** Phase 3 — book + matching
+** [X] Phase 3 — book + matching
 - =sim/book.rs=: =OrderBook= per contract; price-keyed BTreeMap of
   FIFO queues per side; admit/cancel/modify.
 - =sim/matching.rs=: continuous matcher. LIMIT only this phase.

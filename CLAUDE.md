@@ -19,8 +19,7 @@ build; use this file to figure out how to work in the repo.
 
 ## Layout
 
-Phases 0–2 landed; matcher/world/server still to come. Current
-shape:
+Phases 0–3 landed; gridpools + server still to come. Current shape:
 
 - `src/lib.rs` — module roots
 - `src/proto.rs` — tonic include of the generated proto; re-exports
@@ -37,6 +36,13 @@ shape:
   state-machine enums (`Side`, `OrderType`, `ExecutionOption`,
   `OrderState`, `StateReason`, `MarketActor`)
 - `src/sim/trade.rs` — `Trade`, `PublicTrade`, `TradeState`
+- `src/sim/book.rs` — `OrderBook` (BTreeMap<Decimal, VecDeque<Resting>>
+  per side; `consume_front`, `peek_opposite`, `cancel`,
+  `total_open_qty`)
+- `src/sim/matching.rs` — `match_limit` continuous matcher
+  (LIMIT-only; price-time priority); proptest invariants
+- `src/sim/world.rs` — composes `MarketRegistry` + per-contract
+  `OrderBook`s + the monotonic `OrderId` source
 - `src/bin/tradingsim.rs` — stub server entry (logs and exits)
 - `src/bin/tsctl.rs` — stub client (clap scaffolding)
 
