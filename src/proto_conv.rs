@@ -19,7 +19,8 @@ use crate::proto::common::{grid as proto_grid, market as proto_market, types as 
 use crate::proto::trading as proto_trading;
 use crate::sim::market::{Area, CodeType, Currency, DeliveryDuration, DeliveryPeriod};
 use crate::sim::order::{
-    ExecutionOption, MarketActor, OrderState, OrderType, Side, StateReason,
+    ExecutionOption, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType, Side,
+    StateDetail, StateReason,
 };
 use crate::sim::trade::TradeState;
 
@@ -508,6 +509,209 @@ pub fn power_to_proto(mw: Decimal) -> proto_market::Power {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Order / OrderDetail / StateDetail bridges.
+//
+// Payload (proto `google.protobuf.Struct` <-> serde_json::Value) is
+// deferred — the conversion drops payload in both directions until
+// Phase 4 wires Struct <-> Value through.
+// ---------------------------------------------------------------------------
+
+impl From<&Order> for proto_trading::Order {
+    fn from(o: &Order) -> Self {
+        Self {
+            delivery_area: Some((&o.area).into()),
+            delivery_period: Some(o.period.into()),
+            r#type: proto_trading::OrderType::from(o.order_type) as i32,
+            side: proto_trading::MarketSide::from(o.side) as i32,
+            price: Some(price_to_proto(o.price, o.currency)),
+            quantity: Some(power_to_proto(o.quantity)),
+            stop_price: o.stop_price.map(|p| price_to_proto(p, o.currency)),
+            peak_price_delta: o.peak_price_delta.map(|p| price_to_proto(p, o.currency)),
+            display_quantity: o.display_quantity.map(power_to_proto),
+            execution_option: o
+                .execution_option
+                .map(|e| proto_trading::OrderExecutionOption::from(e) as i32),
+            valid_until: o.valid_until.map(timestamp_to_proto),
+            payload: None,
+            tag: o.tag.clone(),
+        }
+    }
+}
+
+impl TryFrom<&proto_trading::Order> for Order {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_trading::Order) -> Result<Self, Self::Error> {
+        let area_proto = p
+            .delivery_area
+            .as_ref()
+            .ok_or(ConvError::MissingField("Order.delivery_area"))?;
+        let period_proto = p
+            .delivery_period
+            .as_ref()
+            .ok_or(ConvError::MissingField("Order.delivery_period"))?;
+        let price_proto = p
+            .price
+            .as_ref()
+            .ok_or(ConvError::MissingField("Order.price"))?;
+        let qty_proto = p
+            .quantity
+            .as_ref()
+            .ok_or(ConvError::MissingField("Order.quantity"))?;
+
+        let (price, currency) = price_from_proto(price_proto)?;
+
+        // optional Price fields must share the order's currency or
+        // the validator can't reason about them; conv layer rejects
+        // a currency mismatch here rather than letting validation
+        // see two different currencies on the same order.
+        let stop_price = match &p.stop_price {
+            Some(sp) => {
+                let (amt, c) = price_from_proto(sp)?;
+                if c != currency {
+                    return Err(ConvError::UnknownEnum {
+                        field: "Order.stop_price.currency",
+                        value: c as i32,
+                    });
+                }
+                Some(amt)
+            }
+            None => None,
+        };
+        let peak_price_delta = match &p.peak_price_delta {
+            Some(pp) => {
+                let (amt, c) = price_from_proto(pp)?;
+                if c != currency {
+                    return Err(ConvError::UnknownEnum {
+                        field: "Order.peak_price_delta.currency",
+                        value: c as i32,
+                    });
+                }
+                Some(amt)
+            }
+            None => None,
+        };
+
+        let execution_option = match p.execution_option {
+            Some(raw) => Some(sim_enum_from_i32::<
+                proto_trading::OrderExecutionOption,
+                ExecutionOption,
+            >(raw, "OrderExecutionOption")?),
+            None => None,
+        };
+
+        Ok(Self {
+            area: Area::try_from(area_proto)?,
+            period: DeliveryPeriod::try_from(period_proto)?,
+            order_type: sim_enum_from_i32::<proto_trading::OrderType, OrderType>(
+                p.r#type,
+                "OrderType",
+            )?,
+            side: sim_enum_from_i32::<proto_trading::MarketSide, Side>(p.side, "MarketSide")?,
+            price,
+            currency,
+            quantity: power_from_proto(qty_proto)?,
+            stop_price,
+            peak_price_delta,
+            display_quantity: p
+                .display_quantity
+                .as_ref()
+                .map(power_from_proto)
+                .transpose()?,
+            execution_option,
+            valid_until: p.valid_until.as_ref().map(timestamp_from_proto).transpose()?,
+            payload: None,
+            tag: p.tag.clone(),
+        })
+    }
+}
+
+impl From<StateDetail> for proto_trading::order_detail::StateDetail {
+    fn from(s: StateDetail) -> Self {
+        Self {
+            state: proto_trading::OrderState::from(s.state) as i32,
+            state_reason: proto_trading::order_detail::state_detail::StateReason::from(s.reason)
+                as i32,
+            market_actor: proto_trading::order_detail::state_detail::MarketActor::from(s.actor)
+                as i32,
+        }
+    }
+}
+
+impl TryFrom<&proto_trading::order_detail::StateDetail> for StateDetail {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_trading::order_detail::StateDetail) -> Result<Self, Self::Error> {
+        Ok(Self {
+            state: sim_enum_from_i32::<proto_trading::OrderState, OrderState>(p.state, "OrderState")?,
+            reason: sim_enum_from_i32::<
+                proto_trading::order_detail::state_detail::StateReason,
+                StateReason,
+            >(p.state_reason, "StateReason")?,
+            actor: sim_enum_from_i32::<
+                proto_trading::order_detail::state_detail::MarketActor,
+                MarketActor,
+            >(p.market_actor, "MarketActor")?,
+        })
+    }
+}
+
+impl From<&OrderDetail> for proto_trading::OrderDetail {
+    fn from(o: &OrderDetail) -> Self {
+        Self {
+            order_id: o.id.0,
+            order: Some((&o.order).into()),
+            state_detail: Some(o.state.into()),
+            open_quantity: Some(power_to_proto(o.open_quantity)),
+            filled_quantity: Some(power_to_proto(o.filled_quantity)),
+            create_time: Some(timestamp_to_proto(o.create_time)),
+            modification_time: Some(timestamp_to_proto(o.modification_time)),
+        }
+    }
+}
+
+impl TryFrom<&proto_trading::OrderDetail> for OrderDetail {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_trading::OrderDetail) -> Result<Self, Self::Error> {
+        let order_proto = p
+            .order
+            .as_ref()
+            .ok_or(ConvError::MissingField("OrderDetail.order"))?;
+        let state_proto = p
+            .state_detail
+            .as_ref()
+            .ok_or(ConvError::MissingField("OrderDetail.state_detail"))?;
+        let open_qty_proto = p
+            .open_quantity
+            .as_ref()
+            .ok_or(ConvError::MissingField("OrderDetail.open_quantity"))?;
+        let filled_qty_proto = p
+            .filled_quantity
+            .as_ref()
+            .ok_or(ConvError::MissingField("OrderDetail.filled_quantity"))?;
+        let create_proto = p
+            .create_time
+            .as_ref()
+            .ok_or(ConvError::MissingField("OrderDetail.create_time"))?;
+        let mod_proto = p
+            .modification_time
+            .as_ref()
+            .ok_or(ConvError::MissingField("OrderDetail.modification_time"))?;
+
+        Ok(Self {
+            id: OrderId(p.order_id),
+            order: Order::try_from(order_proto)?,
+            state: StateDetail::try_from(state_proto)?,
+            open_quantity: power_from_proto(open_qty_proto)?,
+            filled_quantity: power_from_proto(filled_qty_proto)?,
+            create_time: timestamp_from_proto(create_proto)?,
+            modification_time: timestamp_from_proto(mod_proto)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +912,108 @@ mod tests {
     fn power_helpers_round_trip() {
         let proto = power_to_proto(dec!(1.5));
         assert_eq!(power_from_proto(&proto).unwrap(), dec!(1.5));
+    }
+
+    fn sample_order() -> Order {
+        Order {
+            area: Area::eic("10Y1001A1001A82H"),
+            period: DeliveryPeriod {
+                start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+                duration: DeliveryDuration::Hour,
+            },
+            order_type: OrderType::Limit,
+            side: Side::Buy,
+            price: dec!(85.50),
+            currency: Currency::Eur,
+            quantity: dec!(1.5),
+            stop_price: None,
+            peak_price_delta: None,
+            display_quantity: None,
+            execution_option: None,
+            valid_until: None,
+            payload: None,
+            tag: Some("strategy=arb".into()),
+        }
+    }
+
+    #[test]
+    fn order_round_trip_minimal() {
+        let sim = sample_order();
+        let proto = proto_trading::Order::from(&sim);
+        let back = Order::try_from(&proto).unwrap();
+        assert_eq!(back, sim);
+    }
+
+    #[test]
+    fn order_round_trip_with_iceberg_and_stop() {
+        let sim = Order {
+            order_type: OrderType::Iceberg,
+            stop_price: Some(dec!(80.00)),
+            peak_price_delta: Some(dec!(0.50)),
+            display_quantity: Some(dec!(0.5)),
+            execution_option: Some(ExecutionOption::Aon),
+            valid_until: Some(Utc.with_ymd_and_hms(2026, 5, 13, 11, 55, 0).unwrap()),
+            ..sample_order()
+        };
+        let proto = proto_trading::Order::from(&sim);
+        let back = Order::try_from(&proto).unwrap();
+        assert_eq!(back, sim);
+    }
+
+    #[test]
+    fn order_rejects_currency_mismatch_on_stop_price() {
+        let proto = proto_trading::Order {
+            price: Some(price_to_proto(dec!(85.0), Currency::Eur)),
+            stop_price: Some(price_to_proto(dec!(80.0), Currency::Usd)),
+            ..proto_trading::Order::from(&sample_order())
+        };
+        let err = Order::try_from(&proto).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvError::UnknownEnum {
+                field: "Order.stop_price.currency",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn order_missing_required_field_errors() {
+        let proto = proto_trading::Order {
+            delivery_area: None,
+            ..proto_trading::Order::from(&sample_order())
+        };
+        let err = Order::try_from(&proto).unwrap_err();
+        assert_eq!(err, ConvError::MissingField("Order.delivery_area"));
+    }
+
+    #[test]
+    fn order_detail_round_trip() {
+        let order = sample_order();
+        let created = Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 0).unwrap();
+        let modified = Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 5).unwrap();
+        let sim = OrderDetail {
+            id: OrderId(42),
+            order,
+            state: StateDetail {
+                state: OrderState::Active,
+                reason: StateReason::Add,
+                actor: MarketActor::User,
+            },
+            open_quantity: dec!(1.5),
+            filled_quantity: dec!(0),
+            create_time: created,
+            modification_time: modified,
+        };
+        let proto = proto_trading::OrderDetail::from(&sim);
+        let back = OrderDetail::try_from(&proto).unwrap();
+        assert_eq!(back.id, sim.id);
+        assert_eq!(back.order, sim.order);
+        assert_eq!(back.state, sim.state);
+        assert_eq!(back.open_quantity, sim.open_quantity);
+        assert_eq!(back.filled_quantity, sim.filled_quantity);
+        assert_eq!(back.create_time, sim.create_time);
+        assert_eq!(back.modification_time, sim.modification_time);
     }
 
     #[test]
