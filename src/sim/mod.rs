@@ -1,5 +1,6 @@
 pub mod book;
 pub mod decimal;
+pub mod gridpool;
 pub mod market;
 pub mod matching;
 pub mod order;
