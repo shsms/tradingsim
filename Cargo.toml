@@ -1,0 +1,57 @@
+[package]
+name = "tradingsim"
+version = "0.1.0"
+edition = "2024"
+default-run = "tradingsim"
+
+[dependencies]
+tonic-prost = "0.14"
+tonic = "0.14.0"
+prost = "0.14.0"
+prost-types = "0.14.0"
+tokio = { version = "1.43.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream = "0.1.15"
+tulisp = { git = "https://github.com/shsms/tulisp", features = ["sync", "etags"] }
+tulisp-fmt = { git = "https://github.com/tulisp/tulisp-fmt" }
+tulisp-async = { git = "https://github.com/tulisp/tulisp-async" }
+notify = "6.1.1"
+futures = "0.3.30"
+log = "0.4.22"
+simplelog = "0.12.2"
+rand = { version = "0.8.5", features = ["small_rng"] }
+rust_decimal = { version = "1", features = ["serde"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive"] }
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust-embed = "8"
+# tsctl talks to the UI server's HTTP surface for scenario commands —
+# the scenario lifecycle isn't on gRPC.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14", features = ["cleanup-markdown"] }
+
+[dev-dependencies]
+# axum oneshot testing pattern — no live port needed
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# Out-of-process integration tests in tests/ talk to the live HTTP /
+# gRPC surface; reqwest is already a regular dep for tsctl, we just
+# need a temp dir for per-test config files.
+tempfile = "3"
+proptest = "1"
+
+[lib]
+name = "tradingsim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tradingsim"
+path = "src/bin/tradingsim.rs"
+
+[[bin]]
+name = "tsctl"
+path = "src/bin/tsctl.rs"
