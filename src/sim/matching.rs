@@ -225,3 +225,94 @@ mod tests {
         assert_eq!(out.fills[0].price, dec!(85.0));
     }
 }
+
+#[cfg(test)]
+mod props {
+    use super::*;
+    use proptest::prelude::*;
+    use rust_decimal::dec;
+
+    /// Random order generator restricted to the price/qty grid: prices on
+    /// 0.01 EUR/MWh, qtys on 0.1 MW, both bounded so the proptest
+    /// shrinker has manageable values.
+    fn arb_order() -> impl Strategy<Value = (Side, Decimal, Decimal)> {
+        (
+            prop::sample::select(vec![Side::Buy, Side::Sell]),
+            // 100 prices: 80.00 .. 89.99 in 0.01 steps.
+            (0i64..1000).prop_map(|n| Decimal::new(8000 + n, 2)),
+            // 1 .. 30 qty steps of 0.1 MW.
+            (1i64..30).prop_map(|n| Decimal::new(n, 1)),
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// After every match step, best_bid < best_ask. A crossed
+        /// book would mean a taker order rested at a price that
+        /// still had a marketable opposite-side level — the matcher
+        /// failed to sweep.
+        #[test]
+        fn book_never_crossed(orders in prop::collection::vec(arb_order(), 0..40)) {
+            let mut book = OrderBook::new();
+            for (i, (side, price, qty)) in orders.iter().enumerate() {
+                match_limit(&mut book, IncomingLimit {
+                    id: OrderId(i as u64),
+                    side: *side,
+                    price: *price,
+                    quantity: *qty,
+                });
+                if let (Some(bb), Some(ba)) = (book.best_bid(), book.best_ask()) {
+                    prop_assert!(bb < ba, "crossed book after op {i}: bid {bb} >= ask {ba}");
+                }
+            }
+        }
+
+        /// Quantity conservation: every unit of qty that arrives is
+        /// either filled twice over (once as taker, once as maker on
+        /// the matched leg) or rests on the book. Concretely:
+        ///   sum(incoming.qty) == 2 * sum(fills) + book.total_open_qty()
+        #[test]
+        fn quantity_conserved(orders in prop::collection::vec(arb_order(), 0..40)) {
+            let mut book = OrderBook::new();
+            let mut total_in = Decimal::ZERO;
+            let mut total_fills = Decimal::ZERO;
+            for (i, (side, price, qty)) in orders.iter().enumerate() {
+                total_in += qty;
+                let out = match_limit(&mut book, IncomingLimit {
+                    id: OrderId(i as u64),
+                    side: *side,
+                    price: *price,
+                    quantity: *qty,
+                });
+                for f in &out.fills {
+                    total_fills += f.quantity;
+                }
+            }
+            prop_assert_eq!(total_in, dec!(2) * total_fills + book.total_open_qty());
+        }
+
+        /// Every fill matches at a price favorable to both sides:
+        /// the maker's price is at-or-better than the taker's limit.
+        #[test]
+        fn fill_prices_obey_limits(orders in prop::collection::vec(arb_order(), 0..40)) {
+            let mut book = OrderBook::new();
+            for (i, (side, price, qty)) in orders.iter().enumerate() {
+                let taker_limit = *price;
+                let taker_side = *side;
+                let out = match_limit(&mut book, IncomingLimit {
+                    id: OrderId(i as u64),
+                    side: taker_side,
+                    price: taker_limit,
+                    quantity: *qty,
+                });
+                for f in &out.fills {
+                    match taker_side {
+                        Side::Buy  => prop_assert!(f.price <= taker_limit),
+                        Side::Sell => prop_assert!(f.price >= taker_limit),
+                    }
+                }
+            }
+        }
+    }
+}
