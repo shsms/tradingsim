@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 
 use crate::proto::common::{grid as proto_grid, market as proto_market, types as proto_types};
 use crate::proto::trading as proto_trading;
-use crate::sim::market::{Currency, CodeType, DeliveryDuration};
+use crate::sim::market::{Area, CodeType, Currency, DeliveryDuration, DeliveryPeriod};
 use crate::sim::order::{
     ExecutionOption, MarketActor, OrderState, OrderType, Side, StateReason,
 };
@@ -421,6 +421,93 @@ impl TryFrom<proto_grid::DeliveryDuration> for DeliveryDuration {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Common-package struct bridges. Area / DeliveryPeriod are full
+// From / TryFrom pairs; Price and Power are flat helpers because the
+// sim flattens Price into (Decimal, Currency) and Power into Decimal
+// inside the order/trade structs.
+// ---------------------------------------------------------------------------
+
+impl From<&Area> for proto_grid::DeliveryArea {
+    fn from(a: &Area) -> Self {
+        Self {
+            code: a.code.clone(),
+            code_type: proto_grid::EnergyMarketCodeType::from(a.code_type) as i32,
+        }
+    }
+}
+
+impl TryFrom<&proto_grid::DeliveryArea> for Area {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_grid::DeliveryArea) -> Result<Self, Self::Error> {
+        Ok(Self {
+            code: p.code.clone(),
+            code_type: sim_enum_from_i32::<proto_grid::EnergyMarketCodeType, CodeType>(
+                p.code_type,
+                "EnergyMarketCodeType",
+            )?,
+        })
+    }
+}
+
+impl From<DeliveryPeriod> for proto_grid::DeliveryPeriod {
+    fn from(p: DeliveryPeriod) -> Self {
+        Self {
+            start: Some(timestamp_to_proto(p.start)),
+            duration: proto_grid::DeliveryDuration::from(p.duration) as i32,
+        }
+    }
+}
+
+impl TryFrom<&proto_grid::DeliveryPeriod> for DeliveryPeriod {
+    type Error = ConvError;
+
+    fn try_from(p: &proto_grid::DeliveryPeriod) -> Result<Self, Self::Error> {
+        let start = p.start.as_ref().ok_or(ConvError::MissingField("DeliveryPeriod.start"))?;
+        Ok(Self {
+            start: timestamp_from_proto(start)?,
+            duration: sim_enum_from_i32::<proto_grid::DeliveryDuration, DeliveryDuration>(
+                p.duration,
+                "DeliveryDuration",
+            )?,
+        })
+    }
+}
+
+/// `proto::market::Price` -> (amount, currency).
+pub fn price_from_proto(p: &proto_market::Price) -> Result<(Decimal, Currency), ConvError> {
+    let amount = p
+        .amount
+        .as_ref()
+        .ok_or(ConvError::MissingField("Price.amount"))?;
+    Ok((
+        decimal_from_proto(amount)?,
+        sim_enum_from_i32::<proto_market::price::Currency, Currency>(p.currency, "Currency")?,
+    ))
+}
+
+/// (amount, currency) -> `proto::market::Price`.
+pub fn price_to_proto(amount: Decimal, currency: Currency) -> proto_market::Price {
+    proto_market::Price {
+        amount: Some(decimal_to_proto(amount)),
+        currency: proto_market::price::Currency::from(currency) as i32,
+    }
+}
+
+/// `proto::market::Power` -> MW amount.
+pub fn power_from_proto(p: &proto_market::Power) -> Result<Decimal, ConvError> {
+    let mw = p.mw.as_ref().ok_or(ConvError::MissingField("Power.mw"))?;
+    decimal_from_proto(mw)
+}
+
+/// MW amount -> `proto::market::Power`.
+pub fn power_to_proto(mw: Decimal) -> proto_market::Power {
+    proto_market::Power {
+        mw: Some(decimal_to_proto(mw)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +638,76 @@ mod tests {
         // CAD is in the proto but not in the sim's Currency.
         let err = Currency::try_from(proto_market::price::Currency::Cad).unwrap_err();
         assert!(matches!(err, ConvError::UnknownEnum { field: "Currency", .. }));
+    }
+
+    #[test]
+    fn area_round_trip() {
+        let sim = Area::eic("10Y1001A1001A82H");
+        let proto: proto_grid::DeliveryArea = (&sim).into();
+        assert_eq!(proto.code, "10Y1001A1001A82H");
+        assert_eq!(
+            proto.code_type,
+            proto_grid::EnergyMarketCodeType::EuropeEic as i32
+        );
+        let back = Area::try_from(&proto).unwrap();
+        assert_eq!(back, sim);
+    }
+
+    #[test]
+    fn area_rejects_unspecified_code_type() {
+        let bad = proto_grid::DeliveryArea {
+            code: "X".into(),
+            code_type: 0,
+        };
+        let err = Area::try_from(&bad).unwrap_err();
+        assert!(matches!(err, ConvError::UnknownEnum { field: "EnergyMarketCodeType", .. }));
+    }
+
+    #[test]
+    fn delivery_period_round_trip() {
+        let sim = DeliveryPeriod {
+            start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+            duration: DeliveryDuration::QuarterHour,
+        };
+        let proto: proto_grid::DeliveryPeriod = sim.into();
+        let back = DeliveryPeriod::try_from(&proto).unwrap();
+        assert_eq!(back, sim);
+    }
+
+    #[test]
+    fn delivery_period_missing_start_errors() {
+        let bad = proto_grid::DeliveryPeriod {
+            start: None,
+            duration: proto_grid::DeliveryDuration::DeliveryDuration60 as i32,
+        };
+        let err = DeliveryPeriod::try_from(&bad).unwrap_err();
+        assert_eq!(err, ConvError::MissingField("DeliveryPeriod.start"));
+    }
+
+    #[test]
+    fn price_helpers_round_trip() {
+        let proto = price_to_proto(dec!(85.50), Currency::Eur);
+        let (amount, currency) = price_from_proto(&proto).unwrap();
+        assert_eq!(amount, dec!(85.5));
+        assert_eq!(currency, Currency::Eur);
+    }
+
+    #[test]
+    fn price_missing_amount_errors() {
+        let bad = proto_market::Price {
+            amount: None,
+            currency: proto_market::price::Currency::Eur as i32,
+        };
+        assert_eq!(
+            price_from_proto(&bad).unwrap_err(),
+            ConvError::MissingField("Price.amount")
+        );
+    }
+
+    #[test]
+    fn power_helpers_round_trip() {
+        let proto = power_to_proto(dec!(1.5));
+        assert_eq!(power_from_proto(&proto).unwrap(), dec!(1.5));
     }
 
     #[test]
