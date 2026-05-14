@@ -154,7 +154,26 @@ async fn ws_public_trades(ws: WebSocketUpgrade, State(s): State<UiState>) -> imp
 }
 
 async fn handle_trades_ws(mut socket: WebSocket, s: UiState) {
-    let rx = s.world.read().subscribe_public_trades();
+    // Same snapshot-then-subscribe pattern as the book WS: take the
+    // history ring + the subscriber receiver under a single read
+    // lock so any concurrent print is either already in the snapshot
+    // or queued on the receiver — never lost across the handoff.
+    // Without this, a page reload showed an empty trade tape until
+    // the next live print.
+    let (snapshot, rx) = {
+        let w = s.world.read();
+        let snap = w.public_trade_history();
+        let rx = w.subscribe_public_trades();
+        (snap, rx)
+    };
+    for t in snapshot {
+        let payload: PublicTradeJson = (&t).into();
+        if let Ok(s) = serde_json::to_string(&payload)
+            && socket.send(Message::Text(s.into())).await.is_err()
+        {
+            return;
+        }
+    }
     let mut stream = BroadcastStream::new(rx);
     while let Some(item) = stream.next().await {
         let Ok(t) = item else { continue };

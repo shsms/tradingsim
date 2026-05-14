@@ -30,11 +30,12 @@ Reordered =MarketMaker::refresh= to compute the new bid/ask
 instead of wiping them — no more zero-MM-quote window for
 aggressors to slip through.
 
-*** TODO Trade WS snapshot on connect
-=handle_book_ws= already snapshots-then-subscribes;
-=handle_trades_ws= only subscribes. Page reload renders an empty
-tape until the next live print. Replay
-=world.public_trade_history()= first, then stream.
+*** DONE Trade WS snapshot on connect
+=handle_trades_ws= now drains =public_trade_history()= before
+attaching to the live broadcaster, same single-lock
+snapshot-then-subscribe pattern the book WS uses. Page reloads
+fill the trade tape immediately instead of waiting for the next
+print.
 
 *** TODO Generalize the =initChartWindow= dropdown-sync helper
 Same browser-restore-vs-JS-state hazard exists for
