@@ -270,6 +270,22 @@ async fn main() {
     // immediate quote shift on top of the slower follow-last-trade
     // drift, so visible price moves land within seconds rather than
     // minutes.
+    // Forward curve — hour-of-day baseline for every MM's reference.
+    let curve = Arc::new(tradingsim::sim::curve::ForwardCurve::default());
+
+    // Seed each MM's reference from the curve at boot so the very
+    // first quote (within MM_REFRESH_INTERVAL) is already on-curve,
+    // ahead of the first bias tick a few seconds later.
+    {
+        use chrono::Timelike;
+        for view in &mm_views {
+            let period_start = view.shared_config.read().period.start;
+            let hour = period_start.hour() as f64
+                + period_start.minute() as f64 / 60.0;
+            view.shared_config.write().reference_price = curve.base_price_at(hour);
+        }
+    }
+
     if let Some(c) = lisp_config_arc.as_ref() {
         if !bias_views.is_empty() || !mm_views.is_empty() {
             tradingsim::scenarios::spawn_bias_tick(
@@ -277,6 +293,7 @@ async fn main() {
                 mm_views,
                 c.scenarios(),
                 c.bias_scale(),
+                curve,
                 Duration::from_secs(5),
             );
         }

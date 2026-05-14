@@ -24,6 +24,7 @@ use serde::Serialize;
 use rust_decimal::Decimal;
 
 use crate::sim::counterparty::{SharedAggressorConfig, SharedConfig};
+use crate::sim::curve::ForwardCurve;
 
 #[derive(Clone, Debug)]
 pub struct Stage {
@@ -200,6 +201,7 @@ pub fn spawn_bias_tick(
     mms: Vec<MmView>,
     scenarios: SharedScenarios,
     bias_scale: SharedBiasScale,
+    curve: Arc<ForwardCurve>,
     cadence: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -209,7 +211,7 @@ pub fn spawn_bias_tick(
             let now = Utc::now();
             let scenario_bias = pick_active_bias(&scenarios, now);
             let scale = *bias_scale.read();
-            apply_biases(&aggressors, &mms, scenario_bias, scale, now);
+            apply_biases(&aggressors, &mms, scenario_bias, scale, &curve, now);
         }
     })
 }
@@ -253,15 +255,16 @@ fn apply_biases(
     mms: &[MmView],
     scenario_bias: Option<f64>,
     bias_scale: f64,
+    curve: &ForwardCurve,
     now: DateTime<Utc>,
 ) {
-    // Hour-of-day for each aggressor's target contract changes only
-    // when (now's nearest quarter boundary + offset*15min) crosses an
-    // hour mark — slow enough that recomputing per-tick is cheap.
     let base_boundary = next_quarter_boundary(now);
-    let effective_for = |offset: i64| -> f64 {
+    let period_hour_for = |offset: i64| -> f64 {
         let period_start = base_boundary + chrono::Duration::minutes(15 * offset);
-        let natural = natural_duck_bias(wallclock_hour(period_start));
+        wallclock_hour(period_start)
+    };
+    let effective_for = |offset: i64| -> f64 {
+        let natural = natural_duck_bias(period_hour_for(offset));
         match scenario_bias {
             Some(stage_bias) => lerp(natural, stage_bias, decay_weight(offset)),
             None => natural,
@@ -280,7 +283,12 @@ fn apply_biases(
         // mirror image.
         let imbalance = bias - 0.5;
         let shift = imbalance * bias_scale;
+        // Reference price tracks the forward curve at the contract's
+        // delivery hour. Each tick overwrites it; the bid/ask shift
+        // away from this baseline lives entirely in demand+surplus.
+        let new_ref = curve.base_price_at(period_hour_for(view.quarter_offset));
         let mut cfg = view.shared_config.write();
+        cfg.reference_price = new_ref;
         cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
         cfg.surplus = Decimal::try_from(-shift).unwrap_or(Decimal::ZERO);
     }
