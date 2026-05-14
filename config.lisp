@@ -128,6 +128,12 @@
 ;; Library lives in sim/scenarios.lisp. Uncomment any of these to
 ;; activate the matching market-animation curve:
 ;;
+;; Single-knob scenarios (each runs until -stop is called):
 ;; (scenario-morning-ramp-start "de-lu-q0")
 ;; (scenario-gate-crunch-start  "de-lu-q3")
 ;; (scenario-curtailment-start  "de-lu-q2")
+;;
+;; Six-phase 3-hour tour through every dial — calm → ramp →
+;; volatility → curtailment shock → recovery → gate-closure crunch.
+;; Logs each phase transition at INFO level.
+;; (scenario-elaborate-start "de-lu-q0" "ag-q0")
