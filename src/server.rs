@@ -11,10 +11,14 @@ use tokio::sync::Mutex;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use crate::proto::common::pagination::{
+    PaginationInfo, PaginationParams, pagination_params::Params as PaginationOneof,
+};
 use crate::proto::trading::{
-    CancelAllGridpoolOrdersRequest, CancelAllGridpoolOrdersResponse, CancelGridpoolOrderRequest,
-    CancelGridpoolOrderResponse, CreateGridpoolOrderRequest, CreateGridpoolOrderResponse,
-    GetGridpoolOrderRequest, GetGridpoolOrderResponse, ListGridpoolOrdersRequest,
+    self as proto_trading, CancelAllGridpoolOrdersRequest, CancelAllGridpoolOrdersResponse,
+    CancelGridpoolOrderRequest, CancelGridpoolOrderResponse, CreateGridpoolOrderRequest,
+    CreateGridpoolOrderResponse, DeliveryTimeFilter, GetGridpoolOrderRequest,
+    GetGridpoolOrderResponse, GridpoolOrderFilter, ListGridpoolOrdersRequest,
     ListGridpoolOrdersResponse, ListGridpoolTradesRequest, ListGridpoolTradesResponse,
     ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolOrdersStreamResponse,
     ReceiveGridpoolTradesStreamRequest, ReceiveGridpoolTradesStreamResponse,
@@ -22,9 +26,14 @@ use crate::proto::trading::{
     ReceivePublicTradesStreamRequest, ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest,
     UpdateGridpoolOrderResponse, electricity_trading_service_server::ElectricityTradingService,
 };
-use crate::proto_conv::ConvError;
-use crate::sim::order::{GridpoolId, Order, OrderId};
+use crate::proto_conv::{ConvError, timestamp_from_proto};
+use crate::sim::order::{GridpoolId, Order, OrderDetail, OrderId};
 use crate::sim::world::{SubmitError, World};
+
+/// Cap and default for page sizes. Clients can ask for less, but
+/// never more than the cap.
+const DEFAULT_PAGE_SIZE: u32 = 200;
+const MAX_PAGE_SIZE: u32 = 1000;
 
 /// Boxed-stream alias used by every server-streaming RPC's
 /// associated type. `Status` errors from the stream become per-item
@@ -58,6 +67,99 @@ fn submit_err_to_status(e: SubmitError) -> Status {
 
 fn conv_err_to_status(e: ConvError) -> Status {
     Status::invalid_argument(format!("proto conversion: {e}"))
+}
+
+/// Parse PaginationParams.params (oneof) into (page_size, cursor).
+/// First-page calls carry PageSize; continuations carry PageToken,
+/// which we encode as "page_size:last_id". Empty token = first page
+/// with the default page size.
+fn parse_pagination(p: &Option<PaginationParams>) -> Result<(u32, Option<OrderId>), Status> {
+    let params = match p.as_ref().and_then(|p| p.params.as_ref()) {
+        Some(p) => p,
+        None => return Ok((DEFAULT_PAGE_SIZE, None)),
+    };
+    match params {
+        PaginationOneof::PageSize(sz) => {
+            let n = if *sz == 0 { DEFAULT_PAGE_SIZE } else { *sz }.min(MAX_PAGE_SIZE);
+            Ok((n, None))
+        }
+        PaginationOneof::PageToken(tok) => {
+            let (sz, last) = tok.split_once(':').ok_or_else(|| {
+                Status::invalid_argument("malformed page_token (want \"size:last_id\")")
+            })?;
+            let page_size: u32 = sz
+                .parse()
+                .map_err(|_| Status::invalid_argument("bad page_size in page_token"))?;
+            let last_id: u64 = last
+                .parse()
+                .map_err(|_| Status::invalid_argument("bad cursor in page_token"))?;
+            Ok((page_size.min(MAX_PAGE_SIZE), Some(OrderId(last_id))))
+        }
+    }
+}
+
+fn encode_page_token(page_size: u32, last: OrderId) -> String {
+    format!("{page_size}:{}", last.0)
+}
+
+/// True iff a DeliveryTimeFilter selects this OrderDetail's period.
+/// Matching is on the period's start time, half-open interval semantics.
+fn period_matches_dtf(d: &OrderDetail, dtf: &DeliveryTimeFilter) -> bool {
+    if let Some(iv) = dtf.time_interval {
+        let start = d.order.period.start;
+        if let Some(ts) = iv.start_time.as_ref() {
+            if timestamp_from_proto(ts).map(|t| start < t).unwrap_or(true) {
+                return false;
+            }
+        }
+        if let Some(ts) = iv.end_time.as_ref() {
+            if timestamp_from_proto(ts).map(|t| start >= t).unwrap_or(true) {
+                return false;
+            }
+        }
+    }
+    if !dtf.duration_filters.is_empty() {
+        let order_duration_i32 =
+            crate::proto::common::grid::DeliveryDuration::from(d.order.period.duration) as i32;
+        if !dtf.duration_filters.contains(&order_duration_i32) {
+            return false;
+        }
+    }
+    true
+}
+
+fn matches_order_filter(d: &OrderDetail, f: &GridpoolOrderFilter) -> bool {
+    if !f.states.is_empty() {
+        let s_i32 = proto_trading::OrderState::from(d.state.state) as i32;
+        if !f.states.contains(&s_i32) {
+            return false;
+        }
+    }
+    if let Some(want) = f.side {
+        let s_i32 = proto_trading::MarketSide::from(d.order.side) as i32;
+        if s_i32 != want {
+            return false;
+        }
+    }
+    if let Some(dtf) = f.delivery_time_filter.as_ref() {
+        if !period_matches_dtf(d, dtf) {
+            return false;
+        }
+    }
+    if let Some(area) = f.delivery_area.as_ref() {
+        if area.code != d.order.area.code {
+            return false;
+        }
+    }
+    if let Some(want_tag) = f.tag.as_deref() {
+        if d.order.tag.as_deref() != Some(want_tag) {
+            return false;
+        }
+    }
+    if !f.order_ids.is_empty() && !f.order_ids.contains(&d.id.0) {
+        return false;
+    }
+    true
 }
 
 #[tonic::async_trait]
@@ -159,9 +261,45 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
     async fn list_gridpool_orders(
         &self,
-        _request: Request<ListGridpoolOrdersRequest>,
+        request: Request<ListGridpoolOrdersRequest>,
     ) -> Result<Response<ListGridpoolOrdersResponse>, Status> {
-        Err(Status::unimplemented("list_gridpool_orders: Phase 4.4c"))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let (page_size, cursor) = parse_pagination(&req.pagination_params)?;
+        let filter = req.filter.unwrap_or_default();
+
+        let w = self.world.lock().await;
+        let gp = w
+            .gridpools()
+            .get(gridpool_id)
+            .ok_or_else(|| Status::not_found("unknown gridpool"))?;
+
+        let mut all: Vec<&OrderDetail> = gp
+            .orders()
+            .filter(|d| matches_order_filter(d, &filter))
+            .collect();
+        all.sort_by_key(|d| d.id);
+
+        let start = match cursor {
+            Some(c) => all.iter().position(|d| d.id > c).unwrap_or(all.len()),
+            None => 0,
+        };
+        let end = (start + page_size as usize).min(all.len());
+        let page = &all[start..end];
+        let next = if end < all.len() {
+            page.last().map(|d| encode_page_token(page_size, d.id))
+        } else {
+            None
+        };
+
+        let resp = ListGridpoolOrdersResponse {
+            order_details: page.iter().map(|d| (*d).into()).collect(),
+            pagination_info: Some(PaginationInfo {
+                total_items: all.len() as u32,
+                next_page_token: next,
+            }),
+        };
+        Ok(Response::new(resp))
     }
 
     type ReceiveGridpoolOrdersStreamStream = BoxStream<ReceiveGridpoolOrdersStreamResponse>;
