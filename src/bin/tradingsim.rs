@@ -240,6 +240,7 @@ async fn main() {
         .as_ref()
         .map(|c| c.aggressors())
         .unwrap_or_default();
+    let mut bias_views: Vec<tradingsim::scenarios::AggressorView> = Vec::new();
     if !aggressor_specs.is_empty() {
         log::info!(
             "Spawning {} aggressor(s) from config.lisp",
@@ -248,8 +249,25 @@ async fn main() {
         for spec in aggressor_specs {
             let rate = Duration::from_millis(spec.rate_ms);
             let offset = spec.quarter_offset;
+            bias_views.push(tradingsim::scenarios::AggressorView {
+                quarter_offset: offset,
+                shared_config: spec.shared_config.clone(),
+            });
             let ag = Aggressor::with_shared_config(spec.shared_config, spec.seed);
             spawn_aggressor_task(Arc::clone(&world), ag, rate, offset);
+        }
+    }
+
+    // Bias tick — applies the natural duck curve to every aggressor
+    // every 5 s, and blends in any active scenario's stage-bias on
+    // top of that (weighted by quarter-offset decay).
+    if let Some(scenarios) = lisp_config_arc.as_ref().map(|c| c.scenarios()) {
+        if !bias_views.is_empty() {
+            tradingsim::scenarios::spawn_bias_tick(
+                bias_views,
+                scenarios,
+                Duration::from_secs(5),
+            );
         }
     }
 

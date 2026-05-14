@@ -374,16 +374,4 @@ where
     Ok(Json(scenario_to_json(entry)))
 }
 
-pub(crate) fn wallclock_hour(now: chrono::DateTime<chrono::Utc>) -> f64 {
-    use chrono::Timelike;
-    now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0
-}
-
-pub(crate) fn wallclock_stage(
-    def: &crate::scenarios::ScenarioDef,
-    hour: f64,
-) -> Option<usize> {
-    def.stages
-        .iter()
-        .position(|s| s.hour_from <= hour && hour < s.hour_to)
-}
+use crate::scenarios::{wallclock_hour, wallclock_stage};

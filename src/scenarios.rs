@@ -1,15 +1,27 @@
-//! Scenario registry — a small piece of mutable state the lisp side
-//! populates via `(define-scenario …)` and the UI layer reads/writes
-//! via the HTTP endpoints. Stages name a tulisp defun the HTTP layer
-//! invokes through the shared TulispContext when the user clicks
-//! Start / Next from the browser.
+//! Scenario registry + bias-application tick.
+//!
+//! Two parts:
+//!
+//! - The lisp side populates a registry of named time-of-day
+//!   scenarios via `(define-scenario …)`. The UI layer reads + mutates
+//!   the runtime state (current stage, manual override) through HTTP
+//!   endpoints.
+//! - A background tick task ([`spawn_bias_tick`]) iterates every
+//!   aggressor every few seconds and writes its `side_bias` field.
+//!   Default behaviour is the natural duck curve (bias varies by the
+//!   contract's hour-of-day); when a scenario is active, the bias for
+//!   imminent quarters is pulled toward the scenario's current-stage
+//!   bias, fading back to natural over ~3 hours of delivery offset.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, TimeZone, Utc};
 use parking_lot::Mutex;
 use serde::Serialize;
+
+use crate::sim::counterparty::SharedAggressorConfig;
 
 #[derive(Clone, Debug)]
 pub struct Stage {
@@ -55,4 +67,184 @@ pub type SharedScenarios = Arc<Mutex<HashMap<String, ScenarioEntry>>>;
 
 pub fn new_registry() -> SharedScenarios {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+// ---------------------------------------------------------------------------
+// Bias curves — the natural duck curve, the per-quarter decay, and the
+// stage-bias-now interpolation. Plain pure functions so they're trivial
+// to unit-test and to call from the tick task.
+// ---------------------------------------------------------------------------
+
+/// Aggressor side-bias for a given UTC hour-of-day under the natural
+/// (no-scenario) duck curve. Returns values in [0, 1].
+pub fn natural_duck_bias(hour: f64) -> f64 {
+    let h = hour.rem_euclid(24.0);
+    match h {
+        h if h < 5.0  => 0.50,                              // overnight
+        h if h < 9.0  => lerp(0.50, 0.62, (h - 5.0) / 4.0), // morning ramp
+        h if h < 10.0 => 0.55,                              // post-peak
+        h if h < 15.0 => 0.35,                              // solar belly
+        h if h < 17.0 => 0.50,                              // transition
+        h if h < 21.0 => 0.72,                              // evening peak
+        h if h < 23.0 => 0.60,
+        _             => 0.50,
+    }
+}
+
+/// How strongly a scenario's bias override applies at quarter-offset
+/// `i`. q0 = 1.0, decays as `exp(-i/12)` so q12 (3 h out) ~= 0.37 and
+/// q47 (12 h out) ~= 0.02.
+pub fn decay_weight(offset: i64) -> f64 {
+    (-(offset.max(0) as f64) / 12.0).exp()
+}
+
+pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+/// Interpolated bias for a scenario's current stage, given the runtime
+/// state and wallclock. In auto mode (`manual_override == false`) the
+/// bias tracks wallclock progress through [hour_from, hour_to). In
+/// manual mode it tracks elapsed time since the operator clicked,
+/// scaled by the stage's duration.
+pub fn stage_bias_now(
+    stage: &Stage,
+    runtime: &ScenarioRuntime,
+    now: DateTime<Utc>,
+) -> f64 {
+    let duration_hours = (stage.hour_to - stage.hour_from).max(0.001);
+    let t = if runtime.manual_override {
+        runtime
+            .stage_entered_at
+            .map(|entered| {
+                let elapsed_secs = (now - entered).num_seconds() as f64;
+                elapsed_secs / (duration_hours * 3600.0)
+            })
+            .unwrap_or(0.0)
+    } else {
+        let h = wallclock_hour(now);
+        (h - stage.hour_from) / duration_hours
+    };
+    lerp(stage.bias_from, stage.bias_to, t.clamp(0.0, 1.0))
+}
+
+pub fn wallclock_hour(now: DateTime<Utc>) -> f64 {
+    now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0
+}
+
+pub fn wallclock_stage(def: &ScenarioDef, hour: f64) -> Option<usize> {
+    def.stages
+        .iter()
+        .position(|s| s.hour_from <= hour && hour < s.hour_to)
+}
+
+/// UTC datetime for today's start of the given fractional hour.
+fn today_at(hour: f64, now: DateTime<Utc>) -> DateTime<Utc> {
+    let total_seconds = (hour * 3600.0) as i64;
+    let date = now.date_naive();
+    let h = (total_seconds / 3600) as u32;
+    let m = ((total_seconds % 3600) / 60) as u32;
+    let s = (total_seconds % 60) as u32;
+    Utc.from_utc_datetime(&date.and_hms_opt(h, m, s).unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
+// Bias-application tick.
+// ---------------------------------------------------------------------------
+
+/// One aggressor's view for the tick: just the offset and shared
+/// config. Cloned cheaply (Arc) so the tick doesn't hold the
+/// registry lock while writing biases.
+#[derive(Clone)]
+pub struct AggressorView {
+    pub quarter_offset: i64,
+    pub shared_config: SharedAggressorConfig,
+}
+
+/// Spawn a tokio task that, every `cadence`, walks `aggressors` and
+/// writes each one's effective side-bias to its SharedConfig. The
+/// scenarios registry is consulted on each tick: a running scenario's
+/// current stage gets auto-advanced to the wallclock-matching stage
+/// (unless the operator has set `manual_override`), and its stage
+/// bias is blended into the per-aggressor natural-curve bias by the
+/// quarter-offset decay weight.
+pub fn spawn_bias_tick(
+    aggressors: Vec<AggressorView>,
+    scenarios: SharedScenarios,
+    cadence: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(cadence);
+        loop {
+            tick.tick().await;
+            let now = Utc::now();
+            let scenario_bias = pick_active_bias(&scenarios, now);
+            apply_biases(&aggressors, scenario_bias, now);
+        }
+    })
+}
+
+/// Look at the registry, auto-advance any running scenario that's
+/// still in auto mode, and return the current scenario-stage bias
+/// (if any). Today's contract is "one scenario active at a time"; if
+/// multiple are running, the first by HashMap iteration wins.
+fn pick_active_bias(scenarios: &SharedScenarios, now: DateTime<Utc>) -> Option<f64> {
+    let mut guard = scenarios.lock();
+    let wallclock_h = wallclock_hour(now);
+    let mut active: Option<f64> = None;
+    for entry in guard.values_mut() {
+        if entry.runtime.current_stage.is_none() {
+            continue;
+        }
+        if !entry.runtime.manual_override {
+            if let Some(idx) = wallclock_stage(&entry.def, wallclock_h) {
+                if entry.runtime.current_stage != Some(idx) {
+                    entry.runtime.current_stage = Some(idx);
+                    entry.runtime.stage_entered_at = Some(today_at(
+                        entry.def.stages[idx].hour_from,
+                        now,
+                    ));
+                }
+            }
+        }
+        if active.is_none() {
+            if let Some(idx) = entry.runtime.current_stage {
+                if let Some(stage) = entry.def.stages.get(idx) {
+                    active = Some(stage_bias_now(stage, &entry.runtime, now));
+                }
+            }
+        }
+    }
+    active
+}
+
+fn apply_biases(
+    aggressors: &[AggressorView],
+    scenario_bias: Option<f64>,
+    now: DateTime<Utc>,
+) {
+    // Hour-of-day for each aggressor's target contract changes only
+    // when (now's nearest quarter boundary + offset*15min) crosses an
+    // hour mark — slow enough that recomputing per-tick is cheap.
+    let base_boundary = next_quarter_boundary(now);
+    for view in aggressors {
+        let period_start = base_boundary
+            + chrono::Duration::minutes(15 * view.quarter_offset);
+        let period_hour = wallclock_hour(period_start);
+        let natural = natural_duck_bias(period_hour);
+        let effective = match scenario_bias {
+            Some(stage_bias) => {
+                let w = decay_weight(view.quarter_offset);
+                lerp(natural, stage_bias, w)
+            }
+            None => natural,
+        };
+        view.shared_config.write().side_bias = effective.clamp(0.0, 1.0);
+    }
+}
+
+fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
+    let secs = now.timestamp();
+    let bucket = (secs / 900 + 1) * 900;
+    DateTime::from_timestamp(bucket, 0).unwrap()
 }
