@@ -254,16 +254,24 @@ struct ScenarioJson {
     description: String,
     stages: Vec<String>,
     current_stage: Option<usize>,
+    /// Stage that contains the current UTC wallclock hour, if any.
+    /// Lets the UI mark "where auto-advance would land".
+    wallclock_stage: Option<usize>,
+    manual_override: bool,
     started_at: Option<String>,
     stage_entered_at: Option<String>,
 }
 
 fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
+    let now = chrono::Utc::now();
+    let h = wallclock_hour(now);
     ScenarioJson {
         name: e.def.name.clone(),
         description: e.def.description.clone(),
         stages: e.def.stages.iter().map(|s| s.name.clone()).collect(),
         current_stage: e.runtime.current_stage,
+        wallclock_stage: wallclock_stage(&e.def, h),
+        manual_override: e.runtime.manual_override,
         started_at: e.runtime.started_at.map(|t| t.to_rfc3339()),
         stage_entered_at: e.runtime.stage_entered_at.map(|t| t.to_rfc3339()),
     }

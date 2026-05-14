@@ -53,9 +53,12 @@ td { padding: 2px 6px; }
 .scenario-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
 .scenario-head strong { color: var(--accent); }
 .stages { font-size: 11px; margin: 6px 0 8px; display: flex; flex-wrap: wrap; gap: 4px; }
-.stage { padding: 2px 6px; border-radius: 3px; background: var(--bg); color: var(--muted); }
+.stage { padding: 2px 6px; border-radius: 3px; background: var(--bg); color: var(--muted); cursor: pointer; }
+.stage:hover { background: var(--border); }
 .stage.current { background: var(--accent); color: var(--bg); }
 .stage.done { color: var(--buy); }
+.wc { color: var(--buy); font-size: 9px; }
+.badge-manual { background: var(--sell); color: var(--bg); padding: 1px 5px; border-radius: 3px; font-size: 10px; }
 .scenario-controls button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 3px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 11px; margin-right: 4px; }
 .scenario-controls button:disabled { opacity: 0.35; cursor: not-allowed; }
 .scenario-controls button:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
@@ -145,31 +148,50 @@ function escapeHtml(s) {
 
 function renderScenario(s) {
   const cur = s.current_stage;
-  const running = cur !== null;
+  const running = cur !== null && cur !== undefined;
   const last = s.stages.length - 1;
+  const wcStage = s.wallclock_stage;
+  const safe = encodeURIComponent(s.name);
+
   const stages = s.stages.map((name, i) => {
     let cls = 'stage';
-    if (cur === i) cls += ' current';
+    if (running && cur === i) cls += ' current';
     else if (running && i < cur) cls += ' done';
-    return `<span class="${cls}">${i + 1}. ${escapeHtml(name)}</span>`;
+    const isWallclock = i === wcStage;
+    const marker = isWallclock ? '<span class="wc">•now</span> ' : '';
+    return `<span class="${cls}" data-idx="${i}"
+                  onclick="scenarioJump('${safe}', ${i})"
+                  title="click to jump">${marker}${i + 1}. ${escapeHtml(name)}</span>`;
   }).join('');
+
   const startDis = running ? 'disabled' : '';
+  const prevDis = (!running || cur <= 0) ? 'disabled' : '';
   const nextDis = (!running || cur >= last) ? 'disabled' : '';
   const stopDis = !running ? 'disabled' : '';
-  const safe = encodeURIComponent(s.name);
+  const manualBadge = (running && s.manual_override)
+    ? '<span class="badge-manual">manual</span>'
+    : '';
+
   return `
     <div class="scenario">
       <div class="scenario-head">
         <strong>${escapeHtml(s.name)}</strong>
         <span class="muted">${escapeHtml(s.description)}</span>
+        ${manualBadge}
       </div>
       <div class="stages">${stages}</div>
       <div class="scenario-controls">
         <button onclick="scenarioAction('${safe}', 'start')" ${startDis}>Start</button>
+        <button onclick="scenarioAction('${safe}', 'prev')"  ${prevDis}>Prev</button>
         <button onclick="scenarioAction('${safe}', 'next')"  ${nextDis}>Next</button>
         <button onclick="scenarioAction('${safe}', 'stop')"  ${stopDis}>Stop</button>
       </div>
     </div>`;
+}
+
+async function scenarioJump(name, idx) {
+  await fetch(`/api/scenarios/${name}/jump/${idx}`, { method: 'POST' });
+  loadScenarios();
 }
 
 async function loadScenarios() {
