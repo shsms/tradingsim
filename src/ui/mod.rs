@@ -7,31 +7,48 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
-use axum::http::header;
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Json};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tulisp::{SharedMut, TulispContext};
 
 use crate::proto::trading::{MarketSide, PublicOrderBookRecord};
+use crate::scenarios::{ScenarioEntry, ScenarioRuntime, SharedScenarios};
 use crate::sim::trade::PublicTrade;
 use crate::sim::world::World;
 
 #[derive(Clone)]
 struct UiState {
     world: Arc<Mutex<World>>,
+    scenarios: Option<SharedScenarios>,
+    tulisp_ctx: Option<SharedMut<TulispContext>>,
 }
 
-pub async fn serve(addr: SocketAddr, world: Arc<Mutex<World>>) -> std::io::Result<()> {
-    let state = UiState { world };
+pub async fn serve(
+    addr: SocketAddr,
+    world: Arc<Mutex<World>>,
+    scenarios: Option<SharedScenarios>,
+    tulisp_ctx: Option<SharedMut<TulispContext>>,
+) -> std::io::Result<()> {
+    let state = UiState {
+        world,
+        scenarios,
+        tulisp_ctx,
+    };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/info", get(api_info))
         .route("/api/gridpools", get(api_gridpools))
+        .route("/api/scenarios", get(api_scenarios))
+        .route("/api/scenarios/{name}/start", post(api_scenario_start))
+        .route("/api/scenarios/{name}/next", post(api_scenario_next))
+        .route("/api/scenarios/{name}/stop", post(api_scenario_stop))
         .route("/ws/public-trades", get(ws_public_trades))
         .route("/ws/public-book", get(ws_public_book))
         .with_state(state);
@@ -228,5 +245,118 @@ async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
                 break;
             }
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Scenarios — list, start, advance, stop. The lisp side populates the
+// registry via `(define-scenario …)`; these endpoints read it and
+// invoke the named stage defun via the shared TulispContext.
+// -----------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ScenarioJson {
+    name: String,
+    description: String,
+    stages: Vec<String>,
+    current_stage: Option<usize>,
+    started_at: Option<String>,
+    stage_entered_at: Option<String>,
+}
+
+fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
+    ScenarioJson {
+        name: e.def.name.clone(),
+        description: e.def.description.clone(),
+        stages: e.def.stages.iter().map(|s| s.name.clone()).collect(),
+        current_stage: e.runtime.current_stage,
+        started_at: e.runtime.started_at.map(|t| t.to_rfc3339()),
+        stage_entered_at: e.runtime.stage_entered_at.map(|t| t.to_rfc3339()),
+    }
+}
+
+async fn api_scenarios(State(s): State<UiState>) -> Json<Vec<ScenarioJson>> {
+    let Some(reg) = s.scenarios.as_ref() else {
+        return Json(Vec::new());
+    };
+    let mut out: Vec<ScenarioJson> = reg.lock().values().map(scenario_to_json).collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(out)
+}
+
+async fn api_scenario_start(
+    State(s): State<UiState>,
+    Path(name): Path<String>,
+) -> Result<Json<ScenarioJson>, StatusCode> {
+    advance_scenario(&s, &name, |rt, n| {
+        if n == 0 {
+            return None;
+        }
+        let now = chrono::Utc::now();
+        rt.current_stage = Some(0);
+        rt.started_at = Some(now);
+        rt.stage_entered_at = Some(now);
+        Some(0)
+    })
+}
+
+async fn api_scenario_next(
+    State(s): State<UiState>,
+    Path(name): Path<String>,
+) -> Result<Json<ScenarioJson>, StatusCode> {
+    advance_scenario(&s, &name, |rt, n| {
+        let cur = rt.current_stage?;
+        if cur + 1 >= n {
+            return None;
+        }
+        rt.current_stage = Some(cur + 1);
+        rt.stage_entered_at = Some(chrono::Utc::now());
+        Some(cur + 1)
+    })
+}
+
+async fn api_scenario_stop(
+    State(s): State<UiState>,
+    Path(name): Path<String>,
+) -> Result<Json<ScenarioJson>, StatusCode> {
+    let Some(reg) = s.scenarios.as_ref() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let mut guard = reg.lock();
+    let Some(entry) = guard.get_mut(&name) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    entry.runtime = ScenarioRuntime::default();
+    Ok(Json(scenario_to_json(entry)))
+}
+
+fn advance_scenario<F>(
+    s: &UiState,
+    name: &str,
+    update: F,
+) -> Result<Json<ScenarioJson>, StatusCode>
+where
+    F: FnOnce(&mut ScenarioRuntime, usize) -> Option<usize>,
+{
+    let (fn_name, payload) = {
+        let reg = s.scenarios.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+        let mut guard = reg.lock();
+        let entry = guard.get_mut(name).ok_or(StatusCode::NOT_FOUND)?;
+        let n = entry.def.stages.len();
+        let idx = update(&mut entry.runtime, n).ok_or(StatusCode::BAD_REQUEST)?;
+        (entry.def.stages[idx].fn_name.clone(), scenario_to_json(entry))
+    };
+    invoke_stage_fn(s, &fn_name);
+    Ok(Json(payload))
+}
+
+fn invoke_stage_fn(s: &UiState, fn_name: &str) {
+    let Some(ctx) = s.tulisp_ctx.as_ref() else {
+        return;
+    };
+    let expr = format!("({fn_name})");
+    let mut guard = ctx.borrow_mut();
+    if let Err(e) = guard.eval_string(&expr) {
+        log::warn!("scenario stage {fn_name}: {}", e.format(&guard));
     }
 }

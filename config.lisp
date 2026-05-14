@@ -67,4 +67,4 @@
 ;; (load "scenarios/morning-ramp.lisp")   ;; demand ramp on tn-q0
 ;; (load "scenarios/gate-crunch.lisp")    ;; widening spread on tn-q3
 ;; (load "scenarios/curtailment.lisp")    ;; supply surge on tn-q2
-;; (load "scenarios/elaborate.lisp")      ;; 3-hour six-phase tour
+(load "scenarios/elaborate.lisp")         ;; six-phase tour — UI-driven

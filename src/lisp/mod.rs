@@ -112,6 +112,7 @@ pub struct Config {
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
+    scenarios: crate::scenarios::SharedScenarios,
     /// Extra paths registered via `(watch-file PATH)`; the notify
     /// watcher reloads on any of them changing in addition to the
     /// top-level config file.
@@ -139,6 +140,7 @@ impl Config {
         let markets = Arc::new(Mutex::new(Vec::new()));
         let couplings = Arc::new(Mutex::new(Vec::new()));
         let aggressors = Arc::new(Mutex::new(HashMap::new()));
+        let scenarios = crate::scenarios::new_registry();
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
@@ -157,6 +159,7 @@ impl Config {
             markets.clone(),
             couplings.clone(),
             aggressors.clone(),
+            scenarios.clone(),
             extra_watches.clone(),
             load_dir.clone(),
             anchor,
@@ -185,6 +188,7 @@ impl Config {
             markets,
             couplings,
             aggressors,
+            scenarios,
             extra_watches,
             timer_handle,
             anchor,
@@ -328,6 +332,19 @@ impl Config {
         self.aggressors.lock().values().cloned().collect()
     }
 
+    /// Hand out the scenarios registry the lisp side populates via
+    /// `(define-scenario …)`. The UI layer mutates the runtime state
+    /// in this map when the browser hits the start/next/stop endpoints.
+    pub fn scenarios(&self) -> crate::scenarios::SharedScenarios {
+        self.scenarios.clone()
+    }
+
+    /// Hand out a clone of the shared TulispContext. Lets the UI
+    /// layer invoke named stage defuns by evaluating `(fn-name)`.
+    pub fn tulisp_ctx(&self) -> SharedMut<TulispContext> {
+        self.ctx.clone()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -350,6 +367,7 @@ fn register_runtime(
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
+    scenarios: crate::scenarios::SharedScenarios,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
     anchor: DateTime<Utc>,
@@ -361,7 +379,55 @@ fn register_runtime(
     register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
     register_aggressors(ctx, aggressors, anchor);
+    register_scenarios(ctx, scenarios);
     register_watches(ctx, extra_watches, load_dir);
+}
+
+AsPlist! {
+    pub struct DefineScenarioArgs {
+        name: String,
+        description: Option<String> {= None},
+        stages: Vec<Vec<String>>,
+    }
+}
+
+fn register_scenarios(
+    ctx: &mut TulispContext,
+    scenarios: crate::scenarios::SharedScenarios,
+) {
+    use crate::scenarios::{ScenarioDef, ScenarioEntry, ScenarioRuntime, Stage};
+    ctx.defun(
+        "define-scenario",
+        move |args: Plist<DefineScenarioArgs>| -> Result<String, Error> {
+            let a = args.into_inner();
+            let mut stages = Vec::new();
+            for stage in a.stages {
+                if stage.len() != 2 {
+                    return Err(Error::os_error(
+                        "define-scenario: each :stages entry must be \
+                         (DISPLAY-NAME FN-NAME)",
+                    ));
+                }
+                stages.push(Stage {
+                    name: stage[0].clone(),
+                    fn_name: stage[1].clone(),
+                });
+            }
+            let def = ScenarioDef {
+                name: a.name.clone(),
+                description: a.description.unwrap_or_default(),
+                stages,
+            };
+            scenarios.lock().insert(
+                a.name.clone(),
+                ScenarioEntry {
+                    def,
+                    runtime: ScenarioRuntime::default(),
+                },
+            );
+            Ok(a.name)
+        },
+    );
 }
 
 AsPlist! {
