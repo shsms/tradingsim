@@ -76,7 +76,9 @@ async fn historical_stream_replays_past_emissions() {
 
     // First subscriber triggers the initial emit which gets pushed
     // onto the server-side history ring.
-    let mut live = WeatherForecastServiceClient::connect(addr.clone()).await.unwrap();
+    let mut live = WeatherForecastServiceClient::connect(addr.clone())
+        .await
+        .unwrap();
     let mut live_stream = live
         .receive_live_weather_forecast(ReceiveLiveWeatherForecastRequest::default())
         .await
@@ -98,12 +100,18 @@ async fn historical_stream_replays_past_emissions() {
         msg.unwrap();
         seen += 1;
     }
-    assert!(seen >= 1, "expected at least one historical forecast, got {seen}");
+    assert!(
+        seen >= 1,
+        "expected at least one historical forecast, got {seen}"
+    );
 }
 
 #[tokio::test]
 async fn forecast_noise_scales_with_horizon() {
-    let addr = spawn_server(WeatherLocation { name: "test".to_string(), lat: 50.0, lon: 10.0,
+    let addr = spawn_server(WeatherLocation {
+        name: "test".to_string(),
+        lat: 50.0,
+        lon: 10.0,
         cloud_cover: 0.0,
         ..WeatherLocation::de_lu_typical()
     })
@@ -151,11 +159,17 @@ async fn forecast_noise_scales_with_horizon() {
 
 #[tokio::test]
 async fn cloud_cover_attenuates_solar_feature() {
-    let clear = WeatherLocation { name: "test".to_string(), lat: 50.0, lon: 10.0,
+    let clear = WeatherLocation {
+        name: "test".to_string(),
+        lat: 50.0,
+        lon: 10.0,
         cloud_cover: 0.0,
         ..WeatherLocation::de_lu_typical()
     };
-    let overcast = WeatherLocation { name: "test".to_string(), lat: 50.0, lon: 10.0,
+    let overcast = WeatherLocation {
+        name: "test".to_string(),
+        lat: 50.0,
+        lon: 10.0,
         cloud_cover: 0.9,
         ..WeatherLocation::de_lu_typical()
     };
@@ -180,9 +194,7 @@ async fn cloud_cover_attenuates_solar_feature() {
             .forecasts
             .iter()
             .flat_map(|f| &f.features)
-            .filter(|f| {
-                f.feature == ForecastFeature::SurfaceSolarRadiationDownwards as i32
-            })
+            .filter(|f| f.feature == ForecastFeature::SurfaceSolarRadiationDownwards as i32)
             .map(|f| f.value)
             .fold(f32::MIN, f32::max)
     }

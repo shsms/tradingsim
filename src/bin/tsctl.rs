@@ -314,7 +314,7 @@ fn render_trade_line(t: &tradingsim::proto::trading::Trade) -> String {
         .and_then(|p| p.mw.as_ref())
         .map(|a| a.value.clone())
         .unwrap_or_else(|| "?".into());
-    let period = fmt_short_time(&t.delivery_period.as_ref().and_then(|p| p.start.clone()));
+    let period = fmt_short_time(&t.delivery_period.as_ref().and_then(|p| p.start));
     format!(
         "trade#{} order#{} {side} {qty} MW @ {price} EUR (delivery {period}, {area})",
         t.id, t.order_id
@@ -349,8 +349,11 @@ fn render_public_trade_line(t: &tradingsim::proto::trading::PublicTrade) -> Stri
     } else {
         format!("{buy} -> {sell}")
     };
-    let period = fmt_short_time(&t.delivery_period.as_ref().and_then(|p| p.start.clone()));
-    format!("public#{} {qty} MW @ {price} EUR (delivery {period}, {cross})", t.id)
+    let period = fmt_short_time(&t.delivery_period.as_ref().and_then(|p| p.start));
+    format!(
+        "public#{} {qty} MW @ {price} EUR (delivery {period}, {cross})",
+        t.id
+    )
 }
 
 fn render_order_line(d: &tradingsim::proto::trading::OrderDetail) -> String {
@@ -391,7 +394,7 @@ fn render_order_line(d: &tradingsim::proto::trading::OrderDetail) -> String {
         &d.order
             .as_ref()
             .and_then(|o| o.delivery_period.as_ref())
-            .and_then(|p| p.start.clone()),
+            .and_then(|p| p.start),
     );
     format!("#{id} {side} {qty} MW @ {price} EUR (open {open}, delivery {period}) [{state}]")
 }
@@ -449,12 +452,17 @@ async fn cmd_scenarios(ui_addr: &str, action: ScenariosAction) -> Result<(), Str
         "GET" => client.get(&url),
         _ => client.post(&url),
     };
-    let resp = req.send().await.map_err(|e| format!("{method} {url}: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("{method} {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("{method} {url}: HTTP {}", resp.status()));
     }
-    let body: serde_json::Value =
-        resp.json().await.map_err(|e| format!("parse response: {e}"))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse response: {e}"))?;
     match action {
         ScenariosAction::List => {
             let arr = body.as_array().ok_or("expected JSON array")?;
@@ -701,9 +709,7 @@ async fn cmd_public_book(
                 .and_then(|p| p.mw.as_ref())
                 .map(|a| a.value.clone())
                 .unwrap_or_else(|| "?".into());
-            let period = fmt_short_time(
-                &r.delivery_period.as_ref().and_then(|p| p.start.clone()),
-            );
+            let period = fmt_short_time(&r.delivery_period.as_ref().and_then(|p| p.start));
             println!(
                 "book#{} {side} {qty} MW @ {price} EUR (delivery {period}, {area})",
                 r.id
@@ -755,7 +761,10 @@ async fn cmd_orders(
     live: bool,
 ) -> Result<(), String> {
     let filter = GridpoolOrderFilter {
-        states: state.into_iter().map(|s| OrderState::from(s) as i32).collect(),
+        states: state
+            .into_iter()
+            .map(|s| OrderState::from(s) as i32)
+            .collect(),
         side: side.map(|s| MarketSide::from(s) as i32),
         delivery_time_filter: None,
         delivery_area: None,
@@ -792,11 +801,7 @@ async fn cmd_orders(
     Ok(())
 }
 
-async fn cmd_weather(
-    addr: &str,
-    locations: Vec<(f32, f32)>,
-    live: bool,
-) -> Result<(), String> {
+async fn cmd_weather(addr: &str, locations: Vec<(f32, f32)>, live: bool) -> Result<(), String> {
     use tradingsim::proto::common_v1::Location;
     use tradingsim::proto::weather::{
         ForecastFeature, LocationForecast, ReceiveLiveWeatherForecastRequest,
@@ -843,9 +848,7 @@ async fn cmd_weather(
                 let parts: Vec<String> = h
                     .features
                     .iter()
-                    .map(|f| {
-                        format!("{}={:.1}", feature_label(f.feature), f.value)
-                    })
+                    .map(|f| format!("{}={:.1}", feature_label(f.feature), f.value))
                     .collect();
                 println!("{loc} +{i:02}h {ts}  {}", parts.join("  "));
             }
@@ -880,9 +883,7 @@ async fn main() {
                 Ok(())
             }
             Cmd::Scenarios { action } => cmd_scenarios(&cli.ui_addr, action).await,
-            Cmd::Weather { location, live } => {
-                cmd_weather(&cli.weather_addr, location, live).await
-            }
+            Cmd::Weather { location, live } => cmd_weather(&cli.weather_addr, location, live).await,
             cmd => {
                 let mut client = connect(&cli.addr).await?;
                 match cmd {

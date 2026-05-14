@@ -17,10 +17,8 @@ pub const DEFAULT_QTY_STEP: Decimal = dec!(0.1);
 /// prices.
 pub fn snap_to_tick(value: Decimal, tick: Decimal) -> Decimal {
     debug_assert!(tick > Decimal::ZERO, "tick must be positive");
-    let q = (value / tick).round_dp_with_strategy(
-        0,
-        rust_decimal::RoundingStrategy::MidpointAwayFromZero,
-    );
+    let q = (value / tick)
+        .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
     q * tick
 }
 

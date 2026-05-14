@@ -11,8 +11,8 @@ fn main() -> Result<(), std::io::Error> {
         .unwrap_or_else(|_| PathBuf::from("submodules/frequenz-api-electricity-trading"));
     let weather_root = PathBuf::from("submodules/frequenz-api-weather");
 
-    let trading_proto = trading_root
-        .join("proto/frequenz/api/electricity_trading/v1/electricity_trading.proto");
+    let trading_proto =
+        trading_root.join("proto/frequenz/api/electricity_trading/v1/electricity_trading.proto");
     let weather_proto = weather_root.join("proto/frequenz/api/weather/v1/weather.proto");
     let common_root = trading_root.join("submodules/frequenz-api-common/proto");
 

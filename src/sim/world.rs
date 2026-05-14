@@ -10,6 +10,8 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 
+use crate::proto::trading as proto_trading;
+use crate::proto_conv::{power_to_proto, price_to_proto, timestamp_to_proto};
 use crate::sim::book::OrderBook;
 use crate::sim::decimal::is_multiple_of;
 use crate::sim::gridpool::{Gridpool, GridpoolRegistry, SelfTradePolicy};
@@ -20,8 +22,6 @@ use crate::sim::order::{
     Side, StateDetail, StateReason,
 };
 use crate::sim::trade::{PublicTrade, Trade, TradeId, TradeState};
-use crate::proto::trading as proto_trading;
-use crate::proto_conv::{power_to_proto, price_to_proto, timestamp_to_proto};
 
 /// Cap on the in-memory public-tape history rings. Older entries are
 /// evicted FIFO once the cap is reached; replay requests for events
@@ -214,10 +214,7 @@ impl World {
     /// Replace the suspended-flag handle so the World shares state
     /// with the lisp Config. Called once at boot in the bin; before
     /// that, each World holds its own (locally-true) flag.
-    pub fn set_market_suspended_handle(
-        &mut self,
-        handle: Arc<parking_lot::RwLock<bool>>,
-    ) {
+    pub fn set_market_suspended_handle(&mut self, handle: Arc<parking_lot::RwLock<bool>>) {
         self.market_suspended = handle;
     }
 
@@ -280,7 +277,10 @@ impl World {
 
     fn debit_capacity(&mut self, a: &Area, b: &Area, period: DeliveryPeriod, mw: Decimal) {
         let (lo, hi) = canon_pair(a, b);
-        *self.coupling_fills.entry((lo, hi, period)).or_insert(Decimal::ZERO) += mw;
+        *self
+            .coupling_fills
+            .entry((lo, hi, period))
+            .or_insert(Decimal::ZERO) += mw;
     }
 
     pub fn markets(&self) -> &MarketRegistry {
@@ -307,8 +307,13 @@ impl World {
     /// Subscribe to a gridpool's order-update fan-out. Returns None
     /// if the gridpool isn't registered; the caller turns that into
     /// gRPC NOT_FOUND.
-    pub fn subscribe_orders(&self, gridpool_id: GridpoolId) -> Option<broadcast::Receiver<OrderDetail>> {
-        self.gridpool_order_tx.get(&gridpool_id).map(|tx| tx.subscribe())
+    pub fn subscribe_orders(
+        &self,
+        gridpool_id: GridpoolId,
+    ) -> Option<broadcast::Receiver<OrderDetail>> {
+        self.gridpool_order_tx
+            .get(&gridpool_id)
+            .map(|tx| tx.subscribe())
     }
 
     /// Subscribe to a gridpool's private trade tape.
@@ -316,7 +321,9 @@ impl World {
         &self,
         gridpool_id: GridpoolId,
     ) -> Option<broadcast::Receiver<Trade>> {
-        self.gridpool_trade_tx.get(&gridpool_id).map(|tx| tx.subscribe())
+        self.gridpool_trade_tx
+            .get(&gridpool_id)
+            .map(|tx| tx.subscribe())
     }
 
     /// Subscribe to the global public trade tape.
@@ -357,11 +364,7 @@ impl World {
                 continue;
             }
             for (order_id, side, price, qty) in book.iter_with_quantity() {
-                let create_time = self
-                    .book_first_seen
-                    .get(&order_id)
-                    .copied()
-                    .unwrap_or(now);
+                let create_time = self.book_first_seen.get(&order_id).copied().unwrap_or(now);
                 out.push(proto_trading::PublicOrderBookRecord {
                     id: order_id.0,
                     delivery_area: Some((&key.area).into()),
@@ -431,10 +434,7 @@ impl World {
         currency: Currency,
         now: DateTime<Utc>,
     ) {
-        let create_time = *self
-            .book_first_seen
-            .entry(order_id)
-            .or_insert(now);
+        let create_time = *self.book_first_seen.entry(order_id).or_insert(now);
         if open_qty.is_zero() {
             self.book_first_seen.remove(&order_id);
         }
@@ -527,7 +527,10 @@ impl World {
         mode: ExecMode,
         currency: Currency,
         now: DateTime<Utc>,
-    ) -> (Vec<(crate::sim::matching::Fill, Area)>, Option<crate::sim::book::Resting>) {
+    ) -> (
+        Vec<(crate::sim::matching::Fill, Area)>,
+        Option<crate::sim::book::Resting>,
+    ) {
         let keys = self.candidate_keys(&taker_key, now);
 
         // FOK pre-check across all candidate books.
@@ -575,12 +578,7 @@ impl World {
             // past the cap (the soft-cap behaviour real SIDC
             // doesn't have but the sim accepts for simplicity).
             if book_key.area != taker_key.area {
-                self.debit_capacity(
-                    &taker_key.area,
-                    &book_key.area,
-                    taker_key.period,
-                    taken,
-                );
+                self.debit_capacity(&taker_key.area, &book_key.area, taker_key.period, taken);
             }
             fills.push((
                 crate::sim::matching::Fill {
@@ -613,7 +611,8 @@ impl World {
                 id: taker.id,
                 open_qty: taker.quantity,
             };
-            self.book_mut(taker_key.clone()).insert(taker.side, taker.price, r);
+            self.book_mut(taker_key.clone())
+                .insert(taker.side, taker.price, r);
             self.emit_book_event(
                 taker.id,
                 taker.side,
@@ -640,11 +639,7 @@ impl World {
     /// coupled area whose cross-border gate is still open and
     /// whose per-contract edge capacity isn't already exhausted.
     /// Used by both the matcher and the self-trade pre-flight.
-    fn candidate_keys(
-        &self,
-        taker_key: &ContractKey,
-        now: DateTime<Utc>,
-    ) -> Vec<ContractKey> {
+    fn candidate_keys(&self, taker_key: &ContractKey, now: DateTime<Utc>) -> Vec<ContractKey> {
         let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
         for (other, coupling) in self.coupled_areas(&taker_key.area) {
             if coupling.gate_offset > std::time::Duration::ZERO {
@@ -654,12 +649,10 @@ impl World {
                     continue;
                 }
             }
-            if let Some(rem) =
-                self.remaining_capacity(&taker_key.area, &other, taker_key.period)
+            if let Some(rem) = self.remaining_capacity(&taker_key.area, &other, taker_key.period)
+                && rem <= Decimal::ZERO
             {
-                if rem <= Decimal::ZERO {
-                    continue;
-                }
+                continue;
             }
             keys.push(ContractKey {
                 area: other,
@@ -832,7 +825,12 @@ impl World {
         //     leftover; Filled if all matched.
         //   Resting + filled < total but no rest = unreachable for now.
         // (mode, rested, no-fills, fully-filled) → (state, reason).
-        let (state, reason) = match (mode, outcome.rested.is_some(), filled.is_zero(), open.is_zero()) {
+        let (state, reason) = match (
+            mode,
+            outcome.rested.is_some(),
+            filled.is_zero(),
+            open.is_zero(),
+        ) {
             // Restable + on-book outcomes (Resting only — IOC/FOK
             // never rest):
             (_, true, true, _) => (OrderState::Active, StateReason::Add),
@@ -1152,11 +1150,7 @@ impl World {
                 if d.state.state.is_terminal() {
                     continue;
                 }
-                let valid_until_lapsed = d
-                    .order
-                    .valid_until
-                    .map(|vu| vu <= now)
-                    .unwrap_or(false);
+                let valid_until_lapsed = d.order.valid_until.map(|vu| vu <= now).unwrap_or(false);
                 let gate_closed = d.order.period.start <= now;
                 if valid_until_lapsed || gate_closed {
                     expirables.push((
@@ -1631,7 +1625,9 @@ mod tests {
     #[test]
     fn submit_admits_resting_order() {
         let (mut w, gp) = setup_world_with_pool();
-        let d = w.submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0()).unwrap();
+        let d = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
         assert_eq!(d.state.state, OrderState::Active);
         assert_eq!(d.state.reason, StateReason::Add);
         assert_eq!(d.open_quantity, dec!(1.0));
@@ -1674,7 +1670,8 @@ mod tests {
     #[test]
     fn submit_partial_cross_leaves_taker_active() {
         let (mut w, gp) = setup_world_with_pool();
-        w.submit_order(gp, sample_sell(dec!(0.5), dec!(85.0)), t0()).unwrap();
+        w.submit_order(gp, sample_sell(dec!(0.5), dec!(85.0)), t0())
+            .unwrap();
         let buy = w
             .submit_order(gp, sample_buy(dec!(2.0), dec!(85.0)), t0())
             .unwrap();
@@ -1697,9 +1694,18 @@ mod tests {
                 },
                 SubmitError::AreaNotAllowedForGridpool,
             ),
-            (sample_buy(dec!(1.0), dec!(85.005)), SubmitError::PriceOffGrid),
-            (sample_buy(dec!(1.05), dec!(85.0)), SubmitError::QuantityOffGrid),
-            (sample_buy(dec!(0), dec!(85.0)), SubmitError::NonPositiveQuantity),
+            (
+                sample_buy(dec!(1.0), dec!(85.005)),
+                SubmitError::PriceOffGrid,
+            ),
+            (
+                sample_buy(dec!(1.05), dec!(85.0)),
+                SubmitError::QuantityOffGrid,
+            ),
+            (
+                sample_buy(dec!(0), dec!(85.0)),
+                SubmitError::NonPositiveQuantity,
+            ),
             (
                 Order {
                     currency: Currency::Usd,
@@ -1943,7 +1949,13 @@ mod tests {
         let n = w.expire_lapsed_orders(earlier);
         assert_eq!(n, 0);
         assert_eq!(
-            w.gridpools().get(gp).unwrap().get_order(d.id).unwrap().state.state,
+            w.gridpools()
+                .get(gp)
+                .unwrap()
+                .get_order(d.id)
+                .unwrap()
+                .state
+                .state,
             OrderState::Active
         );
 
@@ -1974,14 +1986,19 @@ mod tests {
         assert_eq!(w.book(&de_lu_hour()).unwrap().len(), 2);
 
         // Cross past the delivery start — gate is closed.
-        let after_gate = sample_buy(dec!(1.0), dec!(85.0)).period.start
-            + chrono::Duration::seconds(1);
+        let after_gate =
+            sample_buy(dec!(1.0), dec!(85.0)).period.start + chrono::Duration::seconds(1);
         let n = w.expire_lapsed_orders(after_gate);
         assert_eq!(n, 2);
 
         // Both rests gone; gridpool order flipped to Expired.
         assert!(w.book(&de_lu_hour()).unwrap().is_empty());
-        let post = w.gridpools().get(gp).unwrap().get_order(gp_rest.id).unwrap();
+        let post = w
+            .gridpools()
+            .get(gp)
+            .unwrap()
+            .get_order(gp_rest.id)
+            .unwrap();
         assert_eq!(post.state.state, OrderState::Expired);
         // Counterparty book sweep emits qty=0 — a subsequent
         // explicit cancel is a no-op.
@@ -2015,11 +2032,7 @@ mod tests {
         let de = Area::eic("10Y1001A1001A82H");
         let fr = Area::eic("10YFR-RTE------C");
         w.add_coupling(de.clone(), fr.clone(), std::time::Duration::ZERO, None);
-        w.register_gridpool(Gridpool::new(
-            GridpoolId(1),
-            "de",
-            vec![de.clone()],
-        ));
+        w.register_gridpool(Gridpool::new(GridpoolId(1), "de", vec![de.clone()]));
         w.register_gridpool(Gridpool::new(GridpoolId(2), "fr", vec![fr.clone()]));
 
         let mut public_rx = w.subscribe_public_trades();
@@ -2056,7 +2069,12 @@ mod tests {
         let mut w = World::new(markets);
         let de = Area::eic("10Y1001A1001A82H");
         let fr = Area::eic("10YFR-RTE------C");
-        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::from_secs(3600), None);
+        w.add_coupling(
+            de.clone(),
+            fr.clone(),
+            std::time::Duration::from_secs(3600),
+            None,
+        );
         w.register_gridpool(Gridpool::new(GridpoolId(1), "de", vec![de.clone()]));
         w.register_gridpool(Gridpool::new(GridpoolId(2), "fr", vec![fr.clone()]));
 
@@ -2159,7 +2177,8 @@ mod tests {
     fn fok_with_insufficient_depth_cancels_without_fills() {
         let (mut w, gp) = setup_world_with_pool();
         // Resting sell of 0.5; FOK buy of 1.0 needs full match.
-        w.submit_order(gp, sample_sell(dec!(0.5), dec!(85.0)), t0()).unwrap();
+        w.submit_order(gp, sample_sell(dec!(0.5), dec!(85.0)), t0())
+            .unwrap();
         let fok = Order {
             execution_option: Some(ExecutionOption::Fok),
             ..sample_buy(dec!(1.0), dec!(85.0))
@@ -2169,16 +2188,14 @@ mod tests {
         assert_eq!(d.state.reason, StateReason::Reject);
         assert_eq!(d.filled_quantity, dec!(0));
         // Resting 0.5 sell is untouched.
-        assert_eq!(
-            w.book(&de_lu_hour()).unwrap().best_ask(),
-            Some(dec!(85.0))
-        );
+        assert_eq!(w.book(&de_lu_hour()).unwrap().best_ask(), Some(dec!(85.0)));
     }
 
     #[test]
     fn fok_with_sufficient_depth_fully_fills() {
         let (mut w, gp) = setup_world_with_pool();
-        w.submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0()).unwrap();
+        w.submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
         let fok = Order {
             execution_option: Some(ExecutionOption::Fok),
             ..sample_buy(dec!(1.0), dec!(85.0))
@@ -2191,7 +2208,8 @@ mod tests {
     #[test]
     fn ioc_takes_what_it_can_then_cancels_rest() {
         let (mut w, gp) = setup_world_with_pool();
-        w.submit_order(gp, sample_sell(dec!(0.4), dec!(85.0)), t0()).unwrap();
+        w.submit_order(gp, sample_sell(dec!(0.4), dec!(85.0)), t0())
+            .unwrap();
         let ioc = Order {
             execution_option: Some(ExecutionOption::Ioc),
             ..sample_buy(dec!(1.0), dec!(85.0))
@@ -2300,10 +2318,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, SubmitError::SelfTradeRejected);
         // Resting sell still on the book; no trades recorded.
-        assert_eq!(
-            w.book(&de_lu_hour()).unwrap().best_ask(),
-            Some(dec!(85.0))
-        );
+        assert_eq!(w.book(&de_lu_hour()).unwrap().best_ask(), Some(dec!(85.0)));
         assert!(w.gridpools().get(gp).unwrap().trades().is_empty());
     }
 

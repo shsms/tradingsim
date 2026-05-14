@@ -149,7 +149,11 @@ mod tests {
     #[test]
     fn no_cross_just_rests() {
         let mut b = OrderBook::new();
-        let out = match_limit(&mut b, lim(1, Side::Buy, dec!(85.0), dec!(1.0)), ExecMode::Resting);
+        let out = match_limit(
+            &mut b,
+            lim(1, Side::Buy, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
         assert!(out.fills.is_empty());
         assert_eq!(out.rested.unwrap().id, OrderId(1));
         assert_eq!(b.best_bid(), Some(dec!(85.0)));
@@ -158,8 +162,16 @@ mod tests {
     #[test]
     fn full_match_against_single_resting() {
         let mut b = OrderBook::new();
-        match_limit(&mut b, lim(1, Side::Sell, dec!(85.0), dec!(1.0)), ExecMode::Resting);
-        let out = match_limit(&mut b, lim(2, Side::Buy, dec!(85.0), dec!(1.0)), ExecMode::Resting);
+        match_limit(
+            &mut b,
+            lim(1, Side::Sell, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
+        let out = match_limit(
+            &mut b,
+            lim(2, Side::Buy, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
 
         assert_eq!(out.fills.len(), 1);
         assert_eq!(
@@ -178,8 +190,16 @@ mod tests {
     #[test]
     fn taker_larger_than_resting_partial_rest() {
         let mut b = OrderBook::new();
-        match_limit(&mut b, lim(1, Side::Sell, dec!(85.0), dec!(0.5)), ExecMode::Resting);
-        let out = match_limit(&mut b, lim(2, Side::Buy, dec!(86.0), dec!(2.0)), ExecMode::Resting);
+        match_limit(
+            &mut b,
+            lim(1, Side::Sell, dec!(85.0), dec!(0.5)),
+            ExecMode::Resting,
+        );
+        let out = match_limit(
+            &mut b,
+            lim(2, Side::Buy, dec!(86.0), dec!(2.0)),
+            ExecMode::Resting,
+        );
 
         assert_eq!(out.fills.len(), 1);
         assert_eq!(out.fills[0].quantity, dec!(0.5));
@@ -194,11 +214,27 @@ mod tests {
     #[test]
     fn sweeps_multiple_levels_in_price_order() {
         let mut b = OrderBook::new();
-        match_limit(&mut b, lim(1, Side::Sell, dec!(85.0), dec!(0.5)), ExecMode::Resting);
-        match_limit(&mut b, lim(2, Side::Sell, dec!(85.5), dec!(0.5)), ExecMode::Resting);
-        match_limit(&mut b, lim(3, Side::Sell, dec!(86.0), dec!(0.5)), ExecMode::Resting);
+        match_limit(
+            &mut b,
+            lim(1, Side::Sell, dec!(85.0), dec!(0.5)),
+            ExecMode::Resting,
+        );
+        match_limit(
+            &mut b,
+            lim(2, Side::Sell, dec!(85.5), dec!(0.5)),
+            ExecMode::Resting,
+        );
+        match_limit(
+            &mut b,
+            lim(3, Side::Sell, dec!(86.0), dec!(0.5)),
+            ExecMode::Resting,
+        );
 
-        let out = match_limit(&mut b, lim(4, Side::Buy, dec!(86.0), dec!(1.2)), ExecMode::Resting);
+        let out = match_limit(
+            &mut b,
+            lim(4, Side::Buy, dec!(86.0), dec!(1.2)),
+            ExecMode::Resting,
+        );
         assert_eq!(out.fills.len(), 3);
         // Best ask first.
         assert_eq!(out.fills[0].price, dec!(85.0));
@@ -215,12 +251,28 @@ mod tests {
     fn time_priority_at_same_level() {
         let mut b = OrderBook::new();
         // Three sells at 85.0, inserted in id order.
-        match_limit(&mut b, lim(1, Side::Sell, dec!(85.0), dec!(1.0)), ExecMode::Resting);
-        match_limit(&mut b, lim(2, Side::Sell, dec!(85.0), dec!(1.0)), ExecMode::Resting);
-        match_limit(&mut b, lim(3, Side::Sell, dec!(85.0), dec!(1.0)), ExecMode::Resting);
+        match_limit(
+            &mut b,
+            lim(1, Side::Sell, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
+        match_limit(
+            &mut b,
+            lim(2, Side::Sell, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
+        match_limit(
+            &mut b,
+            lim(3, Side::Sell, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
 
         // Buy 2.5 sweeps id 1 in full, id 2 in full, id 3 partially.
-        let out = match_limit(&mut b, lim(4, Side::Buy, dec!(85.0), dec!(2.5)), ExecMode::Resting);
+        let out = match_limit(
+            &mut b,
+            lim(4, Side::Buy, dec!(85.0), dec!(2.5)),
+            ExecMode::Resting,
+        );
         let maker_ids: Vec<_> = out.fills.iter().map(|f| f.maker_id).collect();
         assert_eq!(maker_ids, vec![OrderId(1), OrderId(2), OrderId(3)]);
         let taken: Vec<_> = out.fills.iter().map(|f| f.quantity).collect();
@@ -231,11 +283,23 @@ mod tests {
     #[test]
     fn taker_stops_at_non_crossing_level() {
         let mut b = OrderBook::new();
-        match_limit(&mut b, lim(1, Side::Sell, dec!(85.0), dec!(0.3)), ExecMode::Resting);
-        match_limit(&mut b, lim(2, Side::Sell, dec!(86.0), dec!(1.0)), ExecMode::Resting); // too expensive
+        match_limit(
+            &mut b,
+            lim(1, Side::Sell, dec!(85.0), dec!(0.3)),
+            ExecMode::Resting,
+        );
+        match_limit(
+            &mut b,
+            lim(2, Side::Sell, dec!(86.0), dec!(1.0)),
+            ExecMode::Resting,
+        ); // too expensive
 
         // Buyer limit at 85.0: only the 85.0 level is takeable.
-        let out = match_limit(&mut b, lim(3, Side::Buy, dec!(85.0), dec!(2.0)), ExecMode::Resting);
+        let out = match_limit(
+            &mut b,
+            lim(3, Side::Buy, dec!(85.0), dec!(2.0)),
+            ExecMode::Resting,
+        );
         assert_eq!(out.fills.len(), 1);
         assert_eq!(out.fills[0].quantity, dec!(0.3));
         // Leftover (1.7) rests at the buyer's 85.0.
@@ -247,9 +311,17 @@ mod tests {
     #[test]
     fn match_price_is_maker_price_not_taker() {
         let mut b = OrderBook::new();
-        match_limit(&mut b, lim(1, Side::Sell, dec!(85.0), dec!(1.0)), ExecMode::Resting);
+        match_limit(
+            &mut b,
+            lim(1, Side::Sell, dec!(85.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
         // Buyer willing to pay 90, but matches at 85.
-        let out = match_limit(&mut b, lim(2, Side::Buy, dec!(90.0), dec!(1.0)), ExecMode::Resting);
+        let out = match_limit(
+            &mut b,
+            lim(2, Side::Buy, dec!(90.0), dec!(1.0)),
+            ExecMode::Resting,
+        );
         assert_eq!(out.fills[0].price, dec!(85.0));
     }
 }

@@ -251,15 +251,9 @@ mod tests {
             ..default_loc()
         });
         r.link_area("10YDE-VE-------2", i);
-        assert_eq!(
-            r.for_area("10YDE-VE-------2").cloud_cover,
-            0.9
-        );
+        assert_eq!(r.for_area("10YDE-VE-------2").cloud_cover, 0.9);
         // Unlinked area falls back to the default.
-        assert_eq!(
-            r.for_area("10YFR-RTE------C").cloud_cover,
-            0.30
-        );
+        assert_eq!(r.for_area("10YFR-RTE------C").cloud_cover, 0.30);
     }
 
     #[test]

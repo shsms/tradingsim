@@ -13,8 +13,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use rand::Rng;
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rust_decimal::Decimal;
 use rust_decimal::dec;
 

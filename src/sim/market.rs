@@ -86,8 +86,7 @@ impl DeliveryPeriod {
     /// alignment for each duration.
     pub fn is_aligned(&self) -> bool {
         let m = self.start.timestamp() / 60;
-        m % self.duration.as_minutes() == 0
-            && self.start.timestamp() % 60 == 0
+        m % self.duration.as_minutes() == 0 && self.start.timestamp() % 60 == 0
     }
 
     pub fn end(&self) -> DateTime<Utc> {
@@ -187,24 +186,39 @@ mod tests {
         let off_grid = Utc.with_ymd_and_hms(2026, 5, 13, 12, 7, 0).unwrap();
 
         assert!(
-            DeliveryPeriod { start: on_hour, duration: DeliveryDuration::DeliveryDuration60 }
-                .is_aligned()
+            DeliveryPeriod {
+                start: on_hour,
+                duration: DeliveryDuration::DeliveryDuration60
+            }
+            .is_aligned()
         );
         assert!(
-            DeliveryPeriod { start: on_hour, duration: DeliveryDuration::DeliveryDuration15 }
-                .is_aligned()
+            DeliveryPeriod {
+                start: on_hour,
+                duration: DeliveryDuration::DeliveryDuration15
+            }
+            .is_aligned()
         );
         assert!(
-            DeliveryPeriod { start: on_quarter, duration: DeliveryDuration::DeliveryDuration15 }
-                .is_aligned()
+            DeliveryPeriod {
+                start: on_quarter,
+                duration: DeliveryDuration::DeliveryDuration15
+            }
+            .is_aligned()
         );
         assert!(
-            !DeliveryPeriod { start: on_quarter, duration: DeliveryDuration::DeliveryDuration60 }
-                .is_aligned()
+            !DeliveryPeriod {
+                start: on_quarter,
+                duration: DeliveryDuration::DeliveryDuration60
+            }
+            .is_aligned()
         );
         assert!(
-            !DeliveryPeriod { start: off_grid, duration: DeliveryDuration::DeliveryDuration15 }
-                .is_aligned()
+            !DeliveryPeriod {
+                start: off_grid,
+                duration: DeliveryDuration::DeliveryDuration15
+            }
+            .is_aligned()
         );
     }
 
@@ -214,7 +228,10 @@ mod tests {
             start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
             duration: DeliveryDuration::DeliveryDuration15,
         };
-        assert_eq!(p.end(), Utc.with_ymd_and_hms(2026, 5, 13, 12, 15, 0).unwrap());
+        assert_eq!(
+            p.end(),
+            Utc.with_ymd_and_hms(2026, 5, 13, 12, 15, 0).unwrap()
+        );
     }
 
     #[test]

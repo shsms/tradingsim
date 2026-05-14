@@ -6,9 +6,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::proto::trading::{MarketSide, PublicOrderBookRecord};
+use crate::scenarios::{ScenarioEntry, ScenarioRuntime, SharedScenarios};
+use crate::sim::trade::PublicTrade;
+use crate::sim::world::World;
 use axum::Router;
-use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
@@ -16,10 +20,6 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
-use crate::proto::trading::{MarketSide, PublicOrderBookRecord};
-use crate::scenarios::{ScenarioEntry, ScenarioRuntime, SharedScenarios};
-use crate::sim::trade::PublicTrade;
-use crate::sim::world::World;
 
 #[derive(Clone)]
 struct UiState {
@@ -139,10 +139,7 @@ impl From<&PublicTrade> for PublicTradeJson {
     }
 }
 
-async fn ws_public_trades(
-    ws: WebSocketUpgrade,
-    State(s): State<UiState>,
-) -> impl IntoResponse {
+async fn ws_public_trades(ws: WebSocketUpgrade, State(s): State<UiState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_trades_ws(socket, s))
 }
 
@@ -152,10 +149,10 @@ async fn handle_trades_ws(mut socket: WebSocket, s: UiState) {
     while let Some(item) = stream.next().await {
         let Ok(t) = item else { continue };
         let payload: PublicTradeJson = (&t).into();
-        if let Ok(s) = serde_json::to_string(&payload) {
-            if socket.send(Message::Text(s.into())).await.is_err() {
-                break;
-            }
+        if let Ok(s) = serde_json::to_string(&payload)
+            && socket.send(Message::Text(s.into())).await.is_err()
+        {
+            break;
         }
     }
 }
@@ -207,10 +204,7 @@ fn book_record_to_json(r: &PublicOrderBookRecord) -> PublicBookJson {
     }
 }
 
-async fn ws_public_book(
-    ws: WebSocketUpgrade,
-    State(s): State<UiState>,
-) -> impl IntoResponse {
+async fn ws_public_book(ws: WebSocketUpgrade, State(s): State<UiState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_book_ws(socket, s))
 }
 
@@ -230,10 +224,10 @@ async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
     };
     for rec in snapshot {
         let payload = book_record_to_json(&rec);
-        if let Ok(s) = serde_json::to_string(&payload) {
-            if socket.send(Message::Text(s.into())).await.is_err() {
-                return;
-            }
+        if let Ok(s) = serde_json::to_string(&payload)
+            && socket.send(Message::Text(s.into())).await.is_err()
+        {
+            return;
         }
     }
 
@@ -241,10 +235,10 @@ async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
     while let Some(item) = stream.next().await {
         let Ok(r) = item else { continue };
         let payload = book_record_to_json(&r);
-        if let Ok(s) = serde_json::to_string(&payload) {
-            if socket.send(Message::Text(s.into())).await.is_err() {
-                break;
-            }
+        if let Ok(s) = serde_json::to_string(&payload)
+            && socket.send(Message::Text(s.into())).await.is_err()
+        {
+            break;
         }
     }
 }
@@ -395,11 +389,7 @@ async fn api_scenario_stop(
     })
 }
 
-fn jump_relative(
-    s: &UiState,
-    name: &str,
-    delta: i64,
-) -> Result<Json<ScenarioJson>, StatusCode> {
+fn jump_relative(s: &UiState, name: &str, delta: i64) -> Result<Json<ScenarioJson>, StatusCode> {
     mutate_scenario(s, name, |def, rt| {
         let cur = rt.current_stage.ok_or(StatusCode::BAD_REQUEST)? as i64;
         let target = cur + delta;
@@ -415,11 +405,7 @@ fn jump_relative(
     })
 }
 
-fn mutate_scenario<F>(
-    s: &UiState,
-    name: &str,
-    f: F,
-) -> Result<Json<ScenarioJson>, StatusCode>
+fn mutate_scenario<F>(s: &UiState, name: &str, f: F) -> Result<Json<ScenarioJson>, StatusCode>
 where
     F: FnOnce(&crate::scenarios::ScenarioDef, &mut ScenarioRuntime) -> Result<(), StatusCode>,
 {

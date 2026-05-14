@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Timelike, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Timelike, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
@@ -84,14 +84,14 @@ pub fn new_registry() -> SharedScenarios {
 pub fn natural_duck_bias(hour: f64) -> f64 {
     let h = hour.rem_euclid(24.0);
     match h {
-        h if h < 5.0  => 0.50,                              // overnight
-        h if h < 9.0  => lerp(0.50, 0.62, (h - 5.0) / 4.0), // morning ramp
-        h if h < 10.0 => 0.55,                              // post-peak
-        h if h < 15.0 => 0.35,                              // solar belly
-        h if h < 17.0 => 0.50,                              // transition
-        h if h < 21.0 => 0.72,                              // evening peak
+        h if h < 5.0 => 0.50,                              // overnight
+        h if h < 9.0 => lerp(0.50, 0.62, (h - 5.0) / 4.0), // morning ramp
+        h if h < 10.0 => 0.55,                             // post-peak
+        h if h < 15.0 => 0.35,                             // solar belly
+        h if h < 17.0 => 0.50,                             // transition
+        h if h < 21.0 => 0.72,                             // evening peak
         h if h < 23.0 => 0.60,
-        _             => 0.50,
+        _ => 0.50,
     }
 }
 
@@ -111,11 +111,7 @@ pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
 /// bias tracks wallclock progress through [hour_from, hour_to). In
 /// manual mode it tracks elapsed time since the operator clicked,
 /// scaled by the stage's duration.
-pub fn stage_bias_now(
-    stage: &Stage,
-    runtime: &ScenarioRuntime,
-    now: DateTime<Utc>,
-) -> f64 {
+pub fn stage_bias_now(stage: &Stage, runtime: &ScenarioRuntime, now: DateTime<Utc>) -> f64 {
     let duration_hours = (stage.hour_to - stage.hour_from).max(0.001);
     let t = if runtime.manual_override {
         runtime
@@ -248,23 +244,18 @@ fn pick_active_bias(scenarios: &SharedScenarios, now: DateTime<Utc>) -> Option<f
         if entry.runtime.current_stage.is_none() {
             continue;
         }
-        if !entry.runtime.manual_override {
-            if let Some(idx) = wallclock_stage(&entry.def, wallclock_h) {
-                if entry.runtime.current_stage != Some(idx) {
-                    entry.runtime.current_stage = Some(idx);
-                    entry.runtime.stage_entered_at = Some(today_at(
-                        entry.def.stages[idx].hour_from,
-                        now,
-                    ));
-                }
-            }
+        if !entry.runtime.manual_override
+            && let Some(idx) = wallclock_stage(&entry.def, wallclock_h)
+            && entry.runtime.current_stage != Some(idx)
+        {
+            entry.runtime.current_stage = Some(idx);
+            entry.runtime.stage_entered_at = Some(today_at(entry.def.stages[idx].hour_from, now));
         }
-        if active.is_none() {
-            if let Some(idx) = entry.runtime.current_stage {
-                if let Some(stage) = entry.def.stages.get(idx) {
-                    active = Some(stage_bias_now(stage, &entry.runtime, now));
-                }
-            }
+        if active.is_none()
+            && let Some(idx) = entry.runtime.current_stage
+            && let Some(stage) = entry.def.stages.get(idx)
+        {
+            active = Some(stage_bias_now(stage, &entry.runtime, now));
         }
     }
     active

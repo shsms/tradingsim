@@ -39,11 +39,7 @@ fn next_hour_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
 /// rolls the MM's delivery period forward each tick so the MM
 /// always quotes the contract starting that many quarter-hours from
 /// the next 15-min boundary.
-fn spawn_mm_task(
-    world: Arc<Mutex<World>>,
-    mut mm: MarketMaker,
-    quarter_offset: i64,
-) {
+fn spawn_mm_task(world: Arc<Mutex<World>>, mut mm: MarketMaker, quarter_offset: i64) {
     let cfg = mm.shared_config();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(MM_REFRESH_INTERVAL);
@@ -136,7 +132,10 @@ async fn main() {
         .map(|c| c.market_rules())
         .unwrap_or_default();
     if !lisp_market_rules.is_empty() {
-        log::info!("Registering {} market(s) from config.lisp", lisp_market_rules.len());
+        log::info!(
+            "Registering {} market(s) from config.lisp",
+            lisp_market_rules.len()
+        );
         for rules in lisp_market_rules {
             markets.insert(rules);
         }
@@ -222,7 +221,10 @@ async fn main() {
 
     let mut mm_views: Vec<tradingsim::scenarios::MmView> = Vec::new();
     if !mm_specs.is_empty() {
-        log::info!("Spawning {} market-maker(s) from config.lisp", mm_specs.len());
+        log::info!(
+            "Spawning {} market-maker(s) from config.lisp",
+            mm_specs.len()
+        );
         for spec in mm_specs {
             let offset = spec.quarter_offset;
             mm_views.push(tradingsim::scenarios::MmView {
@@ -306,8 +308,7 @@ async fn main() {
                 let period_start = cfg_snap.period.start;
                 let area_code = cfg_snap.area.code.clone();
                 drop(cfg_snap);
-                let hour = period_start.hour() as f64
-                    + period_start.minute() as f64 / 60.0;
+                let hour = period_start.hour() as f64 + period_start.minute() as f64 / 60.0;
                 let loc = weather.for_area(&area_code);
                 view.shared_config.write().reference_price =
                     tradingsim::scenarios::effective_ref(&curve, loc, hour);
@@ -335,7 +336,10 @@ async fn main() {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tick.tick().await;
-                let n = world_for_expiry.lock().await.expire_lapsed_orders(Utc::now());
+                let n = world_for_expiry
+                    .lock()
+                    .await
+                    .expire_lapsed_orders(Utc::now());
                 if n > 0 {
                     log::info!("Expired {n} order(s) on the valid_until deadline");
                 }
@@ -381,9 +385,7 @@ async fn main() {
         let weather = lisp_config_arc.as_ref().map(|c| c.weather());
         let ui_addr: std::net::SocketAddr = "127.0.0.1:8811".parse().unwrap();
         tokio::spawn(async move {
-            if let Err(e) =
-                ui_server::serve(ui_addr, world_for_ui, scenarios, weather).await
-            {
+            if let Err(e) = ui_server::serve(ui_addr, world_for_ui, scenarios, weather).await {
                 log::error!("UI server exited: {e}");
             }
         });
@@ -399,9 +401,8 @@ async fn main() {
         let weather_handle = c.weather();
         let weather_addr: std::net::SocketAddr = "[::1]:8812".parse().unwrap();
         tokio::spawn(async move {
-            let service = WeatherForecastServiceServer::new(WeatherForecastServer::new(
-                weather_handle,
-            ));
+            let service =
+                WeatherForecastServiceServer::new(WeatherForecastServer::new(weather_handle));
             log::info!("WeatherForecast gRPC server listening on {weather_addr}");
             if let Err(e) = Server::builder()
                 .add_service(service)

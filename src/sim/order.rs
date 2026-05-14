@@ -10,10 +10,10 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+pub use crate::proto::trading::order_detail::state_detail::{MarketActor, StateReason};
 pub use crate::proto::trading::{
     MarketSide as Side, OrderExecutionOption as ExecutionOption, OrderState, OrderType,
 };
-pub use crate::proto::trading::order_detail::state_detail::{MarketActor, StateReason};
 
 use crate::sim::market::{Area, Currency, DeliveryPeriod};
 
@@ -126,7 +126,11 @@ mod tests {
         ] {
             assert!(s.is_terminal(), "{s:?} should be terminal");
         }
-        for s in [OrderState::Pending, OrderState::Active, OrderState::Hibernate] {
+        for s in [
+            OrderState::Pending,
+            OrderState::Active,
+            OrderState::Hibernate,
+        ] {
             assert!(!s.is_terminal(), "{s:?} should NOT be terminal");
         }
     }

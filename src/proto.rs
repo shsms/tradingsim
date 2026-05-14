@@ -12,7 +12,7 @@ mod pb {
     tonic::include_proto!("proto_v1");
 }
 
-pub use pb::frequenz::api::common::v1alpha8 as common;
 pub use pb::frequenz::api::common::v1 as common_v1;
+pub use pb::frequenz::api::common::v1alpha8 as common;
 pub use pb::frequenz::api::electricity_trading::electricity_trading::v1 as trading;
 pub use pb::frequenz::api::weather::v1 as weather;

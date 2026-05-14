@@ -55,12 +55,10 @@ impl WeatherForecastServer {
     }
 }
 
-type LiveStream = Pin<
-    Box<dyn Stream<Item = Result<ReceiveLiveWeatherForecastResponse, Status>> + Send>,
->;
-type HistStream = Pin<
-    Box<dyn Stream<Item = Result<ReceiveHistoricalWeatherForecastResponse, Status>> + Send>,
->;
+type LiveStream =
+    Pin<Box<dyn Stream<Item = Result<ReceiveLiveWeatherForecastResponse, Status>> + Send>>;
+type HistStream =
+    Pin<Box<dyn Stream<Item = Result<ReceiveHistoricalWeatherForecastResponse, Status>> + Send>>;
 
 #[tonic::async_trait]
 impl WeatherForecastService for WeatherForecastServer {
@@ -78,9 +76,7 @@ impl WeatherForecastService for WeatherForecastServer {
         let requested: Vec<(f64, f64)> = req
             .locations
             .iter()
-            .filter_map(|loc| {
-                Some((loc.latitude as f64, loc.longitude as f64))
-            })
+            .filter_map(|loc| Some((loc.latitude as f64, loc.longitude as f64)))
             .collect();
         let (tx, rx) = mpsc::channel(8);
         let weather = self.weather.clone();

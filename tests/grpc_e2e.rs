@@ -9,7 +9,9 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
-use tradingsim::proto::common::grid::{DeliveryArea, DeliveryDuration, DeliveryPeriod, EnergyMarketCodeType};
+use tradingsim::proto::common::grid::{
+    DeliveryArea, DeliveryDuration, DeliveryPeriod, EnergyMarketCodeType,
+};
 use tradingsim::proto::common::market::{Power, Price, price::Currency as PrCurrency};
 use tradingsim::proto::common::types::Decimal as PrDecimal;
 use tradingsim::proto::trading::{
@@ -113,7 +115,9 @@ fn limit_order(side: MarketSide, p: &str, qty: &str) -> Order {
 #[tokio::test]
 async fn place_then_list_then_cancel() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
 
     // Place a resting buy.
     let created = client
@@ -153,7 +157,14 @@ async fn place_then_list_then_cancel() {
         .unwrap()
         .into_inner();
     assert_eq!(
-        cancelled.order_detail.as_ref().unwrap().state_detail.as_ref().unwrap().state,
+        cancelled
+            .order_detail
+            .as_ref()
+            .unwrap()
+            .state_detail
+            .as_ref()
+            .unwrap()
+            .state,
         OrderState::Canceled as i32
     );
 
@@ -175,7 +186,9 @@ async fn place_then_list_then_cancel() {
 #[tokio::test]
 async fn place_crossing_orders_produces_fill() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
 
     let _buy = client
         .create_gridpool_order(CreateGridpoolOrderRequest {
@@ -219,7 +232,9 @@ async fn place_crossing_orders_produces_fill() {
 #[tokio::test]
 async fn stream_receives_live_updates() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr.clone()).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr.clone())
+        .await
+        .unwrap();
 
     let mut stream = client
         .receive_gridpool_orders_stream(ReceiveGridpoolOrdersStreamRequest {
@@ -232,7 +247,9 @@ async fn stream_receives_live_updates() {
 
     // Send a place from a separate client (the streaming client is
     // committed to the stream's receive task).
-    let mut placer = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut placer = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
     let placed = placer
         .create_gridpool_order(CreateGridpoolOrderRequest {
             gridpool_id: 1,
@@ -254,7 +271,9 @@ async fn stream_receives_live_updates() {
 #[tokio::test]
 async fn validation_rejection_returns_invalid_argument() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
 
     // Off-grid quantity (1.05 isn't a multiple of 0.1 MW — wait, it IS).
     // Use 1.05 EUR price (not a multiple of 0.01... also IS). Real off-grid: 85.005 price.
@@ -275,7 +294,9 @@ async fn validation_rejection_returns_invalid_argument() {
 #[tokio::test]
 async fn modify_crosses_spread_after_price_bump() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
 
     // Resting sell @ 85.
     client
@@ -321,7 +342,9 @@ async fn modify_crosses_spread_after_price_bump() {
 #[tokio::test]
 async fn fok_insufficient_depth_cancels_no_fills() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
 
     // Resting sell @ 85, 0.5 MW.
     client
@@ -362,7 +385,9 @@ async fn fok_insufficient_depth_cancels_no_fills() {
 #[tokio::test]
 async fn unknown_gridpool_returns_not_found() {
     let addr = spawn_server().await;
-    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
 
     let err = client
         .create_gridpool_order(CreateGridpoolOrderRequest {

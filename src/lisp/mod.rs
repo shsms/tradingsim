@@ -11,8 +11,8 @@
 //! a value that the gRPC service or the market-maker task is reading
 //! concurrently.
 
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -198,10 +198,8 @@ impl Config {
         // them at top level. TokioExecutor::new captures
         // Handle::current(), so Config::new must run inside a
         // tokio runtime (tests use #[tokio::test]).
-        let timer_handle = tulisp_async::register(
-            &mut ctx,
-            Arc::new(tulisp_async::TokioExecutor::new()),
-        );
+        let timer_handle =
+            tulisp_async::register(&mut ctx, Arc::new(tulisp_async::TokioExecutor::new()));
 
         if let Err(e) = ctx.eval_file(filename) {
             return Err(e.format(&ctx));
@@ -473,18 +471,15 @@ fn register_market_controls(
         *market_suspended.write() = false;
         Ok(false)
     });
-    ctx.defun(
-        "recall-order",
-        move |id: i64| -> Result<i64, Error> {
-            if id <= 0 {
-                return Err(Error::os_error(format!(
-                    "recall-order: ID must be positive, got {id}"
-                )));
-            }
-            recall_queue.lock().push_back(id as u64);
-            Ok(id)
-        },
-    );
+    ctx.defun("recall-order", move |id: i64| -> Result<i64, Error> {
+        if id <= 0 {
+            return Err(Error::os_error(format!(
+                "recall-order: ID must be positive, got {id}"
+            )));
+        }
+        recall_queue.lock().push_back(id as u64);
+        Ok(id)
+    });
 }
 
 fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::SharedWeather) {
@@ -530,7 +525,11 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
             let a = args.into_inner();
             let loc = WeatherLocation {
                 name: a.name.unwrap_or_else(|| {
-                    format!("loc-{:.1}-{:.1}", a.lat.unwrap_or(0.0), a.lon.unwrap_or(0.0))
+                    format!(
+                        "loc-{:.1}-{:.1}",
+                        a.lat.unwrap_or(0.0),
+                        a.lon.unwrap_or(0.0)
+                    )
                 }),
                 lat: a.lat.unwrap_or(50.0),
                 lon: a.lon.unwrap_or(10.0),
@@ -577,10 +576,7 @@ fn register_curve(ctx: &mut TulispContext, curve: crate::scenarios::SharedCurve)
     );
 }
 
-fn register_bias_scale(
-    ctx: &mut TulispContext,
-    bias_scale: crate::scenarios::SharedBiasScale,
-) {
+fn register_bias_scale(ctx: &mut TulispContext, bias_scale: crate::scenarios::SharedBiasScale) {
     ctx.defun(
         "set-mm-bias-scale",
         move |value: f64| -> Result<f64, Error> {
@@ -616,10 +612,7 @@ AsPlist! {
     }
 }
 
-fn register_scenarios(
-    ctx: &mut TulispContext,
-    scenarios: crate::scenarios::SharedScenarios,
-) {
+fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::SharedScenarios) {
     use crate::scenarios::{ScenarioDef, ScenarioEntry, ScenarioRuntime, Stage};
     ctx.defun(
         "define-scenario",
@@ -780,10 +773,7 @@ AsPlist! {
     }
 }
 
-fn register_couplings(
-    ctx: &mut TulispContext,
-    couplings: Arc<Mutex<Vec<CouplingSpec>>>,
-) {
+fn register_couplings(ctx: &mut TulispContext, couplings: Arc<Mutex<Vec<CouplingSpec>>>) {
     ctx.defun(
         "%make-coupling",
         move |args: Plist<MakeCouplingArgs>| -> Result<bool, Error> {
@@ -812,15 +802,18 @@ AsPlist! {
     }
 }
 
-fn register_markets(
-    ctx: &mut TulispContext,
-    markets: Arc<Mutex<Vec<MarketSpec>>>,
-) {
+fn register_markets(ctx: &mut TulispContext, markets: Arc<Mutex<Vec<MarketSpec>>>) {
     ctx.defun(
         "%make-market",
         move |args: Plist<MakeMarketArgs>| -> Result<String, Error> {
             let a = args.into_inner();
-            let currency = match a.currency.as_deref().unwrap_or("eur").to_lowercase().as_str() {
+            let currency = match a
+                .currency
+                .as_deref()
+                .unwrap_or("eur")
+                .to_lowercase()
+                .as_str()
+            {
                 "eur" => Currency::Eur,
                 "usd" => Currency::Usd,
                 "gbp" => Currency::Gbp,
@@ -850,10 +843,7 @@ AsPlist! {
     }
 }
 
-fn register_gridpools(
-    ctx: &mut TulispContext,
-    gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
-) {
+fn register_gridpools(ctx: &mut TulispContext, gridpools: Arc<Mutex<Vec<GridpoolSpec>>>) {
     use crate::sim::gridpool::SelfTradePolicy;
     ctx.defun(
         "%make-gridpool",
@@ -946,7 +936,10 @@ fn register_market_makers(
                 area,
                 period,
                 currency: Currency::Eur,
-                reference_price: a.reference.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(85.00)),
+                reference_price: a
+                    .reference
+                    .map(f64_to_dec)
+                    .unwrap_or_else(|| f64_to_dec(85.00)),
                 spread: a.spread.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.40)),
                 size: a.size.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(1.0)),
                 demand: a.demand.map(f64_to_dec).unwrap_or(Decimal::ZERO),
@@ -1063,10 +1056,7 @@ mod tests {
 
     fn write_tmp(body: &str) -> tempfile::NamedTempFile {
         use std::io::Write;
-        let mut f = tempfile::Builder::new()
-            .suffix(".lisp")
-            .tempfile()
-            .unwrap();
+        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
         f.write_all(body.as_bytes()).unwrap();
         f.flush().unwrap();
         f
@@ -1241,6 +1231,9 @@ mod tests {
         let _drain = cfg.spawn_timer_loop(Duration::from_millis(5));
         tokio::time::sleep(Duration::from_millis(60)).await;
         let demand = mm.shared_config.read().demand;
-        assert!(demand > rust_decimal::dec!(0), "demand stayed at 0: {demand}");
+        assert!(
+            demand > rust_decimal::dec!(0),
+            "demand stayed at 0: {demand}"
+        );
     }
 }

@@ -130,9 +130,10 @@ impl TryFrom<&proto_grid::DeliveryArea> for Area {
     type Error = ConvError;
 
     fn try_from(p: &proto_grid::DeliveryArea) -> Result<Self, Self::Error> {
-        let code_type = decode_enum_no_unspecified::<CodeType>(p.code_type, "EnergyMarketCodeType", |e| {
-            matches!(e, CodeType::Unspecified)
-        })?;
+        let code_type =
+            decode_enum_no_unspecified::<CodeType>(p.code_type, "EnergyMarketCodeType", |e| {
+                matches!(e, CodeType::Unspecified)
+            })?;
         Ok(Self {
             code: p.code.clone(),
             code_type,
@@ -157,11 +158,10 @@ impl TryFrom<&proto_grid::DeliveryPeriod> for DeliveryPeriod {
             .start
             .as_ref()
             .ok_or(ConvError::MissingField("DeliveryPeriod.start"))?;
-        let duration = decode_enum_no_unspecified::<DeliveryDuration>(
-            p.duration,
-            "DeliveryDuration",
-            |d| matches!(d, DeliveryDuration::Unspecified),
-        )?;
+        let duration =
+            decode_enum_no_unspecified::<DeliveryDuration>(p.duration, "DeliveryDuration", |d| {
+                matches!(d, DeliveryDuration::Unspecified)
+            })?;
         Ok(Self {
             start: timestamp_from_proto(start)?,
             duration,
@@ -260,21 +260,22 @@ impl TryFrom<&proto_trading::Order> for Order {
         })?;
 
         // Optional Price fields must share the order's currency.
-        let same_currency_or_err = |o: &Option<proto_market::Price>, field| -> Result<Option<Decimal>, ConvError> {
-            match o {
-                Some(p) => {
-                    let (amt, c) = price_from_proto(p)?;
-                    if c != currency {
-                        return Err(ConvError::UnknownEnum {
-                            field,
-                            value: c as i32,
-                        });
+        let same_currency_or_err =
+            |o: &Option<proto_market::Price>, field| -> Result<Option<Decimal>, ConvError> {
+                match o {
+                    Some(p) => {
+                        let (amt, c) = price_from_proto(p)?;
+                        if c != currency {
+                            return Err(ConvError::UnknownEnum {
+                                field,
+                                value: c as i32,
+                            });
+                        }
+                        Ok(Some(amt))
                     }
-                    Ok(Some(amt))
+                    None => Ok(None),
                 }
-                None => Ok(None),
-            }
-        };
+            };
 
         let execution_option = match p.execution_option {
             Some(raw) => Some(decode_enum_no_unspecified::<ExecutionOption>(
@@ -304,7 +305,11 @@ impl TryFrom<&proto_trading::Order> for Order {
                 .map(power_from_proto)
                 .transpose()?,
             execution_option,
-            valid_until: p.valid_until.as_ref().map(timestamp_from_proto).transpose()?,
+            valid_until: p
+                .valid_until
+                .as_ref()
+                .map(timestamp_from_proto)
+                .transpose()?,
             payload: None,
             tag: p.tag.clone(),
         })
@@ -328,13 +333,19 @@ impl TryFrom<&proto_trading::order_detail::StateDetail> for StateDetail {
         let state = decode_enum_no_unspecified::<OrderState>(p.state, "OrderState", |s| {
             matches!(s, OrderState::Unspecified)
         })?;
-        let reason = decode_enum_no_unspecified::<StateReason>(p.state_reason, "StateReason", |s| {
-            matches!(s, StateReason::Unspecified)
-        })?;
-        let actor = decode_enum_no_unspecified::<MarketActor>(p.market_actor, "MarketActor", |a| {
-            matches!(a, MarketActor::Unspecified)
-        })?;
-        Ok(Self { state, reason, actor })
+        let reason =
+            decode_enum_no_unspecified::<StateReason>(p.state_reason, "StateReason", |s| {
+                matches!(s, StateReason::Unspecified)
+            })?;
+        let actor =
+            decode_enum_no_unspecified::<MarketActor>(p.market_actor, "MarketActor", |a| {
+                matches!(a, MarketActor::Unspecified)
+            })?;
+        Ok(Self {
+            state,
+            reason,
+            actor,
+        })
     }
 }
 

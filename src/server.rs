@@ -16,17 +16,17 @@ use crate::proto::common::pagination::{
     PaginationInfo, PaginationParams, pagination_params::Params as PaginationOneof,
 };
 use crate::proto::trading::{
-    self as proto_trading, CancelAllGridpoolOrdersRequest, CancelAllGridpoolOrdersResponse,
-    CancelGridpoolOrderRequest, CancelGridpoolOrderResponse, CreateGridpoolOrderRequest,
-    CreateGridpoolOrderResponse, DeliveryTimeFilter, GetGridpoolOrderRequest,
-    GetGridpoolOrderResponse, GridpoolOrderFilter, GridpoolTradeFilter, ListGridpoolOrdersRequest,
-    ListGridpoolOrdersResponse, ListGridpoolTradesRequest, ListGridpoolTradesResponse,
-    PublicOrderBookFilter, PublicOrderBookRecord, PublicTradeFilter,
-    ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolOrdersStreamResponse,
-    ReceiveGridpoolTradesStreamRequest, ReceiveGridpoolTradesStreamResponse,
-    ReceivePublicOrderBookStreamRequest, ReceivePublicOrderBookStreamResponse,
-    ReceivePublicTradesStreamRequest, ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest,
-    UpdateGridpoolOrderResponse, electricity_trading_service_server::ElectricityTradingService,
+    CancelAllGridpoolOrdersRequest, CancelAllGridpoolOrdersResponse, CancelGridpoolOrderRequest,
+    CancelGridpoolOrderResponse, CreateGridpoolOrderRequest, CreateGridpoolOrderResponse,
+    DeliveryTimeFilter, GetGridpoolOrderRequest, GetGridpoolOrderResponse, GridpoolOrderFilter,
+    GridpoolTradeFilter, ListGridpoolOrdersRequest, ListGridpoolOrdersResponse,
+    ListGridpoolTradesRequest, ListGridpoolTradesResponse, PublicOrderBookFilter,
+    PublicOrderBookRecord, PublicTradeFilter, ReceiveGridpoolOrdersStreamRequest,
+    ReceiveGridpoolOrdersStreamResponse, ReceiveGridpoolTradesStreamRequest,
+    ReceiveGridpoolTradesStreamResponse, ReceivePublicOrderBookStreamRequest,
+    ReceivePublicOrderBookStreamResponse, ReceivePublicTradesStreamRequest,
+    ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest, UpdateGridpoolOrderResponse,
+    electricity_trading_service_server::ElectricityTradingService,
 };
 use crate::proto_conv::{ConvError, power_from_proto, price_from_proto, timestamp_from_proto};
 use crate::sim::market::DeliveryPeriod;
@@ -114,19 +114,23 @@ fn encode_page_token(page_size: u32, last_id: u64) -> String {
 /// allow-list (empty = any).
 fn period_matches_dtf(period: DeliveryPeriod, dtf: &DeliveryTimeFilter) -> bool {
     if let Some(iv) = dtf.time_interval {
-        if let Some(ts) = iv.start_time.as_ref() {
-            if timestamp_from_proto(ts).map(|t| period.start < t).unwrap_or(true) {
-                return false;
-            }
+        if let Some(ts) = iv.start_time.as_ref()
+            && timestamp_from_proto(ts)
+                .map(|t| period.start < t)
+                .unwrap_or(true)
+        {
+            return false;
         }
-        if let Some(ts) = iv.end_time.as_ref() {
-            if timestamp_from_proto(ts).map(|t| period.start >= t).unwrap_or(true) {
-                return false;
-            }
+        if let Some(ts) = iv.end_time.as_ref()
+            && timestamp_from_proto(ts)
+                .map(|t| period.start >= t)
+                .unwrap_or(true)
+        {
+            return false;
         }
     }
     if !dtf.duration_filters.is_empty() {
-        let d_i32 = crate::proto::common::grid::DeliveryDuration::from(period.duration) as i32;
+        let d_i32 = period.duration as i32;
         if !dtf.duration_filters.contains(&d_i32) {
             return false;
         }
@@ -136,7 +140,7 @@ fn period_matches_dtf(period: DeliveryPeriod, dtf: &DeliveryTimeFilter) -> bool 
 
 fn matches_gridpool_trade_filter(t: &Trade, f: &GridpoolTradeFilter) -> bool {
     if !f.states.is_empty() {
-        let s = proto_trading::TradeState::from(t.state) as i32;
+        let s = t.state as i32;
         if !f.states.contains(&s) {
             return false;
         }
@@ -145,20 +149,20 @@ fn matches_gridpool_trade_filter(t: &Trade, f: &GridpoolTradeFilter) -> bool {
         return false;
     }
     if let Some(want) = f.side {
-        let s = proto_trading::MarketSide::from(t.side) as i32;
+        let s = t.side as i32;
         if s != want {
             return false;
         }
     }
-    if let Some(dtf) = f.delivery_time_filter.as_ref() {
-        if !period_matches_dtf(t.period, dtf) {
-            return false;
-        }
+    if let Some(dtf) = f.delivery_time_filter.as_ref()
+        && !period_matches_dtf(t.period, dtf)
+    {
+        return false;
     }
-    if let Some(area) = f.delivery_area.as_ref() {
-        if area.code != t.area.code {
-            return false;
-        }
+    if let Some(area) = f.delivery_area.as_ref()
+        && area.code != t.area.code
+    {
+        return false;
     }
     // `tag` filter requires an order lookup; deferred.
     true
@@ -176,32 +180,32 @@ fn matches_public_book_filter(r: &PublicOrderBookRecord, f: &PublicOrderBookFilt
             return false;
         }
         let want_duration = want_period.duration;
-        let got_duration = r
-            .delivery_period
-            .as_ref()
-            .map(|p| p.duration)
-            .unwrap_or(0);
+        let got_duration = r.delivery_period.as_ref().map(|p| p.duration).unwrap_or(0);
         if want_duration != got_duration {
             return false;
         }
     }
     if let Some(area) = f.delivery_area.as_ref() {
-        let got = r.delivery_area.as_ref().map(|a| a.code.as_str()).unwrap_or("");
+        let got = r
+            .delivery_area
+            .as_ref()
+            .map(|a| a.code.as_str())
+            .unwrap_or("");
         if area.code != got {
             return false;
         }
     }
-    if let Some(want_side) = f.side {
-        if want_side != r.side {
-            return false;
-        }
+    if let Some(want_side) = f.side
+        && want_side != r.side
+    {
+        return false;
     }
     true
 }
 
 fn matches_public_trade_filter(t: &PublicTrade, f: &PublicTradeFilter) -> bool {
     if !f.states.is_empty() {
-        let s = proto_trading::TradeState::from(t.state) as i32;
+        let s = t.state as i32;
         if !f.states.contains(&s) {
             return false;
         }
@@ -212,52 +216,51 @@ fn matches_public_trade_filter(t: &PublicTrade, f: &PublicTradeFilter) -> bool {
             return false;
         }
         let want_duration = want_period.duration;
-        let got =
-            crate::proto::common::grid::DeliveryDuration::from(t.period.duration) as i32;
+        let got = t.period.duration as i32;
         if want_duration != got {
             return false;
         }
     }
-    if let Some(area) = f.buy_delivery_area.as_ref() {
-        if area.code != t.buy_area.code {
-            return false;
-        }
+    if let Some(area) = f.buy_delivery_area.as_ref()
+        && area.code != t.buy_area.code
+    {
+        return false;
     }
-    if let Some(area) = f.sell_delivery_area.as_ref() {
-        if area.code != t.sell_area.code {
-            return false;
-        }
+    if let Some(area) = f.sell_delivery_area.as_ref()
+        && area.code != t.sell_area.code
+    {
+        return false;
     }
     true
 }
 
 fn matches_order_filter(d: &OrderDetail, f: &GridpoolOrderFilter) -> bool {
     if !f.states.is_empty() {
-        let s_i32 = proto_trading::OrderState::from(d.state.state) as i32;
+        let s_i32 = d.state.state as i32;
         if !f.states.contains(&s_i32) {
             return false;
         }
     }
     if let Some(want) = f.side {
-        let s_i32 = proto_trading::MarketSide::from(d.order.side) as i32;
+        let s_i32 = d.order.side as i32;
         if s_i32 != want {
             return false;
         }
     }
-    if let Some(dtf) = f.delivery_time_filter.as_ref() {
-        if !period_matches_dtf(d.order.period, dtf) {
-            return false;
-        }
+    if let Some(dtf) = f.delivery_time_filter.as_ref()
+        && !period_matches_dtf(d.order.period, dtf)
+    {
+        return false;
     }
-    if let Some(area) = f.delivery_area.as_ref() {
-        if area.code != d.order.area.code {
-            return false;
-        }
+    if let Some(area) = f.delivery_area.as_ref()
+        && area.code != d.order.area.code
+    {
+        return false;
     }
-    if let Some(want_tag) = f.tag.as_deref() {
-        if d.order.tag.as_deref() != Some(want_tag) {
-            return false;
-        }
+    if let Some(want_tag) = f.tag.as_deref()
+        && d.order.tag.as_deref() != Some(want_tag)
+    {
+        return false;
     }
     if !f.order_ids.is_empty() && !f.order_ids.contains(&d.id.0) {
         return false;
@@ -567,7 +570,10 @@ impl ElectricityTradingService for ElectricityTradingServer {
         use tokio_stream::wrappers::ReceiverStream;
         let req = request.into_inner();
         let filter = req.filter.unwrap_or_default();
-        let start = req.start_time.as_ref().and_then(|ts| timestamp_from_proto(ts).ok());
+        let start = req
+            .start_time
+            .as_ref()
+            .and_then(|ts| timestamp_from_proto(ts).ok());
 
         // Snapshot history + take a live subscription under one lock.
         let (history, live_rx) = {
@@ -592,7 +598,8 @@ impl ElectricityTradingService for ElectricityTradingServer {
             })
             .collect();
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ReceivePublicOrderBookStreamResponse, Status>>(64);
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<Result<ReceivePublicOrderBookStreamResponse, Status>>(64);
         tokio::spawn(async move {
             for r in replay.drain(..) {
                 if tx
