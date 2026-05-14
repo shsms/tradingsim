@@ -203,17 +203,6 @@ async fn main() {
     if !mm_specs.is_empty() {
         log::info!("Spawning {} market-maker(s) from config.lisp", mm_specs.len());
         for spec in mm_specs {
-            let cfg_now = spec.shared_config.read();
-            log::info!(
-                "  {} @ {}: ref {} spread {} demand {} surplus {}",
-                spec.name,
-                cfg_now.period.start.format("%Y-%m-%dT%H:%M:%SZ"),
-                cfg_now.reference_price,
-                cfg_now.spread,
-                cfg_now.demand,
-                cfg_now.surplus,
-            );
-            drop(cfg_now);
             let offset = spec.quarter_offset;
             let mm = MarketMaker::with_shared_config(spec.shared_config, spec.seed);
             spawn_mm_task(Arc::clone(&world), mm, offset);
@@ -258,16 +247,6 @@ async fn main() {
         );
         for spec in aggressor_specs {
             let rate = Duration::from_millis(spec.rate_ms);
-            let cfg_now = spec.shared_config.read();
-            log::info!(
-                "  {} @ {}: size {} side-bias {:.2} rate {} ms",
-                spec.name,
-                cfg_now.period.start.format("%Y-%m-%dT%H:%M:%SZ"),
-                cfg_now.size,
-                cfg_now.side_bias,
-                spec.rate_ms,
-            );
-            drop(cfg_now);
             let offset = spec.quarter_offset;
             let ag = Aggressor::with_shared_config(spec.shared_config, spec.seed);
             spawn_aggressor_task(Arc::clone(&world), ag, rate, offset);

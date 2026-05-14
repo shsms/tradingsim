@@ -18,86 +18,130 @@
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
 
-;; Markets — one per delivery area, all four durations (5/15/30/60)
-;; admissible by default. Add more (%make-market …) entries for FR /
-;; AT / NL / BE if you want multi-area gridpools.
-(%make-market
- :area "10Y1001A1001A82H"
- :currency "eur")
+;; --- TSO regions ----------------------------------------------------------
+;;
+;; Four German TSO control zones treated as separate delivery areas.
+;; In reality such markets trade them as one DE-LU bidding zone; here we
+;; split them so per-region liquidity profiles are observable.
+;;
+;; Per-area row in `areas`:
+;;   (eic, prefix, mm-sizes-per-band, ag-sizes-per-profile)
+;;
+;;   mm-sizes-per-band     MW for quarter bands q0-11, q12-23,
+;;                         q24-35, q36-47
+;;   ag-sizes-per-profile  MW for aggressor profiles 0..3 (fastest
+;;                         smallest → slowest largest)
+;;
+;; Volume share is roughly: TenneT ~40% > Amprion ~30% > 50Hertz
+;; ~20% > TransnetBW ~10%. Sizes here track that share.
 
-;; One gridpool trading in DE-LU.
+(setq areas
+      '(("10YDE-EON------1"   "tn"  (1.5 1.1 0.7 0.4)  (0.3 0.7 1.4 2.0))
+        ("10YDE-RWENET---I"   "am"  (1.2 0.9 0.6 0.4)  (0.2 0.5 1.0 1.4))
+        ("10YDE-VE-------2"   "hz"  (0.6 0.5 0.3 0.2)  (0.2 0.3 0.6 0.9))
+        ("10YDE-ENBW-----N"   "bw"  (0.3 0.2 0.2 0.1)  (0.1 0.2 0.3 0.4))))
+
+;; Markets — one per area, all EUR. Default tick/step apply (0.01
+;; EUR price, 0.1 MW size).
+(dolist (a areas)
+  (%make-market :area (car a) :currency "eur"))
+
+;; Single gridpool spans all four areas — user-side gRPC trading
+;; can pick any area; resting orders match across regions via the
+;; SIDC couplings below.
 (%make-gridpool
  :id 1
  :name "default"
- :areas '("10Y1001A1001A82H"))
+ :areas '("10YDE-EON------1" "10YDE-RWENET---I"
+          "10YDE-VE-------2" "10YDE-ENBW-----N"))
 
-;; Fleet of 48 MMs — one per 15-min contract spanning the next 12
-;; hours of delivery. Each MM's quarter_offset drives the rolling
-;; task in the binary: as a contract gates out, the MM that quoted
-;; it migrates to the next-12h slot. Names are stable ("de-lu-q0"
-;; … "de-lu-q47") so scenarios can still address individual MMs.
+;; All-pairs coupling between the four areas (K4 = 6 edges).
+(dotimes (i 4)
+  (dotimes (j 4)
+    (when (< i j)
+      (%make-coupling
+       :areas (list (car (nth i areas))
+                    (car (nth j areas)))))))
+
+;; --- MM fleet -------------------------------------------------------------
 ;;
-;; Liquidity + price curve:
-;;   reference  85.00 EUR at q0, +0.10 EUR per quarter (upward slope)
-;;   size       1.0 MW at q0, stepping down to 0.3 MW past q36
-;;   spread     0.40 EUR at q0, widening to 0.90 past q36
-;; Reflects real intraday markets: imminent contracts trade deep
-;; and tight, long-dated ones trade thin and wide.
+;; 48 MMs per area = 192 total. Each MM rolls forward via its
+;; quarter_offset so the orderbook always shows the next 12 hours of
+;; 15-min contracts. Size scales by area + quarter band; spread
+;; widens on far-out contracts; reference follows a gentle upward
+;; intraday curve (85.00 → 89.70 EUR).
 
-(dotimes (i 48)
-  (let ((sz (cond ((< i 12) 1.0)
-                  ((< i 24) 0.7)
-                  ((< i 36) 0.5)
-                  (t 0.3)))
-        (sp (cond ((< i 12) 0.40)
-                  ((< i 24) 0.55)
-                  ((< i 36) 0.70)
-                  (t 0.90))))
-    (%make-market-maker
-     :name (format "de-lu-q%d" i)
-     :area "10Y1001A1001A82H"
-     :quarter-offset i
-     :reference (+ 85.0 (* 0.10 i))
-     :spread sp
-     :size sz
-     :noise 0.10
-     :seed (+ 1 i))))
+(dotimes (a 4)
+  (let* ((entry (nth a areas))
+         (eic (car entry))
+         (label (cadr entry))
+         (mm-sizes (caddr entry)))
+    (dotimes (i 48)
+      (let* ((band (cond ((< i 12) 0)
+                         ((< i 24) 1)
+                         ((< i 36) 2)
+                         (t 3)))
+             (sz (nth band mm-sizes))
+             (sp (cond ((< i 12) 0.40)
+                       ((< i 24) 0.55)
+                       ((< i 36) 0.70)
+                       (t 0.90))))
+        (%make-market-maker
+         :name (format "%s-q%d" label i)
+         :area eic
+         :quarter-offset i
+         :reference (+ 85.0 (* 0.10 i))
+         :spread sp
+         :size sz
+         :noise 0.10
+         :seed (+ 1 (* a 1000) i))))))
 
-;; --- Aggressors ------------------------------------------------------------
+;; --- Aggressors -----------------------------------------------------------
 ;;
-;; Four aggressors per quarter (192 total) so every contract has
-;; some live flow on its tape. Rate scales linearly with the
-;; quarter-offset: q0's aggressors fire every 500 ms, q47's every
-;; 24 s — imminent contracts trade much harder than the
-;; long-dated ones, matching real intraday volume profiles.
+;; 4 profiles per (area, quarter) — fastest+smallest through
+;; slowest+largest. Profile rates scale linearly with quarter
+;; offset so imminent contracts churn busily and far-out ones tick
+;; quietly:
+;;
+;;   profile 0 — base 500  ms (q0 fires twice/sec; q47 every 24 s)
+;;   profile 1 — base 1500 ms
+;;   profile 2 — base 3500 ms
+;;   profile 3 — base 8000 ms (jumbo, rare)
+;;
+;; 4 areas × 48 quarters × 4 profiles = 768 aggressors total.
 
-(dotimes (q 48)
-  (dotimes (a 4)
-    (%make-aggressor
-     :name (format "ag-q%d-%d" q a)
-     :area "10Y1001A1001A82H"
-     :quarter-offset q
-     :rate-ms (* 500 (+ q 1))
-     :size 0.2
-     :side-bias 0.5
-     :seed (+ 1000 (* q 10) a))))
+(dotimes (a 4)
+  (let* ((entry (nth a areas))
+         (eic (car entry))
+         (label (cadr entry))
+         (ag-sizes (cadddr entry)))
+    (dotimes (i 48)
+      (dotimes (p 4)
+        (%make-aggressor
+         :name (format "ag-%s-q%d-%d" label i p)
+         :area eic
+         :quarter-offset i
+         :rate-ms (* (nth p '(500 1500 3500 8000)) (+ i 1))
+         :size (nth p ag-sizes)
+         :side-bias 0.5
+         :seed (+ 10000 (* a 100000) (* i 100) p))))))
 
 ;; --- Reference drift -------------------------------------------------------
 ;;
 ;; Tie every MM's reference to the last public trade on its contract
 ;; so prices migrate with activity. 0.10 = 10% pull each refresh.
 
-(dotimes (i 48)
-  (set-mm-follow-last-trade (format "de-lu-q%d" i) 0.10))
+(dotimes (a 4)
+  (let ((label (cadr (nth a areas))))
+    (dotimes (i 48)
+      (set-mm-follow-last-trade (format "%s-q%d" label i) 0.10))))
 
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
-;; demand shifts the bid up (the MM wants to buy harder); surplus
-;; shifts the ask down (the MM wants to sell harder). Uncomment to
-;; bias the simulated market.
+;; Uncomment to skew an individual MM's quoting:
 ;;
-;; (set-mm-demand "de-lu-q2" 0.20)   ;; peak quarter: aggressive procurement
-;; (set-mm-surplus "de-lu-q3" 0.30)  ;; midday solar dump
+;; (set-mm-demand "tn-q4" 0.20)    ;; TenneT q4: aggressive procurement
+;; (set-mm-surplus "am-q3" 0.30)   ;; Amprion q3: midday solar dump
 
 ;; --- Scenarios -------------------------------------------------------------
 ;;
@@ -105,7 +149,7 @@
 ;; line below to activate the matching market animation; each
 ;; scenario exposes a (scenario-NAME-stop) defun for manual cancel.
 ;;
-;; (load "scenarios/morning-ramp.lisp")   ;; demand ramp on de-lu-q0
-;; (load "scenarios/gate-crunch.lisp")    ;; widening spread on de-lu-q3
-;; (load "scenarios/curtailment.lisp")    ;; supply surge on de-lu-q2
+;; (load "scenarios/morning-ramp.lisp")   ;; demand ramp on tn-q0
+;; (load "scenarios/gate-crunch.lisp")    ;; widening spread on tn-q3
+;; (load "scenarios/curtailment.lisp")    ;; supply surge on tn-q2
 ;; (load "scenarios/elaborate.lisp")      ;; 3-hour six-phase tour

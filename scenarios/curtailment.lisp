@@ -1,4 +1,4 @@
-;; scenarios/curtailment.lisp — sudden supply surge on de-lu-q2.
+;; scenarios/curtailment.lisp — sudden supply surge on tn-q2.
 ;; Holds surplus at 5.0 EUR/MWh to model a forced-output /
 ;; curtailment event a trading bot needs to absorb.
 ;;
@@ -22,6 +22,6 @@
       (every
        :milliseconds 2000
        :call (lambda ()
-               (set-mm-surplus "de-lu-q2" 5.0))))
+               (set-mm-surplus "tn-q2" 5.0))))
 
-(log.info "scenario-curtailment: armed against de-lu-q2")
+(log.info "scenario-curtailment: armed against tn-q2")

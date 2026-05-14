@@ -1,4 +1,4 @@
-;; scenarios/morning-ramp.lisp — demand on de-lu-q0 ramps from 0 to
+;; scenarios/morning-ramp.lisp — demand on tn-q0 ramps from 0 to
 ;; 0.40 EUR/MWh over the first 60 seconds, then sits at the peak.
 ;; Useful for testing how a trading bot reacts to gradually rising
 ;; procurement pressure.
@@ -28,7 +28,7 @@
        :call (lambda ()
                (setq scenario-morning-ramp-step
                      (min 12 (+ scenario-morning-ramp-step 1)))
-               (set-mm-demand "de-lu-q0"
+               (set-mm-demand "tn-q0"
                               (* scenario-morning-ramp-step 0.033)))))
 
-(log.info "scenario-morning-ramp: armed against de-lu-q0")
+(log.info "scenario-morning-ramp: armed against tn-q0")
