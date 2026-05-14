@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tradingsim</title>
+<style>
+:root {
+  --bg: #0e1116;
+  --panel: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --buy: #3fb950;
+  --sell: #f85149;
+  --accent: #58a6ff;
+}
+* { box-sizing: border-box; font-family: ui-monospace, "SF Mono", Monaco, "Courier New", monospace; }
+body {
+  margin: 0; padding: 16px;
+  background: var(--bg); color: var(--text);
+}
+h1 { margin: 0 0 8px 0; font-size: 18px; color: var(--accent); }
+.muted { color: var(--muted); font-size: 12px; }
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  min-height: 200px;
+}
+.panel h2 {
+  margin: 0 0 8px 0; font-size: 13px;
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;
+}
+.row { display: flex; gap: 8px; padding: 2px 0; font-size: 12px; }
+.row .id { width: 70px; color: var(--muted); }
+.row .qty { width: 70px; text-align: right; }
+.row .price { width: 80px; text-align: right; }
+.row .area { color: var(--muted); }
+.buy { color: var(--buy); }
+.sell { color: var(--sell); }
+.head { background: rgba(255,255,255,0.05); padding: 2px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { color: var(--muted); text-align: left; padding: 2px 6px; font-weight: normal; }
+td { padding: 2px 6px; }
+tr.row-buy td:first-child { color: var(--buy); }
+tr.row-sell td:first-child { color: var(--sell); }
+.scroll { max-height: 360px; overflow-y: auto; }
+.scroll::-webkit-scrollbar { width: 6px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.status { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; background: var(--panel); }
+.status.live { color: var(--buy); }
+</style>
+</head>
+<body>
+<h1>tradingsim</h1>
+<div class="muted">
+  <span class="status live" id="status">connecting…</span>
+  <span id="info"></span>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Public trades (last 50)</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>id</th><th>qty (MW)</th><th>price (EUR)</th><th>area</th><th>time</th></tr></thead>
+        <tbody id="trades"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Public order book (live events)</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>side</th><th>id</th><th>qty (MW)</th><th>price (EUR)</th><th>area</th></tr></thead>
+        <tbody id="book"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" style="grid-column: span 2">
+    <h2>Gridpools</h2>
+    <div id="gridpools" class="muted">loading…</div>
+  </div>
+</div>
+
+<script>
+function shortTime(iso) {
+  const d = new Date(iso);
+  return d.toISOString().slice(11, 19);
+}
+
+function side(s) {
+  if (s === 1) return 'Buy';
+  if (s === 2) return 'Sell';
+  return '?';
+}
+
+async function loadInfo() {
+  const r = await fetch('/api/info');
+  if (!r.ok) return;
+  const j = await r.json();
+  document.getElementById('info').textContent =
+    `· v${j.version} · gridpools ${j.gridpools} · markets ${j.markets} · couplings ${j.couplings}`;
+}
+
+async function loadGridpools() {
+  const r = await fetch('/api/gridpools');
+  if (!r.ok) return;
+  const j = await r.json();
+  const lines = j.map(g =>
+    `· pool ${g.id} "${g.name}" — areas: ${g.areas.join(', ')} — orders: ${g.orders}, trades: ${g.trades}`
+  );
+  document.getElementById('gridpools').innerHTML = lines.length
+    ? lines.join('<br>') : '<i>no gridpools registered</i>';
+}
+
+function openTradesWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws/public-trades`);
+  ws.onmessage = (e) => {
+    const t = JSON.parse(e.data);
+    const tbody = document.getElementById('trades');
+    const row = document.createElement('tr');
+    row.innerHTML = `<td>#${t.id}</td><td>${t.quantity}</td><td>${t.price}</td>` +
+      `<td>${t.buy_area === t.sell_area ? t.buy_area : t.buy_area + ' → ' + t.sell_area}</td>` +
+      `<td>${shortTime(t.execution_time)}</td>`;
+    tbody.insertBefore(row, tbody.firstChild);
+    while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+  };
+  ws.onclose = () => setTimeout(openTradesWs, 1000);
+}
+
+function openBookWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws/public-book`);
+  ws.onmessage = (e) => {
+    const r = JSON.parse(e.data);
+    const tbody = document.getElementById('book');
+    const klass = r.side === 1 ? 'row-buy' : (r.side === 2 ? 'row-sell' : '');
+    const row = document.createElement('tr');
+    row.className = klass;
+    row.innerHTML = `<td>${side(r.side)}</td><td>#${r.id}</td><td>${r.quantity}</td>` +
+      `<td>${r.price}</td><td>${r.area}</td>`;
+    tbody.insertBefore(row, tbody.firstChild);
+    while (tbody.children.length > 80) tbody.removeChild(tbody.lastChild);
+  };
+  ws.onclose = () => setTimeout(openBookWs, 1000);
+}
+
+(async () => {
+  await Promise.all([loadInfo(), loadGridpools()]);
+  document.getElementById('status').textContent = 'live';
+  setInterval(loadGridpools, 5000);
+  openTradesWs();
+  openBookWs();
+})();
+</script>
+</body>
+</html>

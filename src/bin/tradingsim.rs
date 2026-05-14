@@ -21,6 +21,7 @@ use tradingsim::{
     sim::market::{Area, DeliveryDuration, DeliveryPeriod, MarketRegistry, MarketRules},
     sim::order::GridpoolId,
     sim::world::World,
+    ui as ui_server,
 };
 
 const MM_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -202,6 +203,19 @@ async fn main() {
                 if n > 0 {
                     log::info!("Expired {n} order(s) on the valid_until deadline");
                 }
+            }
+        });
+    }
+
+    // UI server: spawns alongside the gRPC server, sharing the same
+    // World handle. Hardcoded port for now; lisp-driven addr can land
+    // alongside set-socket-addr.
+    {
+        let world_for_ui = Arc::clone(&world);
+        let ui_addr: std::net::SocketAddr = "127.0.0.1:8811".parse().unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = ui_server::serve(ui_addr, world_for_ui).await {
+                log::error!("UI server exited: {e}");
             }
         });
     }
