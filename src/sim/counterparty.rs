@@ -8,7 +8,10 @@
 //! per `refresh()` call. The driver (a tokio task in the binary)
 //! decides when to fire it.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use rand::Rng;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -63,8 +66,13 @@ impl MarketMakerConfig {
     }
 }
 
+/// Shared handle on a MarketMakerConfig. The MM task holds one;
+/// lisp callbacks ((set-mm-demand …) etc.) hold others; updates
+/// take effect on the next refresh tick.
+pub type SharedConfig = Arc<RwLock<MarketMakerConfig>>;
+
 pub struct MarketMaker {
-    config: MarketMakerConfig,
+    config: SharedConfig,
     bid_id: Option<OrderId>,
     ask_id: Option<OrderId>,
     rng: SmallRng,
@@ -72,6 +80,10 @@ pub struct MarketMaker {
 
 impl MarketMaker {
     pub fn new(config: MarketMakerConfig, seed: u64) -> Self {
+        Self::with_shared_config(Arc::new(RwLock::new(config)), seed)
+    }
+
+    pub fn with_shared_config(config: SharedConfig, seed: u64) -> Self {
         Self {
             config,
             bid_id: None,
@@ -80,8 +92,11 @@ impl MarketMaker {
         }
     }
 
-    pub fn config_mut(&mut self) -> &mut MarketMakerConfig {
-        &mut self.config
+    /// Hand out a clone of the shared config so external code (the
+    /// lisp defun layer, the UI) can mutate demand/surplus/reference
+    /// — updates take effect on the next refresh.
+    pub fn shared_config(&self) -> SharedConfig {
+        self.config.clone()
     }
 
     /// Cancel any outstanding quotes, then post a fresh bid + ask
@@ -94,52 +109,52 @@ impl MarketMaker {
             world.cancel_counterparty_order(id);
         }
 
-        // Random walk: signed step in [-price_noise, +price_noise].
-        let noise = if self.config.price_noise.is_zero() {
+        // Snapshot the config under the read lock — the lisp side may
+        // race us on a write, but we want one consistent set of knobs
+        // for this quote pair.
+        let cfg = self.config.read().clone();
+
+        let noise = if cfg.price_noise.is_zero() {
             Decimal::ZERO
         } else {
-            // Sample [-1.0, 1.0] in 0.01 increments, scale by noise.
             let n: i64 = self.rng.gen_range(-100..=100);
-            Decimal::new(n, 2) * self.config.price_noise
+            Decimal::new(n, 2) * cfg.price_noise
         };
-        let mid = self.config.reference_price + noise;
-        let bid_raw = mid - self.config.spread + self.config.demand;
-        let ask_raw = mid + self.config.spread - self.config.surplus;
-        let bid_price = snap_to_tick(bid_raw, self.config.tick);
-        let ask_price = snap_to_tick(ask_raw, self.config.tick);
+        let mid = cfg.reference_price + noise;
+        let bid_raw = mid - cfg.spread + cfg.demand;
+        let ask_raw = mid + cfg.spread - cfg.surplus;
+        let bid_price = snap_to_tick(bid_raw, cfg.tick);
+        let ask_price = snap_to_tick(ask_raw, cfg.tick);
 
-        // Skip if the tilt collapsed/inverted the spread or pushed
-        // bid below 0 — better to leave the book thin than post a
-        // garbage quote.
         if bid_price >= ask_price || bid_price <= Decimal::ZERO {
             return;
         }
 
-        if let Ok(id) = world.submit_counterparty_order(self.build(Side::Buy, bid_price), now) {
+        if let Ok(id) = world.submit_counterparty_order(build(&cfg, Side::Buy, bid_price), now) {
             self.bid_id = Some(id);
         }
-        if let Ok(id) = world.submit_counterparty_order(self.build(Side::Sell, ask_price), now) {
+        if let Ok(id) = world.submit_counterparty_order(build(&cfg, Side::Sell, ask_price), now) {
             self.ask_id = Some(id);
         }
     }
+}
 
-    fn build(&self, side: Side, price: Decimal) -> Order {
-        Order {
-            area: self.config.area.clone(),
-            period: self.config.period,
-            order_type: OrderType::Limit,
-            side,
-            price,
-            currency: self.config.currency,
-            quantity: self.config.size,
-            stop_price: None,
-            peak_price_delta: None,
-            display_quantity: None,
-            execution_option: None,
-            valid_until: None,
-            payload: None,
-            tag: None,
-        }
+fn build(cfg: &MarketMakerConfig, side: Side, price: Decimal) -> Order {
+    Order {
+        area: cfg.area.clone(),
+        period: cfg.period,
+        order_type: OrderType::Limit,
+        side,
+        price,
+        currency: cfg.currency,
+        quantity: cfg.size,
+        stop_price: None,
+        peak_price_delta: None,
+        display_quantity: None,
+        execution_option: None,
+        valid_until: None,
+        payload: None,
+        tag: None,
     }
 }
 
@@ -224,6 +239,25 @@ mod tests {
         mm.refresh(&mut world, Utc::now());
         let book = world.book(&key).unwrap();
         assert_eq!(book.best_ask(), Some(dec!(85.20)));
+    }
+
+    #[test]
+    fn shared_config_mutation_takes_effect_on_next_refresh() {
+        let (mut world, cfg) = setup_world();
+        let key = crate::sim::world::ContractKey {
+            area: cfg.area.clone(),
+            period: cfg.period,
+        };
+        let mut mm = MarketMaker::new(cfg, 42);
+        let shared = mm.shared_config();
+        mm.refresh(&mut world, Utc::now());
+        let pre_bid = world.book(&key).unwrap().best_bid().unwrap();
+
+        // External writer raises demand by 0.20 EUR/MWh.
+        shared.write().demand = dec!(0.20);
+        mm.refresh(&mut world, Utc::now());
+        let post_bid = world.book(&key).unwrap().best_bid().unwrap();
+        assert_eq!(post_bid - pre_bid, dec!(0.20));
     }
 
     #[test]
