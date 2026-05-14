@@ -113,6 +113,12 @@ async fn main() {
         .map(|c| c.socket_addr())
         .unwrap_or_else(|| "[::1]:8810".to_string());
 
+    // Drain tulisp-async timers (every / run-with-timer) on a fixed
+    // cadence so scheduled callbacks in config.lisp actually fire.
+    if let Some(c) = lisp_config.as_ref() {
+        c.spawn_timer_loop(Duration::from_millis(100));
+    }
+
     let world = Arc::new(Mutex::new(world));
 
     // Synthetic liquidity: either driven by lisp's (make-market-maker

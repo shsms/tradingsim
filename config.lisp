@@ -4,6 +4,10 @@
 ;; bin/tradingsim.rs. Edit and re-launch the binary to take effect;
 ;; hot reload (notify watcher) is on the deferred list.
 
+(unless (boundp 'tradingsim-loaded)
+  (setq tradingsim-loaded t)
+  (load "sim/common.lisp"))
+
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
 
@@ -65,3 +69,15 @@
 ;;
 ;; (set-mm-demand "de-lu-h1" 0.20)   ;; peak hour: aggressive procurement
 ;; (set-mm-surplus "de-lu-h2" 0.30)  ;; midday solar dump
+
+;; --- Scheduled callbacks ---------------------------------------------------
+;;
+;; Demand on h0 ramps from 0 to 0.40 EUR/MWh over the first 60 seconds
+;; — a slow procurement curve example. Comment out for a flat market.
+;;
+;; (let ((step 0))
+;;   (every
+;;    :milliseconds 5000
+;;    :call (lambda ()
+;;            (setq step (min 12 (+ step 1)))
+;;            (set-mm-demand "de-lu-h0" (* step 0.033)))))

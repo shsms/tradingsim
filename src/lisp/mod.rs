@@ -66,11 +66,15 @@ pub struct GridpoolSpec {
 pub struct Config {
     #[allow(dead_code)]
     filename: String,
-    #[allow(dead_code)]
     pub(crate) ctx: SharedMut<TulispContext>,
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
+    /// tulisp-async timer queue. The binary calls `spawn_timer_loop`
+    /// to drain it on a tokio interval; without that, `(every …)` /
+    /// `(run-with-timer …)` registrations from config.lisp would
+    /// stay pending forever.
+    timer_handle: tulisp_async::Handle,
     /// Anchor time for relative period offsets. Set at Config::new
     /// so that `(make-market-maker :hour-offset N …)` always builds
     /// the same absolute period within one config-load.
@@ -103,6 +107,16 @@ impl Config {
             anchor,
         );
 
+        // (every …), (run-with-timer …), (cancel-timer) — must be
+        // registered before eval_file because the config may use
+        // them at top level. TokioExecutor::new captures
+        // Handle::current(), so Config::new must run inside a
+        // tokio runtime (tests use #[tokio::test]).
+        let timer_handle = tulisp_async::register(
+            &mut ctx,
+            Arc::new(tulisp_async::TokioExecutor::new()),
+        );
+
         if let Err(e) = ctx.eval_file(filename) {
             return Err(e.format(&ctx));
         }
@@ -113,7 +127,26 @@ impl Config {
             metadata,
             market_makers,
             gridpools,
+            timer_handle,
             anchor,
+        })
+    }
+
+    /// Spawn the drain task that ticks pending `(every …)` /
+    /// `(run-with-timer …)` firings on a fixed cadence. Must be
+    /// called from inside a tokio runtime; do this once after
+    /// `Config::new`. Returns the JoinHandle so the binary can keep
+    /// the task alive (drop it to stop firing).
+    pub fn spawn_timer_loop(&self, cadence: Duration) -> tokio::task::JoinHandle<()> {
+        let ctx = self.ctx.clone();
+        let handle = self.timer_handle.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(cadence);
+            loop {
+                tick.tick().await;
+                let mut guard = ctx.borrow_mut();
+                handle.tick(&mut guard);
+            }
         })
     }
 
@@ -344,30 +377,30 @@ mod tests {
         f
     }
 
-    #[test]
-    fn empty_config_yields_defaults() {
+    #[tokio::test]
+    async fn empty_config_yields_defaults() {
         let f = write_tmp(";; empty\n");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         assert_eq!(cfg.socket_addr(), "[::1]:8810");
         assert_eq!(cfg.metadata().physics_tick, Duration::from_millis(100));
     }
 
-    #[test]
-    fn set_socket_addr_takes_effect() {
+    #[tokio::test]
+    async fn set_socket_addr_takes_effect() {
         let f = write_tmp(r#"(set-socket-addr "[::]:9000")"#);
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         assert_eq!(cfg.socket_addr(), "[::]:9000");
     }
 
-    #[test]
-    fn set_physics_tick_ms_takes_effect() {
+    #[tokio::test]
+    async fn set_physics_tick_ms_takes_effect() {
         let f = write_tmp("(set-physics-tick-ms 200)");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         assert_eq!(cfg.metadata().physics_tick, Duration::from_millis(200));
     }
 
-    #[test]
-    fn make_market_maker_registers_spec() {
+    #[tokio::test]
+    async fn make_market_maker_registers_spec() {
         let f = write_tmp(
             r#"
             (%make-market-maker
@@ -395,8 +428,8 @@ mod tests {
         assert_eq!(inner.period.duration, DeliveryDuration::DeliveryDuration60);
     }
 
-    #[test]
-    fn set_mm_demand_after_make_takes_effect_on_shared() {
+    #[tokio::test]
+    async fn set_mm_demand_after_make_takes_effect_on_shared() {
         let f = write_tmp(
             r#"
             (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
@@ -411,8 +444,8 @@ mod tests {
         assert_eq!(inner.surplus, rust_decimal::dec!(0.05));
     }
 
-    #[test]
-    fn set_mm_demand_unknown_name_errors() {
+    #[tokio::test]
+    async fn set_mm_demand_unknown_name_errors() {
         let f = write_tmp(r#"(set-mm-demand "nonexistent" 0.10)"#);
         let path = f.path().to_str().unwrap().to_string();
         match Config::new(&path) {
@@ -421,8 +454,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn make_gridpool_registers_spec() {
+    #[tokio::test]
+    async fn make_gridpool_registers_spec() {
         let f = write_tmp(
             r#"
             (%make-gridpool :id 1 :name "default" :areas '("10Y1001A1001A82H"))
@@ -440,8 +473,8 @@ mod tests {
         assert_eq!(gps[1].area_codes.len(), 2);
     }
 
-    #[test]
-    fn make_gridpool_rejects_empty_areas() {
+    #[tokio::test]
+    async fn make_gridpool_rejects_empty_areas() {
         let f = write_tmp(r#"(%make-gridpool :id 1 :areas '())"#);
         let path = f.path().to_str().unwrap().to_string();
         match Config::new(&path) {
@@ -450,8 +483,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lisp_error_surfaces_with_trace() {
+    #[tokio::test]
+    async fn lisp_error_surfaces_with_trace() {
         let f = write_tmp("(this-is-not-a-defun 1 2 3)");
         // Config doesn't impl Debug (SharedMut<TulispContext> doesn't),
         // so test the error path via match instead of unwrap_err.
@@ -460,5 +493,30 @@ mod tests {
             Ok(_) => panic!("expected error from {path}"),
             Err(e) => assert!(e.contains("this-is-not-a-defun"), "got: {e}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_with_timer_callback_fires_and_mutates_shared_config() {
+        // tulisp-async exposes `(run-with-timer first repeat fn …)`.
+        // The (every …) sugar wrapper is built on top of it in
+        // sim/common.lisp (not loaded in tests).
+        let f = write_tmp(
+            r#"
+            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (setq counter 0)
+            (run-with-timer 0.001 0.001
+              (lambda ()
+                (setq counter (+ counter 1))
+                (set-mm-demand "h0" (* counter 0.01))))
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let mm = cfg.market_makers().pop().unwrap();
+        assert_eq!(mm.shared_config.read().demand, rust_decimal::dec!(0));
+
+        let _drain = cfg.spawn_timer_loop(Duration::from_millis(5));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let demand = mm.shared_config.read().demand;
+        assert!(demand > rust_decimal::dec!(0), "demand stayed at 0: {demand}");
     }
 }
