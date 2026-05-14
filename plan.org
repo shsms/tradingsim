@@ -1190,23 +1190,29 @@ pending.
     panel showing current solar / wind / temp per location.
     (commits a65a18b, 0a613e2)
 
-14. [ ] Optional: per-gridpool self-trade-policy
-    - =(%make-gridpool … :self-trade-policy 'reject)= rejects an
-      aggressive order if it would match its own gridpool's
-      resting order. =cancel-resting= option later.
-    - ~50 lines + tests.
+14. [X] Per-gridpool self-trade-policy. =(%make-gridpool …
+    :self-trade-policy "reject")= adds a pre-flight check that
+    walks the marketable depth across the taker's area and any
+    open coupled areas; if any resting order the matcher would
+    consume is owned by the same gridpool, the submission errors
+    out with =SubmitError::SelfTradeRejected= → gRPC
+    =FailedPrecondition=. Allow stays the default. String form
+    for the lisp keyword for now (unquoted-symbol variant can
+    land later). =cancel-resting= variant deferred. (commit
+    03b38f8)
 
 15. Deferred: iceberg orders. Per user request 2026-05-14, this
     is parked; revisit once step 14 is in.
 
 *** Sequencing note
 
-Steps 1–13.5 are in. The live trade tape now spans 20 → 156 EUR
+Steps 1–14 are in. The live trade tape now spans 20 → 156 EUR
 across the day under the default config (vs the prior 80–95 EUR
 everywhere), per-area weather drives independent solar/wind
-shape into each bidding zone, and cross-border gates close 60 min
-before delivery with capacity caps on the edges. Only step 14
-(per-gridpool self-trade-policy) remains.
+shape into each bidding zone, cross-border gates close 60 min
+before delivery with capacity caps on the edges, and pools can
+opt into STPF-style self-trade prevention. Only iceberg orders
+remain on the deferred list.
 
 Calibration check after each step: boot the sim, run for 30 s
 under each canned scenario, eyeball the trade tape against the
