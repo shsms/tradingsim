@@ -1017,6 +1017,16 @@ function setChartWindow(mins) {
   drawChart();
 }
 
+function initChartWindow() {
+  // Browsers (notably Firefox) persist <select> values across
+  // reloads, but the JS state defaults back to 30 min — so on
+  // reload the dropdown could read "5 min" while the rendered
+  // chart used a 30-min window. Sync the JS state to whatever
+  // the browser restored.
+  const sel = document.getElementById('chart-window');
+  if (sel) setChartWindow(sel.value);
+}
+
 /** Effective delivery period (epoch ms) the chart is plotting:
  *  pinned period if the user clicked into one, otherwise the
  *  soonest upcoming 15-min boundary (the contract that's about
@@ -1860,6 +1870,7 @@ setInterval(() => {
 
 (async () => {
   initDensity();
+  initChartWindow();
   // Pull the sim's timezone first so the very first tickClock /
   // renderTrades / renderBook formats in the right zone — without
   // this they'd render in UTC for a frame, then snap.
