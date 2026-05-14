@@ -37,10 +37,14 @@ snapshot-then-subscribe pattern the book WS uses. Page reloads
 fill the trade tape immediately instead of waiting for the next
 print.
 
-*** TODO Generalize the =initChartWindow= dropdown-sync helper
-Same browser-restore-vs-JS-state hazard exists for
-=book-period-select= and =trades-period-select=. Extract a generic
-=syncSelectFromDOM(id, setter)= and call it for all three at boot.
+*** DONE Persist dropdown choices in localStorage
+Switched away from relying on browser form-restoration (unreliable
+for selects whose options arrive after parse time). =SELECT_PREFS=
+table + =rememberSelectChoice= / =rememberedSelectChoice= helpers
+back all three dropdowns: chart window, book delivery period,
+trades filter. Boot reads localStorage; user changes write through;
+=rerenderBook= / =rerenderTrades= drop stale persisted values that
+no longer match a live contract.
 
 *** TODO Unify =next_quarter_boundary=
 Defined identically in =src/lisp/mod.rs= and =src/scenarios.rs=.

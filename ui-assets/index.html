@@ -1012,19 +1012,40 @@ function recordTradePrice(t) {
   while (arr.length && arr[0].t < cutoff) arr.shift();
 }
 
+// Persisted-select state — localStorage entries keep the chart
+// window, book delivery period, and trades filter alive across
+// page reloads without depending on the browser's form-restoration
+// timing (which is unreliable for dropdowns whose options are
+// populated by JS after data arrives).
+const SELECT_PREFS = {
+  chart:  'tradingsim-chart-window-min',
+  book:   'tradingsim-book-period',
+  trades: 'tradingsim-trades-filter',
+};
+
+function rememberSelectChoice(which, value) {
+  if (value == null || value === '') localStorage.removeItem(SELECT_PREFS[which]);
+  else localStorage.setItem(SELECT_PREFS[which], value);
+}
+
+function rememberedSelectChoice(which) {
+  return localStorage.getItem(SELECT_PREFS[which]);
+}
+
 function setChartWindow(mins) {
   chartWindowMs = parseInt(mins) * 60 * 1000;
+  rememberSelectChoice('chart', mins);
   drawChart();
 }
 
 function initChartWindow() {
-  // Browsers (notably Firefox) persist <select> values across
-  // reloads, but the JS state defaults back to 30 min — so on
-  // reload the dropdown could read "5 min" while the rendered
-  // chart used a 30-min window. Sync the JS state to whatever
-  // the browser restored.
+  // Prefer the saved choice; fall back to whatever the <select>
+  // is showing right now (defaults to its `selected` option).
   const sel = document.getElementById('chart-window');
-  if (sel) setChartWindow(sel.value);
+  if (!sel) return;
+  const saved = rememberedSelectChoice('chart');
+  if (saved) sel.value = saved;
+  setChartWindow(sel.value);
 }
 
 /** Effective delivery period (epoch ms) the chart is plotting:
@@ -1587,6 +1608,7 @@ function pushTrade(t) {
 
 function selectTradesPeriod(value) {
   tradesPeriodFilter = value === 'all' ? null : value;
+  rememberSelectChoice('trades', value);
   blurActive();
   rerenderTrades();
 }
@@ -1620,6 +1642,12 @@ function rerenderTrades() {
     const periods = new Set();
     for (const t of tradesBuffer) periods.add(t.period);
     const sorted = Array.from(periods).sort();
+    // Drop a stale persisted filter — the contract may have
+    // expired between page loads.
+    if (tradesPeriodFilter && !sorted.includes(tradesPeriodFilter)) {
+      tradesPeriodFilter = null;
+      rememberSelectChoice('trades', null);
+    }
     const opts = ['<option value="all">All delivery periods</option>']
       .concat(sorted.map(p => {
         const sel = p === tradesPeriodFilter ? ' selected' : '';
@@ -1726,6 +1754,7 @@ let bookShowAll = false;
 
 function selectBookPeriod(period) {
   bookContract.period = period;
+  rememberSelectChoice('book', period);
   rerenderBook();
 }
 
@@ -1765,6 +1794,11 @@ function rerenderBook() {
   for (const g of groups.values()) allPeriods.add(g.period);
   const periods = Array.from(allPeriods).sort();
   if (!bookContract.period || !periods.includes(bookContract.period)) {
+    // Drop a stale persisted period (contract expired between
+    // reloads) before falling back to the soonest available.
+    if (bookContract.period && !periods.includes(bookContract.period)) {
+      rememberSelectChoice('book', null);
+    }
     bookContract.period = periods[0] || null;
   }
   const periodSel = document.getElementById('book-period-select');
@@ -1871,6 +1905,14 @@ setInterval(() => {
 (async () => {
   initDensity();
   initChartWindow();
+  // Restore book + trades dropdown choices from localStorage so
+  // the first render uses the user's last picks instead of the
+  // defaults. Validation against the live period set happens
+  // inside rerenderBook / rerenderTrades — stale contracts that
+  // already expired get cleared there.
+  bookContract.period = rememberedSelectChoice('book') || null;
+  const tradesSaved = rememberedSelectChoice('trades');
+  tradesPeriodFilter = tradesSaved && tradesSaved !== 'all' ? tradesSaved : null;
   // Pull the sim's timezone first so the very first tickClock /
   // renderTrades / renderBook formats in the right zone — without
   // this they'd render in UTC for a frame, then snap.
