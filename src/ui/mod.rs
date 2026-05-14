@@ -29,20 +29,22 @@ struct UiState {
     clock: crate::sim::clock::SharedClock,
 }
 
-pub async fn serve(
-    addr: SocketAddr,
+/// Build the UI Router with state pre-wired. Exposed so integration
+/// tests can drive the endpoints via tower's ServiceExt::oneshot
+/// without binding a real port.
+pub fn build_router(
     world: Arc<RwLock<World>>,
     scenarios: Option<SharedScenarios>,
     weather: Option<crate::sim::weather::SharedWeather>,
     clock: crate::sim::clock::SharedClock,
-) -> std::io::Result<()> {
+) -> Router {
     let state = UiState {
         world,
         scenarios,
         weather,
         clock,
     };
-    let app = Router::new()
+    Router::new()
         .route("/", get(index))
         .route("/api/info", get(api_info))
         .route("/api/clock", get(api_clock))
@@ -56,7 +58,17 @@ pub async fn serve(
         .route("/api/weather", get(api_weather))
         .route("/ws/public-trades", get(ws_public_trades))
         .route("/ws/public-book", get(ws_public_book))
-        .with_state(state);
+        .with_state(state)
+}
+
+pub async fn serve(
+    addr: SocketAddr,
+    world: Arc<RwLock<World>>,
+    scenarios: Option<SharedScenarios>,
+    weather: Option<crate::sim::weather::SharedWeather>,
+    clock: crate::sim::clock::SharedClock,
+) -> std::io::Result<()> {
+    let app = build_router(world, scenarios, weather, clock);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     log::info!("UI server listening on http://{addr}/");
     axum::serve(listener, app).await
