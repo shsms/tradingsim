@@ -28,6 +28,7 @@ use crate::proto::trading::{
     UpdateGridpoolOrderResponse, electricity_trading_service_server::ElectricityTradingService,
 };
 use crate::proto_conv::{ConvError, timestamp_from_proto};
+use crate::sim::market::DeliveryPeriod;
 use crate::sim::order::{GridpoolId, Order, OrderDetail, OrderId};
 use crate::sim::world::{SubmitError, World};
 
@@ -71,10 +72,10 @@ fn conv_err_to_status(e: ConvError) -> Status {
 }
 
 /// Parse PaginationParams.params (oneof) into (page_size, cursor).
+/// Cursor is an opaque u64 the caller wraps in its id newtype.
 /// First-page calls carry PageSize; continuations carry PageToken,
-/// which we encode as "page_size:last_id". Empty token = first page
-/// with the default page size.
-fn parse_pagination(p: &Option<PaginationParams>) -> Result<(u32, Option<OrderId>), Status> {
+/// which we encode as "page_size:last_id". Empty token = first page.
+fn parse_pagination(p: &Option<PaginationParams>) -> Result<(u32, Option<u64>), Status> {
     let params = match p.as_ref().and_then(|p| p.params.as_ref()) {
         Some(p) => p,
         None => return Ok((DEFAULT_PAGE_SIZE, None)),
@@ -94,35 +95,34 @@ fn parse_pagination(p: &Option<PaginationParams>) -> Result<(u32, Option<OrderId
             let last_id: u64 = last
                 .parse()
                 .map_err(|_| Status::invalid_argument("bad cursor in page_token"))?;
-            Ok((page_size.min(MAX_PAGE_SIZE), Some(OrderId(last_id))))
+            Ok((page_size.min(MAX_PAGE_SIZE), Some(last_id)))
         }
     }
 }
 
-fn encode_page_token(page_size: u32, last: OrderId) -> String {
-    format!("{page_size}:{}", last.0)
+fn encode_page_token(page_size: u32, last_id: u64) -> String {
+    format!("{page_size}:{last_id}")
 }
 
-/// True iff a DeliveryTimeFilter selects this OrderDetail's period.
-/// Matching is on the period's start time, half-open interval semantics.
-fn period_matches_dtf(d: &OrderDetail, dtf: &DeliveryTimeFilter) -> bool {
+/// True iff a DeliveryTimeFilter selects `period`. Half-open
+/// interval semantics on period.start; duration_filters is an
+/// allow-list (empty = any).
+fn period_matches_dtf(period: DeliveryPeriod, dtf: &DeliveryTimeFilter) -> bool {
     if let Some(iv) = dtf.time_interval {
-        let start = d.order.period.start;
         if let Some(ts) = iv.start_time.as_ref() {
-            if timestamp_from_proto(ts).map(|t| start < t).unwrap_or(true) {
+            if timestamp_from_proto(ts).map(|t| period.start < t).unwrap_or(true) {
                 return false;
             }
         }
         if let Some(ts) = iv.end_time.as_ref() {
-            if timestamp_from_proto(ts).map(|t| start >= t).unwrap_or(true) {
+            if timestamp_from_proto(ts).map(|t| period.start >= t).unwrap_or(true) {
                 return false;
             }
         }
     }
     if !dtf.duration_filters.is_empty() {
-        let order_duration_i32 =
-            crate::proto::common::grid::DeliveryDuration::from(d.order.period.duration) as i32;
-        if !dtf.duration_filters.contains(&order_duration_i32) {
+        let d_i32 = crate::proto::common::grid::DeliveryDuration::from(period.duration) as i32;
+        if !dtf.duration_filters.contains(&d_i32) {
             return false;
         }
     }
@@ -143,7 +143,7 @@ fn matches_order_filter(d: &OrderDetail, f: &GridpoolOrderFilter) -> bool {
         }
     }
     if let Some(dtf) = f.delivery_time_filter.as_ref() {
-        if !period_matches_dtf(d, dtf) {
+        if !period_matches_dtf(d.order.period, dtf) {
             return false;
         }
     }
@@ -282,13 +282,13 @@ impl ElectricityTradingService for ElectricityTradingServer {
         all.sort_by_key(|d| d.id);
 
         let start = match cursor {
-            Some(c) => all.iter().position(|d| d.id > c).unwrap_or(all.len()),
+            Some(c) => all.iter().position(|d| d.id.0 > c).unwrap_or(all.len()),
             None => 0,
         };
         let end = (start + page_size as usize).min(all.len());
         let page = &all[start..end];
         let next = if end < all.len() {
-            page.last().map(|d| encode_page_token(page_size, d.id))
+            page.last().map(|d| encode_page_token(page_size, d.id.0))
         } else {
             None
         };
