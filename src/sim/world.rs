@@ -528,32 +528,7 @@ impl World {
         currency: Currency,
         now: DateTime<Utc>,
     ) -> (Vec<(crate::sim::matching::Fill, Area)>, Option<crate::sim::book::Resting>) {
-        let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
-        for (other, coupling) in self.coupled_areas(&taker_key.area) {
-            // Cross-border gate: the coupling stops carrying flow
-            // `gate_offset` before delivery start. Intra-zone uses
-            // ZERO, so this filter is a no-op for those edges.
-            if coupling.gate_offset > std::time::Duration::ZERO {
-                let cutoff = taker_key.period.start
-                    - chrono::Duration::from_std(coupling.gate_offset).unwrap_or_default();
-                if now >= cutoff {
-                    continue;
-                }
-            }
-            // Capacity exhaustion: if the edge is already at its
-            // per-contract cap, skip it entirely.
-            if let Some(remaining) =
-                self.remaining_capacity(&taker_key.area, &other, taker_key.period)
-            {
-                if remaining <= Decimal::ZERO {
-                    continue;
-                }
-            }
-            keys.push(ContractKey {
-                area: other,
-                period: taker_key.period,
-            });
-        }
+        let keys = self.candidate_keys(&taker_key, now);
 
         // FOK pre-check across all candidate books.
         if mode == ExecMode::FillOrKill {
@@ -660,22 +635,16 @@ impl World {
         self.books.keys()
     }
 
-    /// Simulate the matcher's marketable walk against the candidate
-    /// books (taker's area + currently-open coupled areas) without
-    /// mutating any state. Returns `true` if any resting order the
-    /// matcher would consume to fill `quantity` belongs to
-    /// `gridpool_id`. Conservative: if the same-pool resting sits
-    /// deeper than the marketable quantity will reach, this returns
-    /// `false`.
-    fn would_self_trade(
+    /// The contract keys a taker order rooted at `taker_key` is
+    /// allowed to match against: the home contract plus every
+    /// coupled area whose cross-border gate is still open and
+    /// whose per-contract edge capacity isn't already exhausted.
+    /// Used by both the matcher and the self-trade pre-flight.
+    fn candidate_keys(
         &self,
         taker_key: &ContractKey,
-        side: Side,
-        taker_price: Decimal,
-        mut remaining: Decimal,
-        gridpool_id: GridpoolId,
         now: DateTime<Utc>,
-    ) -> bool {
+    ) -> Vec<ContractKey> {
         let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
         for (other, coupling) in self.coupled_areas(&taker_key.area) {
             if coupling.gate_offset > std::time::Duration::ZERO {
@@ -697,6 +666,26 @@ impl World {
                 period: taker_key.period,
             });
         }
+        keys
+    }
+
+    /// Simulate the matcher's marketable walk against the candidate
+    /// books (taker's area + currently-open coupled areas) without
+    /// mutating any state. Returns `true` if any resting order the
+    /// matcher would consume to fill `quantity` belongs to
+    /// `gridpool_id`. Conservative: if the same-pool resting sits
+    /// deeper than the marketable quantity will reach, this returns
+    /// `false`.
+    fn would_self_trade(
+        &self,
+        taker_key: &ContractKey,
+        side: Side,
+        taker_price: Decimal,
+        mut remaining: Decimal,
+        gridpool_id: GridpoolId,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let keys = self.candidate_keys(taker_key, now);
         let mut walk: Vec<(OrderId, Decimal, Decimal)> = Vec::new();
         for key in &keys {
             if let Some(b) = self.books.get(key) {
