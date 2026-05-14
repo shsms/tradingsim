@@ -778,6 +778,30 @@ Estimated 6–8 commits.
 
 ** [X] Phase 4 — gridpools + minimum viable gRPC
 
+** [P] Phase 5 — lisp config (in progress)
+
+Done so far:
+- =lisp::Config::new(path)= evaluates a tulisp file against runtime
+  defuns; `MarketMakerSpec`s registered via `(%make-market-maker …)`
+  carry `Arc<RwLock<MarketMakerConfig>>` handles the MM tasks
+  consume.
+- `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`
+  mutate the named MM's shared config; writes take effect on the
+  next refresh tick.
+- `(set-socket-addr STR)`, `(set-physics-tick-ms N)` shape the
+  Metadata block the binary reads.
+- bin/tradingsim picks up the parsed config when `config.lisp` is
+  present; falls back to hardcoded defaults otherwise.
+- Sample `config.lisp` ships four DE-LU hour-contracts with varied
+  reference prices.
+
+Still to come on Phase 5:
+- `(make-gridpool …)` so the gridpool itself is config-driven.
+- tulisp-async `(every …)` / `(run-with-timer …)` so demand/surplus
+  can drift on a scenario timeline instead of only via top-level
+  setq.
+- `(watch-file …)` + notify-rs for hot reload.
+
 ** [P] Out-of-order pull: streaming + synthetic liquidity
 
 Brought forward from Phases 5 / 7 / 8 so the v0.1 demo has a live,

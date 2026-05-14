@@ -46,9 +46,16 @@ to come.
   `submit_counterparty_order` / `cancel_counterparty_order` for
   synthetic liquidity
 - `src/sim/counterparty.rs` — `MarketMaker` engine: random-walked
-  reference, configurable spread + size + demand/surplus tilt
-- `src/bin/tradingsim.rs` — serves the gRPC API on `[::1]:8810`;
-  spawns one MarketMaker per hour-contract for the next 4 hours
+  reference, `Arc<RwLock<MarketMakerConfig>>` so lisp callbacks can
+  hot-mutate demand/surplus/reference between refreshes
+- `src/lisp/mod.rs` — `Config::new(path)` evaluates a tulisp file
+  against runtime defuns: `(set-socket-addr STR)`,
+  `(set-physics-tick-ms N)`, `(%make-market-maker …)`,
+  `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`
+- `config.lisp` — sample top-level config (DE-LU + 4 hour-contracts)
+- `src/bin/tradingsim.rs` — loads `config.lisp` if present (registers
+  MMs from it); falls back to a 4-hour hardcoded MM set otherwise;
+  serves the gRPC API on the configured socket addr
 - `src/bin/tsctl.rs` — info / place / get / cancel / cancel-all /
   orders [--live] / trades [--live] / public-trades
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
