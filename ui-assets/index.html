@@ -199,16 +199,32 @@ td { padding: 2px 6px; }
 .status.live { color: var(--buy); }
 .status.offline { color: var(--sell); }
 .scenario { margin-bottom: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
-.scenario.idle { padding: 6px 8px; background: var(--panel-2); }
-.scenario.active { background: var(--panel-2); border-color: var(--accent); }
+.scenario.active { background: var(--panel-2); border-color: var(--accent); padding: 12px; }
+
+/* Picker rows used both for "no active scenario, pick one to
+   start" and for the inactive switcher shown next to an active
+   scenario's timeline. */
+.scenario-picker {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-top: 8px;
+  font-size: var(--fs-small);
+}
+.scenario-picker select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: var(--fs-small);
+  flex: 1;
+  min-width: 0;
+}
 .scenario-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
 .scenario-head strong { color: var(--accent); }
 .scenario-head .scenario-desc { color: var(--muted); font-size: var(--fs-small); }
 
 /* Idle (not-running) scenario: single-line picker. */
-.scenario.idle .scenario-head { margin-bottom: 0; align-items: center; }
-.scenario.idle .scenario-controls { margin-left: auto; }
-
 /* Active scenario: 24-hour timeline with wallclock marker + stage
    markers. Stage block widths are proportional to (hour_to -
    hour_from); the 'now' line is positioned at wallclock-hour. */
@@ -910,29 +926,6 @@ function escapeHtml(s) {
   })[c]);
 }
 
-function renderScenario(s) {
-  const cur = s.current_stage;
-  const running = cur !== null && cur !== undefined;
-  const safe = encodeURIComponent(s.name);
-  if (!running) return renderScenarioIdle(s, safe);
-  return renderScenarioActive(s, safe);
-}
-
-function renderScenarioIdle(s, safe) {
-  // Short row with a Start button on the right. Description tooltips
-  // give the longer story on hover.
-  return `
-    <div class="scenario idle">
-      <div class="scenario-head">
-        <strong>${escapeHtml(s.name)}</strong>
-        <span class="scenario-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description)}</span>
-        <span class="scenario-controls">
-          <button onclick="scenarioAction('${safe}', 'start')">Start</button>
-        </span>
-      </div>
-    </div>`;
-}
-
 function wallclockNowHour() {
   const now = new Date();
   return now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
@@ -1034,11 +1027,20 @@ async function loadScenarios() {
   if (!r.ok) return;
   const list = await r.json();
   const el = document.getElementById('scenarios');
-  el.innerHTML = list.length
-    ? list.map(renderScenario).join('')
-    : '<i>no scenarios registered</i>';
-
   const active = list.find(s => s.current_stage !== null && s.current_stage !== undefined);
+
+  if (!list.length) {
+    el.innerHTML = '<i>no scenarios registered</i>';
+  } else if (active) {
+    // Active one gets the whole panel; the rest collapse into a
+    // switch-to dropdown so the timeline + controls breathe.
+    const inactive = list.filter(s => s !== active);
+    el.innerHTML = renderScenarioActive(active, encodeURIComponent(active.name))
+      + renderScenarioSwitcher(inactive);
+  } else {
+    el.innerHTML = renderScenarioIdlePicker(list);
+  }
+
   const indicator = document.getElementById('scenario-indicator');
   if (active) {
     const stage = active.stages[active.current_stage];
@@ -1049,6 +1051,49 @@ async function loadScenarios() {
     indicator.textContent = '—';
     indicator.classList.add('muted');
   }
+}
+
+function renderScenarioIdlePicker(list) {
+  const opts = list
+    .map(s => `<option value="${encodeURIComponent(s.name)}">${escapeHtml(s.name)} — ${escapeHtml(s.description)}</option>`)
+    .join('');
+  return `<div class="scenario-picker">
+    <span class="muted">Start a scenario:</span>
+    <select onchange="if (this.value) scenarioAction(this.value, 'start')">
+      <option value="">— pick one —</option>
+      ${opts}
+    </select>
+  </div>`;
+}
+
+function renderScenarioSwitcher(others) {
+  if (!others.length) return '';
+  const opts = others
+    .map(s => `<option value="${encodeURIComponent(s.name)}">${escapeHtml(s.name)}</option>`)
+    .join('');
+  return `<div class="scenario-picker">
+    <span class="muted">Switch to:</span>
+    <select onchange="if (this.value) switchScenario(this.value)">
+      <option value="">—</option>
+      ${opts}
+    </select>
+  </div>`;
+}
+
+async function switchScenario(name) {
+  // Stop whichever scenario is currently active (if any), then
+  // start the picked one. Best-effort: errors are swallowed because
+  // the next loadScenarios() poll will reflect the truth either way.
+  const r = await fetch('/api/scenarios');
+  if (r.ok) {
+    const list = await r.json();
+    const active = list.find(s => s.current_stage !== null && s.current_stage !== undefined);
+    if (active) {
+      await fetch(`/api/scenarios/${encodeURIComponent(active.name)}/stop`, { method: 'POST' });
+    }
+  }
+  await fetch(`/api/scenarios/${name}/start`, { method: 'POST' });
+  loadScenarios();
 }
 
 async function scenarioAction(name, action) {
