@@ -12,10 +12,9 @@ world, axum SPA + REPL provide a UI, `tsctl` mirrors `swctl`.
 
 ## Canonical roadmap
 
-[`plan.org`](plan.org) is authoritative for scope, market model, lisp
-DSL design, the 11-RPC gRPC mapping, UI shape, scenarios, testing
-strategy, and the 12-phase roadmap. Use it to figure out what to
-build; use this file to figure out how to work in the repo.
+[`todo.org`](todo.org) tracks pending work. Use this file (CLAUDE.md)
+to figure out how to work in the repo; use todo.org to figure out
+what to work on next.
 
 ## Layout
 
@@ -69,7 +68,8 @@ LIMIT orders only, 15-min delivery duration only.
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
   service
 
-Target layout in plan.org §Architecture overview.
+All phases through hot reload are functional; remaining work lives
+in [`todo.org`](todo.org).
 
 ## Build / run / test
 
@@ -111,8 +111,7 @@ RPCs.
 
 Per the cross-project commit style: imperative subject, no prefix tag,
 no AI co-author footer. Commits stay around 100 lines following the
-introduce → rewire → remove → cleanup pattern. The plan.org roadmap
-already breaks each phase into ~commit-sized chunks.
+introduce → rewire → remove → cleanup pattern.
 
 ## Adding a sim type (current pattern, expanding)
 

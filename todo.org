@@ -1,0 +1,196 @@
+#+TITLE: tradingsim — open work
+#+TODO: TODO IN-PROGRESS | DONE CANCELLED
+
+Living list of pending work. Mark items DONE inline as they land;
+keep the description short — commit messages carry the detail. New
+items go under the appropriate heading; refactor sweeps tend to
+collapse multiple items into one commit.
+
+* Review findings (2026-05)
+
+Outcome of the exhaustive review. Tier ordering = bang-for-buck.
+
+** P0 — Bugs / smells worth fixing now
+
+*** TODO Remove dead-code stubs in =src/ui/mod.rs=
+=let _ = MarketSide::Buy;= and =let _ = header::CONTENT_TYPE;=
+inside =handle_book_ws=. Either delete the imports too or drop the
+underscore-binding stubs.
+
+*** TODO Fix =/api/info= coupling undercount
+Walks =gridpools().areas= so couplings on markets without a pool
+are invisible. Walk =markets()= directly. The =/ 2= dedup is also
+brittle — drop it once de-duplication is explicit.
+
+*** TODO MM goes silent on spread collapse
+=MarketMaker::refresh= cancels both quotes unconditionally then
+bails when =bid_price >= ask_price=. Aggressors that fire during
+that refresh window see no MM ask and may target the next-cheapest
+resting order. Compute the new pair first; only cancel-and-repost
+when it's valid; otherwise leave the previous quotes alive.
+
+*** TODO Trade WS snapshot on connect
+=handle_book_ws= already snapshots-then-subscribes;
+=handle_trades_ws= only subscribes. Page reload renders an empty
+tape until the next live print. Replay
+=world.public_trade_history()= first, then stream.
+
+*** TODO Generalize the =initChartWindow= dropdown-sync helper
+Same browser-restore-vs-JS-state hazard exists for
+=book-period-select= and =trades-period-select=. Extract a generic
+=syncSelectFromDOM(id, setter)= and call it for all three at boot.
+
+*** TODO Unify =next_quarter_boundary=
+Defined identically in =src/lisp/mod.rs= and =src/scenarios.rs=.
+Pick one as canonical and re-export.
+
+** P1 — Refactors that simplify a lot
+
+*** TODO Extract =fundamentals_at= helper
+=apply_biases='s aggressor + MM loops both compute
+=(period_hour, effective_ref)= from
+=(curve, weather.for_area, period_hour_for(offset), day_of_year)=.
+Pull into one helper so each loop is just "compute side-bias /
+demand / surplus, write fields".
+
+*** TODO =Order::limit= constructor
+Both =MarketMaker::refresh=, =Aggressor::fire=, and a dozen tests
+build =Order { ... order_type: Limit, ... None, None, ..., tag: None }=
+by hand. Add a small constructor.
+
+*** TODO Merge =World::submit_order= + =submit_counterparty_order= core
+90% overlap. Shared core (validate → mint id → match → record
+fills) in one place; two thin public entrypoints pick the
+"submitter context" (gridpool-owned vs counterparty).
+
+*** TODO Generic server filter helper
+=matches_order_filter=, =matches_gridpool_trade_filter=,
+=matches_public_book_filter=, =matches_public_trade_filter= all
+chain "if filter.field is non-empty/some, check
+membership/equality". One macro or generic.
+
+*** TODO Split =src/lisp/mod.rs= into a directory
+1575 LOC monolith. Suggested split: =config.rs= (struct + boot),
+=specs.rs= (spec types), =defuns/= (one file per cluster: MMs,
+aggressors, weather, curve, scenarios, metadata), =watch.rs=,
+=timers.rs=. Mechanical refactor, zero behavior change.
+
+*** TODO =mk_setter= for aggressor setters
+The lisp side has the helper for MMs but aggressors got
+copy-pasted setters. Generalize =mk_setter= over registry type
+and DRY both.
+
+*** TODO Split =ui-assets/index.html= into three files
+1900 LOC of mixed HTML/CSS/JS. Split into =index.html=,
+=style.css=, =app.js=. =rust-embed= already supports multiple
+files. Editing each becomes pleasant.
+
+*** TODO Unify the three UI area lists
+=DE_AREAS=, =CHART_AREAS=, =ALL_FILTER_AREAS= are three
+overlapping definitions of the same set with slightly different
+fields. One source-of-truth array with =.filter()= for views.
+
+** P2 — Architecture observations worth discussing
+
+These are bigger refactors. Each deserves a dedicated design pass
+before swinging the hammer.
+
+*** TODO Split =World= into smaller types
+2375 LOC owning markets, gridpools, books, couplings, fan-out,
+history, indices, ids, suspended flag, AND matcher orchestration.
+Natural slices: =MarketState= (physical state), =Fanout=
+(broadcasters + history), =Matcher= (free fns / new type).
+
+*** TODO Unify MM and Aggressor under a =Counterparty= trait
+Both hold =Arc<RwLock<Config>>=, a seeded RNG, a tick loop, a
+fair-value reference, a price/size policy, and submit via
+=submit_counterparty_order=. A small trait sharing the spawn
+pattern would deduplicate =spawn_mm_task= / =spawn_aggressor_task=.
+
+*** TODO Move duck curve out of =scenarios.rs=
+=natural_duck_bias= + =decay_weight= + =effective_ref= are market
+mechanics, not scenarios. New module =sim::demand= (or extend
+=sim::curve=).
+
+*** TODO =Config::with_defaults()= to kill =bin/tradingsim.rs= branching
+Every section in the binary branches "if let Some(c) = lisp_config
+{ ... } else { hardcoded default }". A default-populated Config
+removes the branch — boot always reads from Config.
+
+*** TODO Exponential backoff on WS reconnect
+=setTimeout(openTradesWs, 1000)= hammers the server every second
+during outages. 1s, 2s, 4s, 8s, capped at 30s is a five-line
+change.
+
+** P3 — Smaller smells
+
+*** TODO =sim::tuning= module for magic constants
+=MM_REFRESH_INTERVAL=, =MEAN_REVERT_RATE=, =gate_close_scale=
+slope, default =max_slippage=, default =price_noise=, etc. live
+across three files. Group with /why/ comments so calibration sweeps
+are easy.
+
+*** TODO UI =TimedRingBuffer= helper
+=bookState=, =tradesBuffer=, =priceSeries= each implement
+"timestamped entry, evict older than N" by hand. One class.
+
+*** TODO =Display= for tsctl row formatting
+=render_trade_line=, =render_public_trade_line=,
+=render_order_line= are formatting-only. Move to =Display= impls
+on the proto types via newtype.
+
+*** TODO Generalize =weather.rs= diurnal assumptions
+=temperature_at= hardcodes hour-15 as the daily peak (northern
+hemisphere). Fine for DE-LU; add a hemisphere flag if non-EU zones
+ever land.
+
+* Carried over from plan.org
+
+** Phase 12 — auth, hardening, perf
+
+Originally v0.5/v0.6 territory. Out of scope today but listed so
+they're not lost.
+
+*** TODO HMAC-SHA256 auth in tonic metadata
+=tonic::Interceptor= verifies a per-request HMAC over canonical
+metadata. =(set-auth-mode …)= in lisp picks the mode + secret.
+
+*** TODO Signed pagination tokens
+Pagination tokens become HMAC-signed to prevent forgery on
+long-lived list calls.
+
+*** TODO Throughput bench
+Target: 10k LIMIT submissions/sec, single core, sustained for a
+minute.
+
+*** TODO Stress test
+A scenario that posts 1M cancels in a sim-minute, asserts no
+panics / leaks / deadlocks.
+
+** Edge cases
+
+*** TODO WS lagged-receiver closes on Lagged
+Today =BroadcastStream::next= silently skips Lagged frames. Better
+to close the socket so the browser reconnects and re-snapshots.
+
+*** TODO WS connection drop + replay enhancement
+=/ws/public-book= snapshots on connect; trades equivalent comes
+in via the P0 fix above. Replay-from-cursor (=start_time=
+parameter on the WS upgrade query) would let a client recover
+without losing prints.
+
+** Open design questions
+
+*** TODO Q1 — Deterministic sim-time for tests + replays
+=(set-clock-mode 'sim-time)= + =(set-sim-time-multiplier X)=.
+=(every …)= timers stay on wall-time for now; add =(every-sim …)=
+on top if needed. Useful for ML training replays.
+
+*** TODO Q5 — Audit-grade order/trade log
+=(set-audit-log PATH)= writing JSONL with HMAC-chained records.
+v0.7 in the original plan; flagged for once the core is stable.
+
+* Scratch
+
+Notes, ideas, things that don't fit above. Promote to TODO when
+they crystallize.

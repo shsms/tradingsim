@@ -94,7 +94,7 @@ scenarios/              # canned time-of-day scenarios (lisp)
 config.lisp             # sample top-level configuration
 sim/common.lisp         # fleet helpers, every / run-with-timer sugar
 tests/                  # integration tests against the live services
-plan.org                # canonical roadmap + design notes
+todo.org                # pending work, marked TODO/DONE
 ```
 
 Two binaries — `tradingsim` (server) and `tsctl` (CLI). Both built from
@@ -387,10 +387,9 @@ The binary uses `simplelog`. Set `RUST_LOG=debug` for noisier output;
 
 ### Roadmap
 
-`plan.org` is authoritative for scope, market model, lisp DSL design,
-the 11-RPC gRPC mapping, UI shape, scenarios, testing strategy, and the
-phase-by-phase roadmap. Use it to figure out what to build; use this
-README to figure out how to run it.
+[`todo.org`](todo.org) tracks pending work in org-mode style. Items
+are marked `TODO` / `IN-PROGRESS` / `DONE`. New work goes there;
+this README is for running the existing simulator.
 
 ## License
 

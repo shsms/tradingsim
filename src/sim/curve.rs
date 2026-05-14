@@ -1,12 +1,8 @@
 //! Forward curve — maps hour-of-day to an expected reference price.
 //!
-//! Replaces the flat `85 + 0.10 * offset` ref-price model. The plan
-//! (plan.org "Realism upgrade" → "Forward-curve pricing") is for each
-//! MM's reference to be recomputed from this curve at every rolling
+//! Each MM's reference is recomputed from this curve at every rolling
 //! tick based on its current delivery period. Scenarios layer
 //! per-hour shifts and weather-sensitivity adjustments on top.
-//!
-//! This module is data + math only; no callers wired yet.
 
 use rust_decimal::Decimal;
 
@@ -42,12 +38,11 @@ impl Default for ForwardCurve {
 }
 
 impl ForwardCurve {
-    /// The default DE-LU intraday curve. Numbers chosen to match the
-    /// "median weekday" column of the calibration table in plan.org:
-    /// night ~50, morning peak ~110, midday belly ~25, evening peak
-    /// ~150. Sensitivity coefs concentrated in the hours where the
-    /// respective driver actually matters (solar 09-16, wind / load
-    /// overnight).
+    /// The default DE-LU intraday curve. Numbers chosen to match a
+    /// median DE-LU weekday: night ~50, morning peak ~110, midday
+    /// belly ~25, evening peak ~150 (EUR/MWh). Sensitivity coefs
+    /// concentrated in the hours where the respective driver
+    /// actually matters (solar 09-16, wind / load overnight).
     pub fn de_lu_typical() -> Self {
         // (base_price, solar_coef, wind_coef, load_coef), one row per hour.
         // Row 24 must equal row 0 (cyclic).

@@ -149,7 +149,7 @@
 ;; default behaviour (no scenario active) already applies a natural
 ;; duck curve to every aggressor; scenarios just override the
 ;; near-term shape so the orderbook looks like a different point in
-;; the day. See plan.org "Scenarios" for the full design.
+;; the day.
 ;;
 (load "scenarios/sunny-summer-day.lisp")
 (load "scenarios/rainy-summer-day.lisp")
