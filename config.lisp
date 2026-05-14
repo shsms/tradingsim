@@ -6,7 +6,8 @@
 
 (unless (boundp 'tradingsim-loaded)
   (setq tradingsim-loaded t)
-  (load "sim/common.lisp"))
+  (load "sim/common.lisp")
+  (load "sim/scenarios.lisp"))
 
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
@@ -77,14 +78,11 @@
 ;; (set-mm-demand "de-lu-q2" 0.20)   ;; peak quarter: aggressive procurement
 ;; (set-mm-surplus "de-lu-q3" 0.30)  ;; midday solar dump
 
-;; --- Scheduled callbacks ---------------------------------------------------
+;; --- Scenarios -------------------------------------------------------------
 ;;
-;; Demand on h0 ramps from 0 to 0.40 EUR/MWh over the first 60 seconds
-;; — a slow procurement curve example. Comment out for a flat market.
+;; Library lives in sim/scenarios.lisp. Uncomment any of these to
+;; activate the matching market-animation curve:
 ;;
-;; (let ((step 0))
-;;   (every
-;;    :milliseconds 5000
-;;    :call (lambda ()
-;;            (setq step (min 12 (+ step 1)))
-;;            (set-mm-demand "de-lu-q0" (* step 0.033)))))
+;; (scenario-morning-ramp-start "de-lu-q0")
+;; (scenario-gate-crunch-start  "de-lu-q3")
+;; (scenario-curtailment-start  "de-lu-q2")
