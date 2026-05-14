@@ -195,9 +195,11 @@ panics / leaks / deadlocks.
 
 ** Edge cases
 
-*** TODO WS lagged-receiver closes on Lagged
-Today =BroadcastStream::next= silently skips Lagged frames. Better
-to close the socket so the browser reconnects and re-snapshots.
+*** DONE WS lagged-receiver closes on Lagged
+=handle_trades_ws= now matches on Ok/Err and breaks the loop on
+=BroadcastStream::Err=, same posture as the book WS. With both
+WSes also doing snapshot-on-connect, a reconnect cleanly
+re-hydrates the recent history instead of leaving a gap.
 
 *** TODO WS connection drop + replay enhancement
 =/ws/public-book= snapshots on connect; trades equivalent comes

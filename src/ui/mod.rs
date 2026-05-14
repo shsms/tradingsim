@@ -195,7 +195,17 @@ async fn handle_trades_ws(mut socket: WebSocket, s: UiState) {
     }
     let mut stream = BroadcastStream::new(rx);
     while let Some(item) = stream.next().await {
-        let Ok(t) = item else { continue };
+        let t = match item {
+            Ok(t) => t,
+            // Lagged = receiver fell behind the broadcaster's
+            // capacity and missed events. Close the socket so the
+            // browser reconnects and re-snapshots the recent
+            // history — same posture the book WS takes for the
+            // same reason. Silently skipping would leave the
+            // client's trade tape gap-toothed without any signal
+            // that it had lost prints.
+            Err(_) => break,
+        };
         let payload: PublicTradeJson = (&t).into();
         if let Ok(s) = serde_json::to_string(&payload)
             && socket.send(Message::Text(s.into())).await.is_err()
