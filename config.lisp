@@ -31,86 +31,49 @@
  :name "default"
  :areas '("10Y1001A1001A82H"))
 
-;; Eight 15-min contracts of synthetic liquidity in DE-LU, starting
-;; at the next 15-min boundary. Each MM holds a SharedConfig the
-;; (set-mm-* …) defuns mutate in place.
+;; Fleet of 48 MMs — one per 15-min contract spanning the next 12
+;; hours of delivery. Each MM's quarter_offset drives the rolling
+;; task in the binary: as a contract gates out, the MM that quoted
+;; it migrates to the next-12h slot. Names are stable ("de-lu-q0"
+;; … "de-lu-q47") so scenarios can still address individual MMs.
 
-(%make-market-maker
- :name "de-lu-q0"
- :area "10Y1001A1001A82H"
- :quarter-offset 0
- :reference 85.00
- :spread 0.40
- :size 1.0
- :noise 0.10
- :seed 1)
-
-(%make-market-maker
- :name "de-lu-q1"
- :area "10Y1001A1001A82H"
- :quarter-offset 1
- :reference 85.50
- :spread 0.40
- :size 1.0
- :noise 0.10
- :seed 2)
-
-(%make-market-maker
- :name "de-lu-q2"
- :area "10Y1001A1001A82H"
- :quarter-offset 2
- :reference 86.00          ;; ramp into peak quarter
- :spread 0.50
- :size 1.0
- :noise 0.15
- :seed 3)
-
-(%make-market-maker
- :name "de-lu-q3"
- :area "10Y1001A1001A82H"
- :quarter-offset 3
- :reference 85.00
- :spread 0.40
- :size 1.0
- :noise 0.10
- :seed 4)
+(dotimes (i 48)
+  (%make-market-maker
+   :name (format "de-lu-q%d" i)
+   :area "10Y1001A1001A82H"
+   :quarter-offset i
+   :reference 85.00
+   :spread 0.40
+   :size 1.0
+   :noise 0.10
+   :seed (+ 1 i)))
 
 ;; --- Aggressors ------------------------------------------------------------
 ;;
-;; External counterparties that cross the MM's spread each fire,
-;; generating public trades. side-bias 0.5 = balanced; > 0.5 leans
-;; buy (lifts prices when paired with MM follow-last-trade);
-;; < 0.5 leans sell.
+;; Four aggressors per quarter (192 total) so every contract has
+;; some live flow on its tape. Rate scales linearly with the
+;; quarter-offset: q0's aggressors fire every 500 ms, q47's every
+;; 24 s — imminent contracts trade much harder than the
+;; long-dated ones, matching real intraday volume profiles.
 
-(%make-aggressor
- :name "ag-q0"
- :area "10Y1001A1001A82H"
- :quarter-offset 0
- :rate-ms 1000
- :size 0.2
- :side-bias 0.5
- :seed 101)
-
-(%make-aggressor
- :name "ag-q1"
- :area "10Y1001A1001A82H"
- :quarter-offset 1
- :rate-ms 1500
- :size 0.2
- :side-bias 0.55
- :seed 102)
+(dotimes (q 48)
+  (dotimes (a 4)
+    (%make-aggressor
+     :name (format "ag-q%d-%d" q a)
+     :area "10Y1001A1001A82H"
+     :quarter-offset q
+     :rate-ms (* 500 (+ q 1))
+     :size 0.2
+     :side-bias 0.5
+     :seed (+ 1000 (* q 10) a))))
 
 ;; --- Reference drift -------------------------------------------------------
 ;;
-;; Tie the MM's reference to the last public trade so prices migrate
-;; with activity. 0.10 = 10% pull toward last trade each refresh —
-;; a gentle exponential moving average. Comment out for a static
-;; reference.
+;; Tie every MM's reference to the last public trade on its contract
+;; so prices migrate with activity. 0.10 = 10% pull each refresh.
 
-(set-mm-follow-last-trade "de-lu-q0" 0.10)
-(set-mm-follow-last-trade "de-lu-q1" 0.10)
-(set-mm-follow-last-trade "de-lu-q2" 0.10)
-(set-mm-follow-last-trade "de-lu-q3" 0.10)
+(dotimes (i 48)
+  (set-mm-follow-last-trade (format "de-lu-q%d" i) 0.10))
 
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
