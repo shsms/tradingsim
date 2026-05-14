@@ -757,7 +757,7 @@ Estimated 5–7 commits.
 
 Estimated 6–8 commits.
 
-** Phase 4 — gridpools + minimum viable gRPC
+** [X] Phase 4 — gridpools + minimum viable gRPC
 - =sim/gridpool.rs=: =Gridpool { id, name, areas, order_index,
   trade_index, broadcast: Sender<…> }=.
 - =sim/streams.rs=: broadcast channels + filter eval.

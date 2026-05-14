@@ -19,32 +19,35 @@ build; use this file to figure out how to work in the repo.
 
 ## Layout
 
-Phases 0–3 landed; gridpools + server still to come. Current shape:
+Phases 0–4 landed: v0.1 demo (single hard-coded gridpool, LIMIT
+orders only) speaks the gRPC API end-to-end. Lisp config + execution
+options + multi-area still to come.
 
 - `src/lib.rs` — module roots
-- `src/proto.rs` — tonic include of the generated proto; re-exports
-  `proto::common` = `frequenz.api.common.v1alpha8` and
-  `proto::trading` = `frequenz.api.electricity_trading.electricity_trading.v1`
-- `src/proto_conv.rs` — the only file that knows both halves; scalar
-  / enum / struct bridges with `ConvError` for fallible directions
-- `src/sim/decimal.rs` — `snap_to_tick`, `is_multiple_of`, default
-  tick / step constants
-- `src/sim/market.rs` — `Area`, `Currency`, `CodeType`,
-  `DeliveryDuration`, `DeliveryPeriod`, `MarketRules`,
-  `MarketRegistry`
-- `src/sim/order.rs` — `Order`, `OrderDetail`, `StateDetail`, and the
-  state-machine enums (`Side`, `OrderType`, `ExecutionOption`,
-  `OrderState`, `StateReason`, `MarketActor`)
+- `src/proto.rs` — tonic include of the generated proto
+- `src/proto_conv.rs` — bidirectional sim ↔ proto bridges
+- `src/server.rs` — `ElectricityTradingServer` (impls all 11 RPCs;
+  Create/Get/Cancel/CancelAll/List/ReceiveOrdersStream wired; the
+  rest return Unimplemented with phase-number hints)
+- `src/sim/decimal.rs` — `snap_to_tick`, `is_multiple_of`, defaults
+- `src/sim/market.rs` — `Area`, `Currency`, `MarketRules`,
+  `MarketRegistry`, `DeliveryDuration/Period`
+- `src/sim/order.rs` — `Order`, `OrderDetail`, `StateDetail`, all
+  state-machine enums
 - `src/sim/trade.rs` — `Trade`, `PublicTrade`, `TradeState`
-- `src/sim/book.rs` — `OrderBook` (BTreeMap<Decimal, VecDeque<Resting>>
-  per side; `consume_front`, `peek_opposite`, `cancel`,
-  `total_open_qty`)
-- `src/sim/matching.rs` — `match_limit` continuous matcher
-  (LIMIT-only; price-time priority); proptest invariants
-- `src/sim/world.rs` — composes `MarketRegistry` + per-contract
-  `OrderBook`s + the monotonic `OrderId` source
-- `src/bin/tradingsim.rs` — stub server entry (logs and exits)
-- `src/bin/tsctl.rs` — stub client (clap scaffolding)
+- `src/sim/book.rs` — `OrderBook` (price-keyed FIFO half-books)
+- `src/sim/matching.rs` — `match_limit` continuous matcher +
+  proptest invariants
+- `src/sim/gridpool.rs` — `Gridpool` per-portfolio order/trade index
+- `src/sim/world.rs` — owns markets, gridpools, books, broadcasters,
+  id sources; `submit_order`, `cancel_order` are the admit/cancel
+  pipelines
+- `src/bin/tradingsim.rs` — serves the gRPC API on `[::1]:8810` with
+  one hard-coded DE-LU gridpool (id 1)
+- `src/bin/tsctl.rs` — info / place / get / cancel / cancel-all /
+  orders [--live]
+- `tests/grpc_e2e.rs` — out-of-process round-trips against the live
+  service (random port, fresh world per test)
 
 Target layout in plan.org §Architecture overview.
 
