@@ -5,22 +5,45 @@
 <title>tradingsim</title>
 <style>
 :root {
+  /* Colour tokens. Five semantic slots only; everything else is
+     opacity/shade of these. Buy/sell are reserved for order side;
+     accent is "active / clickable / focused contract"; alert flags
+     out-of-band state (manual override, suspended market, closed
+     gate). Muted is secondary text. */
   --bg: #0e1116;
   --panel: #161b22;
+  --panel-2: #1c2129;     /* nested surface inside a panel */
   --border: #30363d;
   --text: #e6edf3;
   --muted: #8b949e;
   --buy: #3fb950;
   --sell: #f85149;
   --accent: #58a6ff;
+  --alert: #d29922;
+
+  /* Typography scale. Page title big enough to anchor the layout;
+     panel titles and section labels both small + uppercase to keep
+     them out of the way of the numbers. */
+  --fs-title: 20px;
+  --fs-h2: 13px;
+  --fs-body: 13px;
+  --fs-small: 11px;
+  --fs-mini: 10px;
 }
 * { box-sizing: border-box; font-family: ui-monospace, "SF Mono", Monaco, "Courier New", monospace; }
 body {
   margin: 0; padding: 16px;
   background: var(--bg); color: var(--text);
+  font-size: var(--fs-body);
 }
-h1 { margin: 0 0 8px 0; font-size: 18px; color: var(--accent); }
-.muted { color: var(--muted); font-size: 12px; }
+h1 {
+  margin: 0 0 8px 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.muted { color: var(--muted); font-size: var(--fs-small); }
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -35,31 +58,109 @@ h1 { margin: 0 0 8px 0; font-size: 18px; color: var(--accent); }
   min-height: 200px;
 }
 .panel h2 {
-  margin: 0 0 8px 0; font-size: 13px;
-  color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;
+  margin: 0 0 8px 0;
+  font-size: var(--fs-h2);
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 .buy { color: var(--buy); }
 .sell { color: var(--sell); }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th { color: var(--muted); text-align: left; padding: 2px 6px; font-weight: normal; }
+table { width: 100%; border-collapse: collapse; font-size: var(--fs-body); }
+th {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  text-align: left;
+  padding: 2px 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 td { padding: 2px 6px; }
 .scroll { max-height: 360px; overflow-y: auto; }
 .scroll::-webkit-scrollbar { width: 6px; }
 .scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.status { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; background: var(--panel); }
+
+/* Pulse-bar pill. Used in tier 1 for trades / book / weather
+   status. .ok = green dot, .down = red dot, .warn = amber. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: var(--fs-small);
+}
+.pill::before {
+  content: "";
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted);
+}
+.pill.ok::before { background: var(--buy); }
+.pill.down::before { background: var(--sell); }
+.pill.warn::before { background: var(--alert); }
+
+/* 2-letter area badge. Neutral chip; "cross-area" variant pairs
+   two badges with an arrow for cross-border trades. */
+.area-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: var(--fs-mini);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.area-cross { color: var(--muted); margin: 0 2px; }
+
+/* Filter chip (used by step 5). Toggleable button-like element. */
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  user-select: none;
+}
+.chip:hover { color: var(--text); border-color: var(--muted); }
+.chip.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* Legacy status pill — kept until tier 1 lands in step 2. */
+.status { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: var(--fs-small); background: var(--panel); }
 .status.live { color: var(--buy); }
 .status.offline { color: var(--sell); }
 .scenario { margin-bottom: 10px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
 .scenario-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
 .scenario-head strong { color: var(--accent); }
-.stages { font-size: 11px; margin: 6px 0 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.stages { font-size: var(--fs-small); margin: 6px 0 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 .stage { padding: 2px 6px; border-radius: 3px; background: var(--bg); color: var(--muted); cursor: pointer; }
 .stage:hover { background: var(--border); }
 .stage.current { background: var(--accent); color: var(--bg); }
 .stage.done { color: var(--buy); }
 .wc { color: var(--buy); font-size: 9px; }
-.badge-manual { background: var(--sell); color: var(--bg); padding: 1px 5px; border-radius: 3px; font-size: 10px; }
-.scenario-controls button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 3px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 11px; margin-right: 4px; }
+.badge-manual {
+  background: var(--alert);
+  color: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: var(--fs-mini);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.scenario-controls button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 3px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: var(--fs-small); margin-right: 4px; }
 .scenario-controls button:disabled { opacity: 0.35; cursor: not-allowed; }
 .scenario-controls button:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
 </style>
