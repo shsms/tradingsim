@@ -1,3 +1,4 @@
+pub mod lisp;
 pub mod proto;
 pub mod proto_conv;
 pub mod server;
