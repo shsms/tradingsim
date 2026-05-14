@@ -843,33 +843,17 @@ fn register_aggressors(
         },
     );
 
-    // Runtime setters for the size + side-bias knobs.
-    let ag2 = aggressors.clone();
-    ctx.defun(
-        "set-aggressor-size",
-        move |name: String, value: f64| -> Result<bool, Error> {
-            match ag2.lock().get(&name) {
-                Some(spec) => {
-                    spec.shared_config.write().size = f64_to_dec(value);
-                    Ok(true)
-                }
-                None => Err(Error::os_error(format!("unknown aggressor {name:?}"))),
-            }
-        },
-    );
-    let ag3 = aggressors;
-    ctx.defun(
-        "set-aggressor-side-bias",
-        move |name: String, value: f64| -> Result<bool, Error> {
-            match ag3.lock().get(&name) {
-                Some(spec) => {
-                    spec.shared_config.write().side_bias = value.clamp(0.0, 1.0);
-                    Ok(true)
-                }
-                None => Err(Error::os_error(format!("unknown aggressor {name:?}"))),
-            }
-        },
-    );
+    // Runtime setters for the size + side-bias knobs — shared
+    // mk_setter plumbing with the MM side.
+    fn ag_cfg(s: &AggressorSpec) -> Arc<RwLock<AggressorConfig>> {
+        s.shared_config.clone()
+    }
+    mk_setter(ctx, "set-aggressor-size", aggressors.clone(), "aggressor", ag_cfg, |c, v| {
+        c.size = f64_to_dec(v);
+    });
+    mk_setter(ctx, "set-aggressor-side-bias", aggressors, "aggressor", ag_cfg, |c, v| {
+        c.side_bias = v.clamp(0.0, 1.0);
+    });
 }
 
 fn register_watches(
@@ -1103,62 +1087,80 @@ fn register_market_makers(
             Ok(a.name)
         },
     );
-
-    // Helper to build a mutator defun: take (name, value) and apply
-    // a closure on the named MM's shared config.
-    fn mk_setter<F>(
-        ctx: &mut TulispContext,
-        defun_name: &'static str,
-        mm: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
-        f: F,
-    ) where
-        F: Fn(&mut MarketMakerConfig, f64) + Send + Sync + 'static,
-    {
-        ctx.defun(
-            defun_name,
-            move |name: String, value: f64| -> Result<bool, Error> {
-                let guard = mm.lock();
-                match guard.get(&name) {
-                    Some(spec) => {
-                        let mut cfg = spec.shared_config.write();
-                        f(&mut cfg, value);
-                        Ok(true)
-                    }
-                    None => Err(Error::os_error(format!("unknown market-maker {name:?}"))),
-                }
-            },
-        );
+    fn mm_cfg(s: &MarketMakerSpec) -> Arc<RwLock<MarketMakerConfig>> {
+        s.shared_config.clone()
     }
-
-    mk_setter(ctx, "set-mm-reference", market_makers.clone(), |c, v| {
-        // (set-mm-reference NAME EUR) is the explicit-snap path —
-        // jumps the live price as well as the baseline so a lisp
-        // callback that wants to peg an MM doesn't have to wait for
-        // mean reversion. The scenario bias tick uses a different
-        // path that touches baseline only.
-        let d = f64_to_dec(v);
-        c.reference_baseline = d;
-        c.reference_price = d;
-    });
-    mk_setter(ctx, "set-mm-spread", market_makers.clone(), |c, v| {
+    mk_setter(
+        ctx,
+        "set-mm-reference",
+        market_makers.clone(),
+        "market-maker",
+        mm_cfg,
+        |c, v| {
+            // (set-mm-reference NAME EUR) is the explicit-snap path
+            // — jumps the live price as well as the baseline so a
+            // lisp callback that wants to peg an MM doesn't have to
+            // wait for mean reversion. The scenario bias tick uses
+            // a different path that touches baseline only.
+            let d = f64_to_dec(v);
+            c.reference_baseline = d;
+            c.reference_price = d;
+        },
+    );
+    mk_setter(ctx, "set-mm-spread", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         c.spread = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-size", market_makers.clone(), |c, v| {
+    mk_setter(ctx, "set-mm-size", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         c.size = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-demand", market_makers.clone(), |c, v| {
+    mk_setter(ctx, "set-mm-demand", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         c.demand = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-surplus", market_makers.clone(), |c, v| {
+    mk_setter(ctx, "set-mm-surplus", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         c.surplus = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-noise", market_makers.clone(), |c, v| {
+    mk_setter(ctx, "set-mm-noise", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         c.price_noise = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-follow-last-trade", market_makers, |c, v| {
+    mk_setter(ctx, "set-mm-follow-last-trade", market_makers, "market-maker", mm_cfg, |c, v| {
         // 0.0 = static; 1.0 = snap to last trade each refresh.
         c.follow_last_trade = f64_to_dec(v.clamp(0.0, 1.0));
     });
+}
+
+/// Build a `(set-X-FIELD NAME VAL)` defun that mutates a numeric
+/// field on a named spec's shared config. Generic over the spec
+/// type so the same plumbing covers MM and aggressor knobs.
+///
+/// - `access` returns the spec's `Arc<RwLock<Config>>` field.
+/// - `apply` writes one f64 into the config under the write lock.
+fn mk_setter<S, C, A, F>(
+    ctx: &mut TulispContext,
+    defun_name: &'static str,
+    map: Arc<Mutex<HashMap<String, S>>>,
+    spec_label: &'static str,
+    access: A,
+    apply: F,
+) where
+    S: Send + Sync + 'static,
+    C: Send + Sync + 'static,
+    A: Fn(&S) -> Arc<RwLock<C>> + Send + Sync + 'static,
+    F: Fn(&mut C, f64) + Send + Sync + 'static,
+{
+    ctx.defun(
+        defun_name,
+        move |name: String, value: f64| -> Result<bool, Error> {
+            let guard = map.lock();
+            match guard.get(&name) {
+                Some(spec) => {
+                    let arc = access(spec);
+                    apply(&mut arc.write(), value);
+                    Ok(true)
+                }
+                None => Err(Error::os_error(format!("unknown {spec_label} {name:?}"))),
+            }
+        },
+    );
 }
 
 fn register_metadata(ctx: &mut TulispContext, metadata: Arc<RwLock<Metadata>>) {

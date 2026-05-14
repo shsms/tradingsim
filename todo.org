@@ -87,10 +87,12 @@ to a single short =&&= chain. Net -41 LOC, easier to read.
 aggressors, weather, curve, scenarios, metadata), =watch.rs=,
 =timers.rs=. Mechanical refactor, zero behavior change.
 
-*** TODO =mk_setter= for aggressor setters
-The lisp side has the helper for MMs but aggressors got
-copy-pasted setters. Generalize =mk_setter= over registry type
-and DRY both.
+*** DONE =mk_setter= for aggressor setters
+=mk_setter= is now generic over the spec type via an =access=
+closure that hands back the spec's =Arc<RwLock<Config>>=. Two
+small =mm_cfg= / =ag_cfg= fn pointers cover the two specs; the
+aggressor's =set-aggressor-size= + =set-aggressor-side-bias= now
+go through the same helper as every MM setter.
 
 *** TODO Split =ui-assets/index.html= into three files
 1900 LOC of mixed HTML/CSS/JS. Split into =index.html=,
