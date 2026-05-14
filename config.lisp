@@ -60,12 +60,10 @@
 
 ;; --- Scenarios -------------------------------------------------------------
 ;;
-;; Each script in scenarios/ is self-running on load. Uncomment any
-;; line below to activate the matching market animation; each scenario
-;; exposes a (scenario-NAME-stop) defun for manual cancel.
+;; Time-of-day scenarios live in scenarios/ and load on demand. The
+;; default behaviour (no scenario active) already applies a natural
+;; duck curve to every aggressor; scenarios just override the
+;; near-term shape so the orderbook looks like a different point in
+;; the day. See plan.org "Scenarios" for the full design.
 ;;
-;; (load "scenarios/morning-ramp.lisp")   ;; demand ramp on tn-q0
-;; (load "scenarios/gate-crunch.lisp")    ;; widening spread on tn-q3
-;; (load "scenarios/curtailment.lisp")    ;; supply surge on tn-q2
-(load "scenarios/elaborate.lisp")         ;; six-phase tour — UI-driven
-(load "scenarios/duck-curve.lisp")        ;; flow follows German intraday curve
+;; (load "scenarios/sunny-summer-day.lisp")

@@ -275,11 +275,10 @@ async fn main() {
     {
         let world_for_ui = Arc::clone(&world);
         let scenarios = lisp_config_arc.as_ref().map(|c| c.scenarios());
-        let tulisp_ctx = lisp_config_arc.as_ref().map(|c| c.tulisp_ctx());
         let ui_addr: std::net::SocketAddr = "127.0.0.1:8811".parse().unwrap();
         tokio::spawn(async move {
             if let Err(e) =
-                ui_server::serve(ui_addr, world_for_ui, scenarios, tulisp_ctx).await
+                ui_server::serve(ui_addr, world_for_ui, scenarios).await
             {
                 log::error!("UI server exited: {e}");
             }

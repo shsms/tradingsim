@@ -638,36 +638,211 @@ switchyard uses for non-gRPC actions.
 
 * Scenarios
 
-A scenario in switchyard is a named, timed series of world mutations.
-Same shape here. Built-in scenarios in =sim/scenarios.lisp=:
+Scenarios are an operator-facing layer for replaying typical-day
+price patterns at chosen points along a 24-hour curve. They don't
+write prices directly — they tilt aggressor side-bias so prices
+drift via the MM's existing follow-last-trade machinery. The
+"shape" of a day (when peaks land, how deep the belly goes) is
+data; the prices are an emergent consequence of biased flow.
 
-** =calm-day=
-Quiet baseline. Two MMs, one renewables seller, one consumer buyer.
-Mid drifts slowly. Useful for "does my bot send and cancel cleanly?"
+** Default behaviour — natural duck curve, always on
 
-** =morning-ramp=
-Demand picks up between 06:00–09:00 sim-time. Best-ask climbs ~25%.
-Liquidity stays thick. Stresses STOP_LIMIT triggers.
+Without any scenario active, every aggressor's side-bias is
+recomputed every 30 s from the hour-of-day of its target
+contract's delivery start:
 
-** =gate-closure-crunch=
-Last 15 minutes before a 60-min contract's gate: depth thins, spreads
-widen, MMs cancel resting orders, prints get sparse. Catches
-"my-bot-trusts-thick-book" bugs.
+  - 00:00–05:00  bias 0.50  overnight, balanced
+  - 05:00–09:00  bias 0.50 → 0.62  morning ramp
+  - 09:00–10:00  bias 0.55  post-peak
+  - 10:00–15:00  bias 0.35  solar belly (PV operators dumping)
+  - 15:00–17:00  bias 0.50  transition
+  - 17:00–21:00  bias 0.72  evening peak
+  - 21:00–23:00  bias 0.60
+  - 23:00–24:00  bias 0.50
 
-** =unbalanced-fleet=
-A counterparty starts dumping 50 MW of forced sell at -50 EUR
-(curtailment); trading bots that assume positive prices break.
+The curve is the same shape for every quarter — q0's bias reflects
+the very-imminent contract's hour, q47's reflects a contract
+12 hours out. Prices emerge organically as those imbalances
+collide with the MM's follow-last-trade pull.
 
-** =cross-zone-arb=
-v0.3+. DE-LU and FR diverge by €10/MWh; cross-area public trades
-appear (different =buy_delivery_area= and =sell_delivery_area=).
-Lets users test multi-area position trackers.
+** Scenario as a wallclock override
 
-Scenarios are declared via =(define-scenario NAME …)= with the same
-verb set as switchyard's: list of =:at SECONDS :do (lambda () …)=
-entries. Internally a scenario is a per-name struct with a timer
-handle; =start-scenario= installs the timers, =stop-scenario= cancels
-them.
+A scenario is a named partition of 00:00–24:00 into stages
+(time windows). Each stage carries a target bias (or a gradient
+within the window). When a scenario is active, every aggressor's
+effective bias is
+
+  bias_eff(i) = lerp(bias_natural(period_hour(i)),
+                     bias_scenario(stage, when_within_stage),
+                     decay(i))
+
+where
+
+  - =bias_natural= is the default duck-curve value for the
+    contract's actual delivery hour. Always there.
+  - =bias_scenario= is the scenario's current stage's target,
+    optionally interpolated within the stage.
+  - =decay(i) = exp(-i / 12)= ramps from 1.0 at q0 down to ~0.02
+    at q47. The scenario's tilt fully applies to the
+    next-quarter contract and fades over the next ~3 h. Long-dated
+    contracts keep tracking the real wallclock.
+
+Net effect: the orderbook shows prices "from a different time of
+day" on the imminent contracts while the long-dated ones keep
+tracking real wallclock. The actual delivery start times stay put.
+
+** Stage spec
+
+Each stage entry in the lisp =define-scenario= is a 5-list:
+
+  (NAME HOUR-FROM HOUR-TO BIAS-FROM BIAS-TO)
+
+  - =NAME= — UI label, conventionally "HH:00" or "HH:00 label".
+  - =HOUR-FROM=, =HOUR-TO= — wallclock window the stage covers
+    (float hours; 6.0 = 06:00, 17.5 = 17:30).
+  - =BIAS-FROM=, =BIAS-TO= — target bias at the start and end of
+    the window. Linearly interpolated between as the wallclock
+    elapses (or as the stage is manually held).
+
+Stages within a scenario must be ordered and contiguous,
+partitioning [0, 24). The last stage's =HOUR-TO= is 24.0.
+
+A flat-bias stage uses =BIAS-FROM = BIAS-TO=.
+
+** Activation rules
+
+POST =/api/scenarios/{name}/start=
+  Pick the stage whose [HOUR-FROM, HOUR-TO) contains the current
+  UTC hour. Set =current_stage= to that index. Clear
+  =manual_override=.
+
+POST =/api/scenarios/{name}/next= | =/prev= | =/jump/{idx}=
+  Move =current_stage= to the requested index. Set
+  =manual_override=. If the new stage matches the wallclock-current
+  stage, clear =manual_override= instead.
+
+POST =/api/scenarios/{name}/stop=
+  Reset runtime. Aggressors fall back to the natural duck curve.
+
+A 30-second tick task in the binary:
+  1. For each running scenario without =manual_override=, recompute
+     the wallclock-matching stage and set =current_stage= to it.
+  2. Walk every aggressor; compute =bias_eff(i)= for its quarter
+     offset; write the result into its =SharedConfig=.
+
+The same tick handles both auto-advance and bias application — they
+share the same lock window over the registry + aggressor map.
+
+To resume wallclock-following from a manual jump: click the
+wallclock-matching stage (server detects equality and clears
+=manual_override=), or Stop + Start.
+
+** Sample scenarios
+
+To ship in =scenarios/=:
+
+  - =sunny-summer-day.lisp=     deep belly (bias 0.20 around 13:00),
+                                strong evening peak (0.78). Big PV
+                                pour, hot afternoon AC demand.
+  - =rainy-summer-day.lisp=     shallow belly (0.45), modest peaks
+                                (0.60). Cloud cover dampens solar.
+  - =sunny-summer-holiday.lisp= deep belly (0.18), muted evening
+                                peak (0.58). PV strong, demand
+                                suppressed (people away).
+  - =winter-weekday.lisp=       no real belly (bias hovers 0.50),
+                                very sharp double-peak: 06:00–08:00
+                                and 17:00–20:00 both at 0.80.
+                                Heating dominates, solar weak.
+  - =windy-winter-night.lisp=   slight overall surplus tilt, no peaks.
+                                Wind production exceeds demand.
+
+Each lives as a separate file; =config.lisp= can load any subset
+via =(load "scenarios/X.lisp")=. They show up in the UI panel
+automatically.
+
+** Two scenario shapes coexist
+
+The existing =elaborate.lisp= scenario uses an OPERATOR shape:
+each stage is =(NAME FN-NAME)= and the UI invokes the named defun
+when the operator clicks Start / Next. No wallclock binding.
+
+The new shape is TIME-OF-DAY: stages are 5-lists with hour windows
+and bias targets, no defun. The =define-scenario= defun
+discriminates on the arity of the first stage entry — 2-element →
+operator, 5-element → time-of-day. Stored as different
+=Stage::Operator { fn_name }= vs =Stage::TimeOfDay { hour_from,
+hour_to, bias_from, bias_to }= variants.
+
+Auto-advance and bias-application only apply to TimeOfDay scenarios.
+Operator scenarios behave exactly as today.
+
+** UI changes
+
+The Scenarios panel:
+  - Stage row becomes clickable — click to jump to that stage.
+  - Buttons: =Start=, =Prev=, =Next=, =Stop=. =Prev= is new.
+  - When a scenario is a TimeOfDay one, mark the wallclock-matching
+    stage with a small "•now" indicator. Purely informational; just
+    shows where auto-advance would land.
+  - Show =manual= badge when =manual_override= is set.
+
+Polling stays at 2 s.
+
+** Backend additions
+
+- =scenarios.rs= grows a =Stage= enum (Operator / TimeOfDay), the
+  =hour_from / hour_to / bias_from / bias_to= fields on TimeOfDay,
+  and =manual_override: bool= on =ScenarioRuntime=.
+- =define-scenario= parses both shapes based on first-entry arity.
+- New endpoints:
+  - POST =/api/scenarios/{name}/prev=
+  - POST =/api/scenarios/{name}/jump/{idx}=
+- A new tokio task in the binary ticks every 30 s, handling
+  auto-advance + bias application end-to-end. Needs access to
+  - the scenarios registry (read+write current_stage)
+  - the market-makers / aggressors registries (write side-bias)
+  - chrono::Utc::now() to drive auto-advance.
+
+The lisp side stops carrying the duck-curve loop. =scenarios/
+duck-curve.lisp= is deleted; its behaviour becomes the default.
+
+** Bias curve constants
+
+Codified once in =scenarios.rs= (Rust):
+
+  fn natural_duck_bias(hour: f64) -> f64 { /* piecewise as above */ }
+  fn decay_weight(quarter_offset: i64) -> f64 {
+      (-((quarter_offset as f64) / 12.0)).exp()
+  }
+  fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
+  fn stage_bias_at(stage: &TimeOfDayStage, hour: f64) -> f64 {
+      let t = (hour - stage.hour_from) /
+              (stage.hour_to - stage.hour_from);
+      lerp(stage.bias_from, stage.bias_to, t.clamp(0.0, 1.0))
+  }
+
+Aggressor side_bias is the result; range clamped to [0, 1].
+
+** Implementation order (~100-line commits)
+
+1. =plan.org= update (this section).
+2. Drop =scenarios/duck-curve.lisp= + =scenarios/morning-ramp.lisp=
+   / =gate-crunch.lisp= / =curtailment.lisp= (stale operator
+   scenarios already superseded). =elaborate.lisp= stays.
+3. Backend types: =Stage::Operator= / =Stage::TimeOfDay= enum, the
+   new fields, =manual_override=. Update =define-scenario= parser
+   for both shapes.
+4. Backend tick: tokio task in the binary that, every 30 s,
+   recomputes biases (natural curve always; scenario override when
+   active) and auto-advances.
+5. Endpoints =/prev=, =/jump/{idx}=. =/start= picks the wallclock
+   stage instead of stage 0.
+6. UI: =Prev= button, clickable stages, wallclock indicator,
+   manual badge. =loadScenarios= renders TimeOfDay vs Operator
+   differently.
+7. Ship =sunny-summer-day.lisp= as the first TimeOfDay scenario;
+   confirm prices visibly skew on the imminent quarters and stay
+   close to natural on the long-dated ones. Then the rest.
 
 * Testing strategy
 

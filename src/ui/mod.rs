@@ -16,8 +16,6 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
-use tulisp::{SharedMut, TulispContext};
-
 use crate::proto::trading::{MarketSide, PublicOrderBookRecord};
 use crate::scenarios::{ScenarioEntry, ScenarioRuntime, SharedScenarios};
 use crate::sim::trade::PublicTrade;
@@ -27,20 +25,14 @@ use crate::sim::world::World;
 struct UiState {
     world: Arc<Mutex<World>>,
     scenarios: Option<SharedScenarios>,
-    tulisp_ctx: Option<SharedMut<TulispContext>>,
 }
 
 pub async fn serve(
     addr: SocketAddr,
     world: Arc<Mutex<World>>,
     scenarios: Option<SharedScenarios>,
-    tulisp_ctx: Option<SharedMut<TulispContext>>,
 ) -> std::io::Result<()> {
-    let state = UiState {
-        world,
-        scenarios,
-        tulisp_ctx,
-    };
+    let state = UiState { world, scenarios };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/info", get(api_info))
@@ -48,6 +40,8 @@ pub async fn serve(
         .route("/api/scenarios", get(api_scenarios))
         .route("/api/scenarios/{name}/start", post(api_scenario_start))
         .route("/api/scenarios/{name}/next", post(api_scenario_next))
+        .route("/api/scenarios/{name}/prev", post(api_scenario_prev))
+        .route("/api/scenarios/{name}/jump/{idx}", post(api_scenario_jump))
         .route("/api/scenarios/{name}/stop", post(api_scenario_stop))
         .route("/ws/public-trades", get(ws_public_trades))
         .route("/ws/public-book", get(ws_public_book))
@@ -288,15 +282,18 @@ async fn api_scenario_start(
     State(s): State<UiState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScenarioJson>, StatusCode> {
-    advance_scenario(&s, &name, |rt, n| {
-        if n == 0 {
-            return None;
+    mutate_scenario(&s, &name, |def, rt| {
+        if def.stages.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
         }
         let now = chrono::Utc::now();
-        rt.current_stage = Some(0);
+        let hour = wallclock_hour(now);
+        let idx = wallclock_stage(def, hour).unwrap_or(0);
+        rt.current_stage = Some(idx);
         rt.started_at = Some(now);
         rt.stage_entered_at = Some(now);
-        Some(0)
+        rt.manual_override = false;
+        Ok(())
     })
 }
 
@@ -304,14 +301,31 @@ async fn api_scenario_next(
     State(s): State<UiState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScenarioJson>, StatusCode> {
-    advance_scenario(&s, &name, |rt, n| {
-        let cur = rt.current_stage?;
-        if cur + 1 >= n {
-            return None;
+    jump_relative(&s, &name, 1)
+}
+
+async fn api_scenario_prev(
+    State(s): State<UiState>,
+    Path(name): Path<String>,
+) -> Result<Json<ScenarioJson>, StatusCode> {
+    jump_relative(&s, &name, -1)
+}
+
+async fn api_scenario_jump(
+    State(s): State<UiState>,
+    Path((name, idx)): Path<(String, usize)>,
+) -> Result<Json<ScenarioJson>, StatusCode> {
+    mutate_scenario(&s, &name, |def, rt| {
+        if idx >= def.stages.len() {
+            return Err(StatusCode::BAD_REQUEST);
         }
-        rt.current_stage = Some(cur + 1);
-        rt.stage_entered_at = Some(chrono::Utc::now());
-        Some(cur + 1)
+        let now = chrono::Utc::now();
+        rt.current_stage = Some(idx);
+        rt.stage_entered_at = Some(now);
+        // Manual unless the operator just clicked the wallclock-matching
+        // stage — that's "resume auto", not "freeze here".
+        rt.manual_override = wallclock_stage(def, wallclock_hour(now)) != Some(idx);
+        Ok(())
     })
 }
 
@@ -319,46 +333,57 @@ async fn api_scenario_stop(
     State(s): State<UiState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScenarioJson>, StatusCode> {
-    let (on_stop_fn, payload) = {
-        let reg = s.scenarios.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-        let mut guard = reg.lock();
-        let entry = guard.get_mut(&name).ok_or(StatusCode::NOT_FOUND)?;
-        entry.runtime = ScenarioRuntime::default();
-        (entry.def.on_stop_fn.clone(), scenario_to_json(entry))
-    };
-    if let Some(fn_name) = on_stop_fn {
-        invoke_stage_fn(&s, &fn_name);
-    }
-    Ok(Json(payload))
+    mutate_scenario(&s, &name, |_def, rt| {
+        *rt = ScenarioRuntime::default();
+        Ok(())
+    })
 }
 
-fn advance_scenario<F>(
+fn jump_relative(
     s: &UiState,
     name: &str,
-    update: F,
-) -> Result<Json<ScenarioJson>, StatusCode>
-where
-    F: FnOnce(&mut ScenarioRuntime, usize) -> Option<usize>,
-{
-    let (fn_name, payload) = {
-        let reg = s.scenarios.as_ref().ok_or(StatusCode::NOT_FOUND)?;
-        let mut guard = reg.lock();
-        let entry = guard.get_mut(name).ok_or(StatusCode::NOT_FOUND)?;
-        let n = entry.def.stages.len();
-        let idx = update(&mut entry.runtime, n).ok_or(StatusCode::BAD_REQUEST)?;
-        (entry.def.stages[idx].fn_name.clone(), scenario_to_json(entry))
-    };
-    invoke_stage_fn(s, &fn_name);
-    Ok(Json(payload))
+    delta: i64,
+) -> Result<Json<ScenarioJson>, StatusCode> {
+    mutate_scenario(s, name, |def, rt| {
+        let cur = rt.current_stage.ok_or(StatusCode::BAD_REQUEST)? as i64;
+        let target = cur + delta;
+        if target < 0 || target as usize >= def.stages.len() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let idx = target as usize;
+        let now = chrono::Utc::now();
+        rt.current_stage = Some(idx);
+        rt.stage_entered_at = Some(now);
+        rt.manual_override = wallclock_stage(def, wallclock_hour(now)) != Some(idx);
+        Ok(())
+    })
 }
 
-fn invoke_stage_fn(s: &UiState, fn_name: &str) {
-    let Some(ctx) = s.tulisp_ctx.as_ref() else {
-        return;
-    };
-    let expr = format!("({fn_name})");
-    let mut guard = ctx.borrow_mut();
-    if let Err(e) = guard.eval_string(&expr) {
-        log::warn!("scenario stage {fn_name}: {}", e.format(&guard));
-    }
+fn mutate_scenario<F>(
+    s: &UiState,
+    name: &str,
+    f: F,
+) -> Result<Json<ScenarioJson>, StatusCode>
+where
+    F: FnOnce(&crate::scenarios::ScenarioDef, &mut ScenarioRuntime) -> Result<(), StatusCode>,
+{
+    let reg = s.scenarios.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let mut guard = reg.lock();
+    let entry = guard.get_mut(name).ok_or(StatusCode::NOT_FOUND)?;
+    f(&entry.def, &mut entry.runtime)?;
+    Ok(Json(scenario_to_json(entry)))
+}
+
+pub(crate) fn wallclock_hour(now: chrono::DateTime<chrono::Utc>) -> f64 {
+    use chrono::Timelike;
+    now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0
+}
+
+pub(crate) fn wallclock_stage(
+    def: &crate::scenarios::ScenarioDef,
+    hour: f64,
+) -> Option<usize> {
+    def.stages
+        .iter()
+        .position(|s| s.hour_from <= hour && hour < s.hour_to)
 }

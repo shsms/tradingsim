@@ -384,12 +384,29 @@ fn register_runtime(
     register_watches(ctx, extra_watches, load_dir);
 }
 
+/// Newtype around `TulispObject` so `Vec<RawStage>` satisfies the
+/// AsPlist field bound (which needs `TryFrom<TulispObject, Error =
+/// Error>`; the blanket impl on TulispObject is `Error = Infallible`).
+pub struct RawStage(tulisp::TulispObject);
+
+impl TryFrom<tulisp::TulispObject> for RawStage {
+    type Error = Error;
+    fn try_from(v: tulisp::TulispObject) -> Result<Self, Error> {
+        Ok(RawStage(v))
+    }
+}
+
+impl From<RawStage> for tulisp::TulispObject {
+    fn from(v: RawStage) -> tulisp::TulispObject {
+        v.0
+    }
+}
+
 AsPlist! {
     pub struct DefineScenarioArgs {
         name: String,
         description: Option<String> {= None},
-        stages: Vec<Vec<String>>,
-        on_stop<":on-stop">: Option<String> {= None},
+        stages: Vec<RawStage>,
     }
 }
 
@@ -403,23 +420,32 @@ fn register_scenarios(
         move |args: Plist<DefineScenarioArgs>| -> Result<String, Error> {
             let a = args.into_inner();
             let mut stages = Vec::new();
-            for stage in a.stages {
-                if stage.len() != 2 {
-                    return Err(Error::os_error(
+            for raw in a.stages {
+                let parts: Vec<tulisp::TulispObject> = raw.0.base_iter().collect();
+                if parts.len() != 5 {
+                    return Err(Error::os_error(format!(
                         "define-scenario: each :stages entry must be \
-                         (DISPLAY-NAME FN-NAME)",
-                    ));
+                         (NAME HOUR-FROM HOUR-TO BIAS-FROM BIAS-TO); got {} elements",
+                        parts.len()
+                    )));
                 }
+                let name: String = (&parts[0]).try_into()?;
+                let hour_from: f64 = (&parts[1]).try_into()?;
+                let hour_to: f64 = (&parts[2]).try_into()?;
+                let bias_from: f64 = (&parts[3]).try_into()?;
+                let bias_to: f64 = (&parts[4]).try_into()?;
                 stages.push(Stage {
-                    name: stage[0].clone(),
-                    fn_name: stage[1].clone(),
+                    name,
+                    hour_from,
+                    hour_to,
+                    bias_from,
+                    bias_to,
                 });
             }
             let def = ScenarioDef {
                 name: a.name.clone(),
                 description: a.description.unwrap_or_default(),
                 stages,
-                on_stop_fn: a.on_stop,
             };
             scenarios.lock().insert(
                 a.name.clone(),
