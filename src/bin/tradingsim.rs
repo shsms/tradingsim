@@ -116,13 +116,14 @@ async fn main() {
     let cfg_path = PathBuf::from(cfg_path);
     log::info!("tradingsim v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // Load lisp config if present; if absent or invalid, log and fall
-    // back to hardcoded defaults.
+    // Load lisp config if present; otherwise build a defaults-only
+    // Config so the rest of the bootstrap doesn't have to branch
+    // on Option<LispConfig> everywhere.
     let lisp_config = if Path::new(&cfg_path).exists() {
         match LispConfig::new(cfg_path.to_str().unwrap()) {
             Ok(c) => {
                 log::info!("Loaded config from {}", cfg_path.display());
-                Some(c)
+                c
             }
             Err(e) => {
                 log::error!("Config load failed:\n{e}");
@@ -134,14 +135,11 @@ async fn main() {
             "Config file {} not present — using hardcoded defaults",
             cfg_path.display()
         );
-        None
+        LispConfig::with_defaults()
     };
 
     let mut markets = MarketRegistry::new();
-    let lisp_market_rules = lisp_config
-        .as_ref()
-        .map(|c| c.market_rules())
-        .unwrap_or_default();
+    let lisp_market_rules = lisp_config.market_rules();
     if !lisp_market_rules.is_empty() {
         log::info!(
             "Registering {} market(s) from config.lisp",
@@ -158,9 +156,9 @@ async fn main() {
     let mut world = World::new(markets);
 
     // Apply lisp-declared SIDC couplings before any orders flow.
-    if let Some(c) = lisp_config.as_ref() {
+    {
         use rust_decimal::Decimal;
-        for cs in c.couplings() {
+        for cs in lisp_config.couplings() {
             let offset = std::time::Duration::from_secs(cs.gate_offset_seconds.max(0) as u64);
             let capacity = cs
                 .capacity_mw
@@ -179,13 +177,10 @@ async fn main() {
         }
         // Share the lisp-side market-suspended flag so
         // `(suspend-market)` actually rejects future submissions.
-        world.set_market_suspended_handle(c.market_suspended());
+        world.set_market_suspended_handle(lisp_config.market_suspended());
     }
 
-    let gridpool_specs = lisp_config
-        .as_ref()
-        .map(|c| c.gridpools())
-        .unwrap_or_default();
+    let gridpool_specs = lisp_config.gridpools();
     if !gridpool_specs.is_empty() {
         for gp in gridpool_specs {
             let areas = gp.area_codes.iter().map(|c| Area::eic(c)).collect();
@@ -205,28 +200,20 @@ async fn main() {
         world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
     }
 
-    let trading_addr = lisp_config
-        .as_ref()
-        .map(|c| c.trading_addr())
-        .unwrap_or_else(|| "[::1]:8810".to_string());
+    let trading_addr = lisp_config.trading_addr();
 
     // Synthetic liquidity: either driven by lisp's (make-market-maker
     // …) entries, or — when no config.lisp is loaded — the prior
     // four-hour fallback so the demo still has a quoted book.
-    let mm_specs = lisp_config
-        .as_ref()
-        .map(|c| c.market_makers())
-        .unwrap_or_default();
+    let mm_specs = lisp_config.market_makers();
 
     // Drain tulisp-async timers (every / run-with-timer) on a fixed
     // cadence so scheduled callbacks in config.lisp actually fire.
     // Also spawn the notify-rs file watcher so edits to config.lisp
     // (or any (watch-file …) entry) trigger an automatic reload.
-    let lisp_config_arc: Option<Arc<LispConfig>> = lisp_config.map(Arc::new);
-    if let Some(c) = lisp_config_arc.as_ref() {
-        c.spawn_timer_loop(Duration::from_millis(100));
-        c.spawn_file_watcher();
-    }
+    let lisp_config = Arc::new(lisp_config);
+    lisp_config.spawn_timer_loop(Duration::from_millis(100));
+    lisp_config.spawn_file_watcher();
 
     let world = Arc::new(RwLock::new(world));
 
@@ -274,10 +261,7 @@ async fn main() {
     // Aggressors — non-gridpool takers that cross the MM's quotes
     // and generate public trades. Drives observable price activity
     // on the public trade tape.
-    let aggressor_specs = lisp_config_arc
-        .as_ref()
-        .map(|c| c.aggressors())
-        .unwrap_or_default();
+    let aggressor_specs = lisp_config.aggressors();
     let mut bias_views: Vec<tradingsim::scenarios::AggressorView> = Vec::new();
     if !aggressor_specs.is_empty() {
         log::info!(
@@ -303,53 +287,51 @@ async fn main() {
     // immediate quote shift on top of the slower follow-last-trade
     // drift, so visible price moves land within seconds rather than
     // minutes.
-    if let Some(c) = lisp_config_arc.as_ref() {
-        // Seed each MM's reference from the curve+weather at boot so
-        // the very first quote (within MM_REFRESH_INTERVAL) is
-        // already on-curve, ahead of the first bias tick a few
-        // seconds later.
-        {
-            let curve_handle = c.curve();
-            let weather_handle = c.weather();
-            let clock_handle = c.clock();
-            let curve = curve_handle.read();
-            let weather = weather_handle.read();
-            let clock = clock_handle.read().clone();
-            for view in &mm_views {
-                let cfg_snap = view.shared_config.read();
-                let period_start = cfg_snap.period.start;
-                let area_code = cfg_snap.area.code.clone();
-                drop(cfg_snap);
-                // Period start in the configured *local* zone so the
-                // curve lookup (peak/belly hours are local) and the
-                // solar-elevation day-of-year both land on the right
-                // value at boot — straight UTC was peaking around
-                // CEST 14:00 in summer.
-                let hour = clock.local_hour(period_start);
-                let day = clock.local_day_of_year(period_start);
-                let loc = weather.for_area(&area_code);
-                // Seed both baseline (the bias tick's target) and
-                // the live price so the first refresh quotes
-                // on-curve before the first bias tick fires.
-                let seeded = tradingsim::scenarios::effective_ref(&curve, loc, hour, day);
-                let mut w = view.shared_config.write();
-                w.reference_baseline = seeded;
-                w.reference_price = seeded;
-            }
+    // Seed each MM's reference from the curve+weather at boot so
+    // the very first quote (within MM_REFRESH_INTERVAL) is
+    // already on-curve, ahead of the first bias tick a few
+    // seconds later.
+    {
+        let curve_handle = lisp_config.curve();
+        let weather_handle = lisp_config.weather();
+        let clock_handle = lisp_config.clock();
+        let curve = curve_handle.read();
+        let weather = weather_handle.read();
+        let clock = clock_handle.read().clone();
+        for view in &mm_views {
+            let cfg_snap = view.shared_config.read();
+            let period_start = cfg_snap.period.start;
+            let area_code = cfg_snap.area.code.clone();
+            drop(cfg_snap);
+            // Period start in the configured *local* zone so the
+            // curve lookup (peak/belly hours are local) and the
+            // solar-elevation day-of-year both land on the right
+            // value at boot — straight UTC was peaking around
+            // CEST 14:00 in summer.
+            let hour = clock.local_hour(period_start);
+            let day = clock.local_day_of_year(period_start);
+            let loc = weather.for_area(&area_code);
+            // Seed both baseline (the bias tick's target) and
+            // the live price so the first refresh quotes
+            // on-curve before the first bias tick fires.
+            let seeded = tradingsim::scenarios::effective_ref(&curve, loc, hour, day);
+            let mut w = view.shared_config.write();
+            w.reference_baseline = seeded;
+            w.reference_price = seeded;
         }
+    }
 
-        if !bias_views.is_empty() || !mm_views.is_empty() {
-            tradingsim::scenarios::spawn_bias_tick(
-                bias_views,
-                mm_views,
-                c.scenarios(),
-                c.bias_scale(),
-                c.curve(),
-                c.weather(),
-                c.clock(),
-                Duration::from_secs(5),
-            );
-        }
+    if !bias_views.is_empty() || !mm_views.is_empty() {
+        tradingsim::scenarios::spawn_bias_tick(
+            bias_views,
+            mm_views,
+            lisp_config.scenarios(),
+            lisp_config.bias_scale(),
+            lisp_config.curve(),
+            lisp_config.weather(),
+            lisp_config.clock(),
+            Duration::from_secs(5),
+        );
     }
 
     // Expire orders whose valid_until has lapsed. Once a second is
@@ -373,9 +355,9 @@ async fn main() {
     // Drain the lisp-side recall queue. Each entry is an order id
     // the lisp layer asked to force-cancel with actor=System; pop
     // and apply against the World.
-    if let Some(c) = lisp_config_arc.as_ref() {
+    {
         let world_for_recall = Arc::clone(&world);
-        let queue = c.recall_queue();
+        let queue = lisp_config.recall_queue();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(200));
             loop {
@@ -401,22 +383,13 @@ async fn main() {
 
     // UI server: spawns alongside the gRPC server, sharing the same
     // World handle. Address pulled from config.lisp via
-    // (set-ui-addr "…"); defaults to 127.0.0.1:8811 if no lisp
-    // config is loaded.
+    // (set-ui-addr "…"); defaults to 127.0.0.1:8811.
     {
         let world_for_ui = Arc::clone(&world);
-        let scenarios = lisp_config_arc.as_ref().map(|c| c.scenarios());
-        let weather = lisp_config_arc.as_ref().map(|c| c.weather());
-        // If no lisp config loaded, use a default Berlin clock so the
-        // UI's /api/clock endpoint still has something to hand back.
-        let clock = lisp_config_arc
-            .as_ref()
-            .map(|c| c.clock())
-            .unwrap_or_else(tradingsim::sim::clock::new_clock);
-        let ui_addr_str = lisp_config_arc
-            .as_ref()
-            .map(|c| c.ui_addr())
-            .unwrap_or_else(|| "127.0.0.1:8811".to_string());
+        let scenarios = Some(lisp_config.scenarios());
+        let weather = Some(lisp_config.weather());
+        let clock = lisp_config.clock();
+        let ui_addr_str = lisp_config.ui_addr();
         let ui_addr: std::net::SocketAddr = ui_addr_str.parse().unwrap_or_else(|e| {
             log::error!("Invalid ui-addr {ui_addr_str:?} ({e}); falling back to 127.0.0.1:8811");
             "127.0.0.1:8811".parse().unwrap()
@@ -433,14 +406,13 @@ async fn main() {
     // Weather forecast service: exposes the sim's internal weather
     // state via the Frequenz weather API. Sibling port to the
     // electricity-trading gRPC, configurable via
-    // (set-weather-socket-addr "…"). Only spawned when a lisp
-    // config is present (the weather state lives there).
-    if let Some(c) = lisp_config_arc.as_ref() {
+    // (set-weather-socket-addr "…").
+    {
         use tradingsim::proto::weather::weather_forecast_service_server::WeatherForecastServiceServer;
         use tradingsim::weather_server::WeatherForecastServer;
-        let weather_handle = c.weather();
-        let cadence_handle = c.weather_cadence();
-        let weather_addr_str = c.weather_addr();
+        let weather_handle = lisp_config.weather();
+        let cadence_handle = lisp_config.weather_cadence();
+        let weather_addr_str = lisp_config.weather_addr();
         let weather_addr: std::net::SocketAddr = weather_addr_str.parse().unwrap_or_else(|e| {
             log::error!(
                 "Invalid weather-socket-addr {weather_addr_str:?} ({e}); falling back to [::1]:8820"

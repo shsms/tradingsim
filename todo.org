@@ -134,10 +134,13 @@ pattern would deduplicate =spawn_mm_task= / =spawn_aggressor_task=.
 call sites still work. =effective_ref= stays in =scenarios.rs= —
 it's tightly coupled to the bias tick's curve + weather lookup.
 
-*** TODO =Config::with_defaults()= to kill =bin/tradingsim.rs= branching
-Every section in the binary branches "if let Some(c) = lisp_config
-{ ... } else { hardcoded default }". A default-populated Config
-removes the branch — boot always reads from Config.
+*** DONE =Config::with_defaults()= to kill =bin/tradingsim.rs= branching
+=Config::new= and =Config::with_defaults()= share a private
+=build_empty(filename)= scaffolding fn. The binary always holds
+a real =Config= — no more =Option<LispConfig>=, no more
+per-section =unwrap_or_else= fallbacks. The "no config.lisp
+present" path constructs the defaults-only Config and proceeds
+identically.
 
 *** DONE Exponential backoff on WS reconnect
 =tradesWsBackoff= / =bookWsBackoff= live in =app.js=. Start at

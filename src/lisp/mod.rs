@@ -153,10 +153,41 @@ pub struct Config {
 }
 
 impl Config {
+    /// Build a config initialised entirely from defaults: empty
+    /// MM / aggressor / gridpool / market / coupling registries,
+    /// default Metadata, default Tz, no scenarios. The binary boot
+    /// path calls this when no `config.lisp` is present, so it can
+    /// always reason against a real Config instead of branching
+    /// `Option<Config>` everywhere.
+    ///
+    /// `filename` is the path the eventual `(reset-state)` writer
+    /// or notify-rs watcher would point at — defaults to
+    /// `<unbound>` for the no-file case.
+    pub fn with_defaults() -> Self {
+        Self::build_empty("<unbound>")
+    }
+
     /// Build a config from `filename`. Returns the formatted lisp
     /// error on parse/eval failure — the caller (binary boot)
     /// decides whether to panic or fall back to defaults.
     pub fn new(filename: &str) -> Result<Self, String> {
+        let cfg = Self::build_empty(filename);
+        // Reach into the just-built context to run the file's eval
+        // pass. ctx is SharedMut so the public accessors keep
+        // working post-load.
+        {
+            let mut ctx = cfg.ctx.borrow_mut();
+            if let Err(e) = ctx.eval_file(filename) {
+                return Err(e.format(&ctx));
+            }
+        }
+        Ok(cfg)
+    }
+
+    /// Common scaffolding for `new` and `with_defaults`: allocates
+    /// every shared handle, registers defuns, installs the
+    /// tulisp-async timer source. Does not evaluate any user file.
+    fn build_empty(filename: &str) -> Self {
         let mut ctx = TulispContext::new();
         let metadata = Arc::new(RwLock::new(Metadata::default()));
         let market_makers = Arc::new(Mutex::new(HashMap::new()));
@@ -179,8 +210,12 @@ impl Config {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => PathBuf::from("."),
         };
-        ctx.set_load_path(Some(&load_dir))
-            .map_err(|e| format!("set_load_path({}): {e}", load_dir.display()))?;
+        // set_load_path can fail if the dir doesn't exist (e.g. the
+        // <unbound> default case). Best-effort: ignore the error
+        // and proceed — defuns don't need a load path until a
+        // (load …) form runs, which the empty-defaults flow never
+        // hits.
+        let _ = ctx.set_load_path(Some(&load_dir));
 
         register_runtime(
             &mut ctx,
@@ -204,18 +239,14 @@ impl Config {
         );
 
         // (every …), (run-with-timer …), (cancel-timer) — must be
-        // registered before eval_file because the config may use
-        // them at top level. TokioExecutor::new captures
-        // Handle::current(), so Config::new must run inside a
+        // registered before any user eval because the config may
+        // use them at top level. TokioExecutor::new captures
+        // Handle::current(), so build_empty must run inside a
         // tokio runtime (tests use #[tokio::test]).
         let timer_handle =
             tulisp_async::register(&mut ctx, Arc::new(tulisp_async::TokioExecutor::new()));
 
-        if let Err(e) = ctx.eval_file(filename) {
-            return Err(e.format(&ctx));
-        }
-
-        Ok(Self {
+        Self {
             filename: filename.to_string(),
             ctx: SharedMut::new(ctx),
             metadata,
@@ -235,7 +266,7 @@ impl Config {
             extra_watches,
             timer_handle,
             anchor,
-        })
+        }
     }
 
     /// Re-evaluate the config file against the existing context. The
