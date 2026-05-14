@@ -347,14 +347,26 @@ td { padding: 2px 6px; }
 }
 #price-chart { display: block; }
 
-/* Book ladder — vertical depth per contract. asks stack from worst
-   price down to the spread row, bids continue below; quantity bars
-   give a quick visual of where liquidity sits. Top-3-per-side by
-   default; click '+ N more' to expand. */
-.book-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 10px;
+/* Book ladder — vertical depth for one contract at a time. The
+   panel header carries area + delivery-period dropdowns the user
+   picks from; rendering 4 areas × 16 periods of ladders side-by-
+   side was unreadable noise. Clicking a trade row still pins the
+   period dropdown to that delivery start. */
+.book-controls {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 10px;
+  font-size: var(--fs-small);
+}
+.book-controls select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: var(--fs-small);
 }
 .ladder {
   background: var(--panel-2);
@@ -571,14 +583,15 @@ td { padding: 2px 6px; }
 
   <div class="panel panel-book">
     <h2>Order book</h2>
-    <div class="muted" style="margin-bottom:8px">
-      One ladder per contract, top 3 levels per side. Bar width
-      shows quantity relative to the deepest level in that
-      contract; click '+ more' to expand the full depth.
+    <div class="book-controls">
+      <label>area
+        <select id="book-area-select" onchange="selectBookArea(this.value)"></select>
+      </label>
+      <label>delivery
+        <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
+      </label>
     </div>
-    <div class="scroll">
-      <div id="book" class="book-grid"></div>
-    </div>
+    <div id="book"></div>
   </div>
 
   <div class="panel panel-scenarios">
@@ -1105,6 +1118,9 @@ let periodFilter = null;
 function setPeriodFilter(period) {
   if (!period) return;
   periodFilter = period;
+  // Sync the single-contract book so a click on a trade row in TN
+  // lands on the same delivery the user is looking at.
+  bookContract.period = period;
   renderPeriodPill();
   rerenderBook();
   applyFilterToTrades();
@@ -1258,6 +1274,23 @@ function renderLadder(g) {
     </div>`;
 }
 
+/** Selected (area, period) for the single-contract book view.
+ *  Initialised lazily on first render to the first contract with
+ *  resting orders. Click-to-focus on a trade row syncs `period`
+ *  to the focused delivery start. */
+const bookContract = { area: null, period: null };
+
+function selectBookArea(area) {
+  bookContract.area = area;
+  bookContract.period = null;
+  rerenderBook();
+}
+
+function selectBookPeriod(period) {
+  bookContract.period = period;
+  rerenderBook();
+}
+
 function rerenderBook() {
   // Group rows by (area, period). Within each group, aggregate
   // bids and asks separately by price level. Contracts whose gate
@@ -1284,20 +1317,50 @@ function rerenderBook() {
     target.set(r.price, next);
   }
 
+  // Rebuild dropdown options from what's actually on the book, and
+  // re-pin the selection if the previous choice has gone away.
+  const areaSet = new Set();
+  const periodsByArea = new Map();
+  for (const g of groups.values()) {
+    areaSet.add(g.area);
+    if (!periodsByArea.has(g.area)) periodsByArea.set(g.area, new Set());
+    periodsByArea.get(g.area).add(g.period);
+  }
+  const areas = Array.from(areaSet).sort();
+  if (!bookContract.area || !areaSet.has(bookContract.area)) {
+    bookContract.area = areas[0] || null;
+  }
+  const periods = bookContract.area
+    ? Array.from(periodsByArea.get(bookContract.area) || []).sort()
+    : [];
+  if (!bookContract.period || !periods.includes(bookContract.period)) {
+    bookContract.period = periods[0] || null;
+  }
+
+  const areaSel = document.getElementById('book-area-select');
+  if (areaSel) {
+    areaSel.innerHTML = areas
+      .map(
+        a => `<option value="${a}"${a === bookContract.area ? ' selected' : ''}>${areaTag(a)}</option>`
+      )
+      .join('');
+  }
+  const periodSel = document.getElementById('book-period-select');
+  if (periodSel) {
+    periodSel.innerHTML = periods
+      .map(
+        p => `<option value="${p}"${p === bookContract.period ? ' selected' : ''}>${shortTime(p)}</option>`
+      )
+      .join('');
+  }
+
   const container = document.getElementById('book');
   if (!container) return;
-  const sorted = Array.from(groups.values())
-    .filter(g => {
-      if (!activeAreas.has(g.area)) return false;
-      if (periodFilter && g.period !== periodFilter) return false;
-      return true;
-    })
-    .sort((a, b) =>
-      a.period < b.period ? -1 : a.period > b.period ? 1 : a.area.localeCompare(b.area)
-    );
-  container.innerHTML = sorted.length
-    ? sorted.map(renderLadder).join('')
-    : '<div class="ladder-empty"><i>no resting orders match the filter</i></div>';
+  const key = `${bookContract.area}|${bookContract.period}`;
+  const g = groups.get(key);
+  container.innerHTML = g
+    ? renderLadder(g)
+    : '<div class="ladder-empty"><i>no resting orders for this contract</i></div>';
 }
 
 function openBookWs() {
