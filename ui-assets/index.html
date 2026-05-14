@@ -609,7 +609,10 @@ function drawChart() {
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.parentElement.clientWidth - 20;
-  const cssH = 220;
+  // Chart height grows with viewport so a 4K window doesn't render
+  // the hero artifact as a postage stamp. Mirrors the CSS clamp on
+  // typography: 220 on laptops, up to 460 on tall windows.
+  const cssH = Math.round(Math.max(220, Math.min(460, window.innerHeight * 0.32)));
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
   canvas.width = Math.max(1, Math.floor(cssW * dpr));
