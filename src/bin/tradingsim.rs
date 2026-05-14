@@ -60,9 +60,14 @@ fn spawn_mm_task(world: Arc<RwLock<World>>, mut mm: MarketMaker, quarter_offset:
     });
 }
 
-/// Spawn one tokio task that fires `ag.fire(...)` every `rate`.
-/// Like the MM task, rolls the aggressor's target period forward
-/// each tick from `quarter_offset`.
+/// Spawn one tokio task that fires `ag.fire(...)` on a horizon-
+/// scaled cadence. The base rate (from the lisp fleet config) is
+/// the inter-fire delay at ≥2 h to gate; near gate it shortens by
+/// up to 3× via `gate_close_scale`, the same curve the MM walk
+/// amplitude uses. Combined with the per-fire size ramp inside
+/// `Aggressor::fire`, total volume on a contract concentrates in
+/// its last hour the way real intraday does (~70% there) instead
+/// of being uniform across the contract's life.
 fn spawn_aggressor_task(
     world: Arc<RwLock<World>>,
     mut ag: Aggressor,
@@ -70,10 +75,9 @@ fn spawn_aggressor_task(
     quarter_offset: i64,
 ) {
     let cfg = ag.shared_config();
+    let base_secs = rate.as_secs_f64();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(rate);
         loop {
-            tick.tick().await;
             let now = Utc::now();
             let new_start = tradingsim::lisp::next_quarter_boundary(now)
                 + chrono::Duration::minutes(15 * quarter_offset);
@@ -83,8 +87,16 @@ fn spawn_aggressor_task(
                     c.period.start = new_start;
                 }
             }
+            // Sleep before the next fire — duration shrinks as the
+            // contract's gate approaches. Floor at 50 ms so a
+            // mis-set base rate can't busy-spin even with the
+            // tightest 3× ramp at gate.
+            let scale = tradingsim::sim::counterparty::gate_close_scale(new_start, now);
+            let wait =
+                Duration::from_secs_f64((base_secs / scale.max(1.0)).max(0.05));
+            tokio::time::sleep(wait).await;
             let mut w = world.write();
-            ag.fire(&mut w, now);
+            ag.fire(&mut w, Utc::now());
         }
     });
 }

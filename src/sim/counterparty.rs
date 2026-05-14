@@ -222,7 +222,11 @@ const MEAN_REVERT_RATE: Decimal = dec!(0.02);
 /// (= `period.start`). 1.0 at ≥2 h to gate, linear ramp to 3.0
 /// right at gate. Past gate the MM shouldn't be quoting anyway,
 /// but for safety the value clamps non-negative.
-fn gate_close_scale(gate: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
+///
+/// Also used by the aggressor spawner to shorten the inter-fire
+/// sleep + grow per-fire size near gate, so contract volume is
+/// back-loaded the way real intraday is rather than uniform.
+pub fn gate_close_scale(gate: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
     let secs = (gate - now).num_seconds().max(0) as f64;
     let hours = secs / 3600.0;
     let proximity = ((2.0 - hours) / 2.0).clamp(0.0, 1.0);
@@ -306,6 +310,19 @@ impl Aggressor {
             Some(p) => p,
             None => return,
         };
+        // Grow per-fire size as the gate approaches: 1× at ≥2 h
+        // out, ramping to 2× right at gate (gate_close_scale's
+        // 1→3 ramp, halved). Combined with the rate ramp in the
+        // spawn task, this back-loads volume the way real
+        // intraday curves do without making one print absurdly
+        // larger than the surrounding ones.
+        let rate_scale = gate_close_scale(cfg.period.start, now);
+        let size_mult = (rate_scale + 1.0) / 2.0;
+        let scaled_size = snap_to_tick(
+            cfg.size * Decimal::try_from(size_mult).unwrap_or(Decimal::ONE),
+            crate::sim::decimal::DEFAULT_QTY_STEP,
+        )
+        .max(crate::sim::decimal::DEFAULT_QTY_STEP);
         let order = Order {
             area: cfg.area.clone(),
             period: cfg.period,
@@ -313,7 +330,7 @@ impl Aggressor {
             side,
             price: target_price,
             currency: cfg.currency,
-            quantity: cfg.size,
+            quantity: scaled_size,
             stop_price: None,
             peak_price_delta: None,
             display_quantity: None,
