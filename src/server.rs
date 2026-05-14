@@ -4,7 +4,10 @@
 //! channel. Streams hold only their broadcast receiver across awaits.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
+use chrono::Utc;
+use tokio::sync::Mutex;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -19,30 +22,66 @@ use crate::proto::trading::{
     ReceivePublicTradesStreamRequest, ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest,
     UpdateGridpoolOrderResponse, electricity_trading_service_server::ElectricityTradingService,
 };
+use crate::proto_conv::ConvError;
+use crate::sim::order::{GridpoolId, Order, OrderId};
+use crate::sim::world::{SubmitError, World};
 
 /// Boxed-stream alias used by every server-streaming RPC's
 /// associated type. `Status` errors from the stream become per-item
 /// `Err` in the gRPC frame.
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ElectricityTradingServer {
-    // World handle joins next commit alongside the first real RPC.
+    world: Arc<Mutex<World>>,
 }
 
 impl ElectricityTradingServer {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(world: Arc<Mutex<World>>) -> Self {
+        Self { world }
     }
+}
+
+/// Map a sim-side SubmitError onto the closest gRPC Status code.
+/// NOT_FOUND for gridpool/order misses, INVALID_ARGUMENT for any
+/// validation rejection — the proto's STATE_REASON_VALIDATION_FAIL
+/// covers all the latter on the wire.
+fn submit_err_to_status(e: SubmitError) -> Status {
+    use SubmitError::*;
+    match e {
+        UnknownGridpool => Status::not_found("unknown gridpool"),
+        OrderNotFound => Status::not_found("order not found"),
+        OrderAlreadyTerminal => Status::failed_precondition("order already terminal"),
+        e => Status::invalid_argument(format!("validation: {e:?}")),
+    }
+}
+
+fn conv_err_to_status(e: ConvError) -> Status {
+    Status::invalid_argument(format!("proto conversion: {e}"))
 }
 
 #[tonic::async_trait]
 impl ElectricityTradingService for ElectricityTradingServer {
     async fn create_gridpool_order(
         &self,
-        _request: Request<CreateGridpoolOrderRequest>,
+        request: Request<CreateGridpoolOrderRequest>,
     ) -> Result<Response<CreateGridpoolOrderResponse>, Status> {
-        Err(Status::unimplemented("create_gridpool_order: Phase 4.4b"))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let order_proto = req
+            .order
+            .ok_or_else(|| Status::invalid_argument("missing order"))?;
+        let order = Order::try_from(&order_proto).map_err(conv_err_to_status)?;
+
+        let detail = {
+            let mut w = self.world.lock().await;
+            w.submit_order(gridpool_id, order, Utc::now())
+                .map_err(submit_err_to_status)?
+        };
+        Ok(Response::new(CreateGridpoolOrderResponse {
+            gridpool_id: gridpool_id.0,
+            order_detail: Some((&detail).into()),
+        }))
     }
 
     async fn update_gridpool_order(
@@ -54,25 +93,68 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
     async fn cancel_gridpool_order(
         &self,
-        _request: Request<CancelGridpoolOrderRequest>,
+        request: Request<CancelGridpoolOrderRequest>,
     ) -> Result<Response<CancelGridpoolOrderResponse>, Status> {
-        Err(Status::unimplemented("cancel_gridpool_order: Phase 4.4b"))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let order_id = OrderId(req.order_id);
+        let detail = {
+            let mut w = self.world.lock().await;
+            w.cancel_order(gridpool_id, order_id, Utc::now())
+                .map_err(submit_err_to_status)?
+        };
+        Ok(Response::new(CancelGridpoolOrderResponse {
+            gridpool_id: gridpool_id.0,
+            order_detail: Some((&detail).into()),
+        }))
     }
 
     async fn cancel_all_gridpool_orders(
         &self,
-        _request: Request<CancelAllGridpoolOrdersRequest>,
+        request: Request<CancelAllGridpoolOrdersRequest>,
     ) -> Result<Response<CancelAllGridpoolOrdersResponse>, Status> {
-        Err(Status::unimplemented(
-            "cancel_all_gridpool_orders: Phase 4.4b",
-        ))
+        let gridpool_id = GridpoolId(request.into_inner().gridpool_id);
+        let mut w = self.world.lock().await;
+        // Snapshot the non-terminal ids first; cancel_order is &mut
+        // on the World and would alias the iterator otherwise.
+        let ids: Vec<OrderId> = w
+            .gridpools()
+            .get(gridpool_id)
+            .ok_or_else(|| Status::not_found("unknown gridpool"))?
+            .orders()
+            .filter(|d| !d.state.state.is_terminal())
+            .map(|d| d.id)
+            .collect();
+        for id in ids {
+            // Skip terminal-flips that race past us (e.g. matcher just
+            // filled an order between snapshot + cancel); the
+            // OrderAlreadyTerminal path is benign.
+            let _ = w.cancel_order(gridpool_id, id, Utc::now());
+        }
+        Ok(Response::new(CancelAllGridpoolOrdersResponse {
+            gridpool_id: gridpool_id.0,
+        }))
     }
 
     async fn get_gridpool_order(
         &self,
-        _request: Request<GetGridpoolOrderRequest>,
+        request: Request<GetGridpoolOrderRequest>,
     ) -> Result<Response<GetGridpoolOrderResponse>, Status> {
-        Err(Status::unimplemented("get_gridpool_order: Phase 4.4b"))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let order_id = OrderId(req.order_id);
+        let w = self.world.lock().await;
+        let gp = w
+            .gridpools()
+            .get(gridpool_id)
+            .ok_or_else(|| Status::not_found("unknown gridpool"))?;
+        let detail = gp
+            .get_order(order_id)
+            .ok_or_else(|| Status::not_found("order not found"))?;
+        Ok(Response::new(GetGridpoolOrderResponse {
+            gridpool_id: gridpool_id.0,
+            order_detail: Some(detail.into()),
+        }))
     }
 
     async fn list_gridpool_orders(
