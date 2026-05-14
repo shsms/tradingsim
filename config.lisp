@@ -67,3 +67,7 @@
 ;; the day. See plan.org "Scenarios" for the full design.
 ;;
 (load "scenarios/sunny-summer-day.lisp")
+(load "scenarios/rainy-summer-day.lisp")
+(load "scenarios/sunny-summer-holiday.lisp")
+(load "scenarios/winter-weekday.lisp")
+(load "scenarios/windy-winter-night.lisp")
