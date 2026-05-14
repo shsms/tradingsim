@@ -138,10 +138,11 @@ Every section in the binary branches "if let Some(c) = lisp_config
 { ... } else { hardcoded default }". A default-populated Config
 removes the branch — boot always reads from Config.
 
-*** TODO Exponential backoff on WS reconnect
-=setTimeout(openTradesWs, 1000)= hammers the server every second
-during outages. 1s, 2s, 4s, 8s, capped at 30s is a five-line
-change.
+*** DONE Exponential backoff on WS reconnect
+=tradesWsBackoff= / =bookWsBackoff= live in =app.js=. Start at
+1s, double on each =onclose= (capped at 30s), reset to 1s on a
+successful =onopen=. Both WS reconnect paths use the same
+constants.
 
 ** P3 — Smaller smells
 

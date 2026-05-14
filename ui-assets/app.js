@@ -665,10 +665,23 @@ async function scenarioAction(name, action) {
   loadScenarios();
 }
 
+// WebSocket reconnect backoff — 1s, 2s, 4s, 8s, capped at 30s.
+// Reset to 1s on a successful connect (`onopen`). Stops the client
+// from hammering the server every second when it's down for a
+// while; once the server is back the next attempt fires within
+// 1-30s instead of 1s.
+const WS_BACKOFF_MIN_MS = 1000;
+const WS_BACKOFF_MAX_MS = 30000;
+let tradesWsBackoff = WS_BACKOFF_MIN_MS;
+let bookWsBackoff = WS_BACKOFF_MIN_MS;
+
 function openTradesWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-trades`);
-  ws.onopen = () => setPill('pill-trades', 'ok', 'trades');
+  ws.onopen = () => {
+    setPill('pill-trades', 'ok', 'trades');
+    tradesWsBackoff = WS_BACKOFF_MIN_MS;
+  };
   ws.onmessage = (e) => {
     const t = JSON.parse(e.data);
     recordTrade(t);
@@ -677,7 +690,8 @@ function openTradesWs() {
   };
   ws.onclose = () => {
     setPill('pill-trades', 'down', 'trades');
-    setTimeout(openTradesWs, 1000);
+    setTimeout(openTradesWs, tradesWsBackoff);
+    tradesWsBackoff = Math.min(tradesWsBackoff * 2, WS_BACKOFF_MAX_MS);
   };
 }
 
@@ -1044,6 +1058,7 @@ function openBookWs() {
     bookState.clear();
     bookDirty = true;
     setPill('pill-book', 'ok', 'book');
+    bookWsBackoff = WS_BACKOFF_MIN_MS;
   };
   ws.onmessage = (e) => {
     const r = JSON.parse(e.data);
@@ -1063,7 +1078,8 @@ function openBookWs() {
   };
   ws.onclose = () => {
     setPill('pill-book', 'down', 'book');
-    setTimeout(openBookWs, 1000);
+    setTimeout(openBookWs, bookWsBackoff);
+    bookWsBackoff = Math.min(bookWsBackoff * 2, WS_BACKOFF_MAX_MS);
   };
 }
 
