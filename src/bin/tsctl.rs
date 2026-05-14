@@ -15,8 +15,10 @@ use tradingsim::proto::common::market::{Power, Price, price::Currency as PrCurre
 use tradingsim::proto::common::types::Decimal as PrDecimal;
 use tradingsim::proto::trading::{
     CancelAllGridpoolOrdersRequest, CancelGridpoolOrderRequest, CreateGridpoolOrderRequest,
-    GetGridpoolOrderRequest, GridpoolOrderFilter, ListGridpoolOrdersRequest, MarketSide, Order,
-    OrderState, OrderType, ReceiveGridpoolOrdersStreamRequest,
+    GetGridpoolOrderRequest, GridpoolOrderFilter, GridpoolTradeFilter, ListGridpoolOrdersRequest,
+    ListGridpoolTradesRequest, MarketSide, Order, OrderState, OrderType, PublicTradeFilter,
+    ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolTradesStreamRequest,
+    ReceivePublicTradesStreamRequest, TradeState,
     electricity_trading_service_client::ElectricityTradingServiceClient,
 };
 
@@ -87,6 +89,24 @@ enum Cmd {
         #[arg(long)]
         live: bool,
     },
+    /// List trades on a gridpool, or stream them with --live.
+    Trades {
+        #[arg(long)]
+        pool: u64,
+        #[arg(long, value_enum)]
+        side: Option<SideArg>,
+        #[arg(long)]
+        live: bool,
+    },
+    /// Stream the public trade tape (one event per match, all gridpools).
+    PublicTrades {
+        /// Optional buy-side delivery area filter (EIC code).
+        #[arg(long)]
+        buy_area: Option<String>,
+        /// Optional sell-side delivery area filter (EIC code).
+        #[arg(long)]
+        sell_area: Option<String>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -154,6 +174,64 @@ fn timestamp_proto(s: &str) -> Result<prost_types::Timestamp, String> {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,
     })
+}
+
+fn render_trade_line(t: &tradingsim::proto::trading::Trade) -> String {
+    let side = MarketSide::try_from(t.side)
+        .map(|s| format!("{s:?}"))
+        .unwrap_or_else(|_| "?".into());
+    let area = t
+        .delivery_area
+        .as_ref()
+        .map(|a| a.code.clone())
+        .unwrap_or_else(|| "?".into());
+    let price = t
+        .price
+        .as_ref()
+        .and_then(|p| p.amount.as_ref())
+        .map(|a| a.value.clone())
+        .unwrap_or_else(|| "?".into());
+    let qty = t
+        .quantity
+        .as_ref()
+        .and_then(|p| p.mw.as_ref())
+        .map(|a| a.value.clone())
+        .unwrap_or_else(|| "?".into());
+    format!(
+        "trade#{} order#{} {side} {qty} MW @ {price} EUR ({area})",
+        t.id, t.order_id
+    )
+}
+
+fn render_public_trade_line(t: &tradingsim::proto::trading::PublicTrade) -> String {
+    let buy = t
+        .buy_delivery_area
+        .as_ref()
+        .map(|a| a.code.clone())
+        .unwrap_or_else(|| "?".into());
+    let sell = t
+        .sell_delivery_area
+        .as_ref()
+        .map(|a| a.code.clone())
+        .unwrap_or_else(|| "?".into());
+    let price = t
+        .price
+        .as_ref()
+        .and_then(|p| p.amount.as_ref())
+        .map(|a| a.value.clone())
+        .unwrap_or_else(|| "?".into());
+    let qty = t
+        .quantity
+        .as_ref()
+        .and_then(|p| p.mw.as_ref())
+        .map(|a| a.value.clone())
+        .unwrap_or_else(|| "?".into());
+    let cross = if buy == sell {
+        buy.clone()
+    } else {
+        format!("{buy} -> {sell}")
+    };
+    format!("public#{} {qty} MW @ {price} EUR ({cross})", t.id)
 }
 
 fn render_order_line(d: &tradingsim::proto::trading::OrderDetail) -> String {
@@ -295,6 +373,84 @@ async fn cmd_cancel_all(
     Ok(())
 }
 
+async fn cmd_trades(
+    client: &mut ElectricityTradingServiceClient<Channel>,
+    pool: u64,
+    side: Option<SideArg>,
+    live: bool,
+) -> Result<(), String> {
+    let filter = GridpoolTradeFilter {
+        states: vec![TradeState::Active as i32],
+        trade_ids: vec![],
+        side: side.map(|s| MarketSide::from(s) as i32),
+        delivery_time_filter: None,
+        delivery_area: None,
+        tag: None,
+    };
+    if live {
+        let mut stream = client
+            .receive_gridpool_trades_stream(ReceiveGridpoolTradesStreamRequest {
+                gridpool_id: pool,
+                filter: Some(filter),
+            })
+            .await
+            .map_err(|e| format!("trades stream: {e}"))?
+            .into_inner();
+        while let Some(item) = stream.next().await {
+            let resp = item.map_err(|e| format!("stream: {e}"))?;
+            println!("{}", render_trade_line(resp.trade.as_ref().unwrap()));
+        }
+    } else {
+        let resp = client
+            .list_gridpool_trades(ListGridpoolTradesRequest {
+                gridpool_id: pool,
+                filter: Some(filter),
+                pagination_params: None,
+            })
+            .await
+            .map_err(|e| format!("trades list: {e}"))?
+            .into_inner();
+        for t in resp.trades {
+            println!("{}", render_trade_line(&t));
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_public_trades(
+    client: &mut ElectricityTradingServiceClient<Channel>,
+    buy_area: Option<String>,
+    sell_area: Option<String>,
+) -> Result<(), String> {
+    let mk_area = |code: String| tradingsim::proto::common::grid::DeliveryArea {
+        code,
+        code_type: tradingsim::proto::common::grid::EnergyMarketCodeType::EuropeEic as i32,
+    };
+    let filter = PublicTradeFilter {
+        states: vec![TradeState::Active as i32],
+        delivery_period: None,
+        buy_delivery_area: buy_area.map(mk_area),
+        sell_delivery_area: sell_area.map(mk_area),
+    };
+    let mut stream = client
+        .receive_public_trades_stream(ReceivePublicTradesStreamRequest {
+            filter: Some(filter),
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .map_err(|e| format!("public-trades stream: {e}"))?
+        .into_inner();
+    while let Some(item) = stream.next().await {
+        let resp = item.map_err(|e| format!("stream: {e}"))?;
+        println!(
+            "{}",
+            render_public_trade_line(resp.public_trade.as_ref().unwrap())
+        );
+    }
+    Ok(())
+}
+
 async fn cmd_orders(
     client: &mut ElectricityTradingServiceClient<Channel>,
     pool: u64,
@@ -386,6 +542,13 @@ async fn main() {
                         state,
                         live,
                     } => cmd_orders(&mut client, pool, side, state, live).await,
+                    Cmd::Trades { pool, side, live } => {
+                        cmd_trades(&mut client, pool, side, live).await
+                    }
+                    Cmd::PublicTrades {
+                        buy_area,
+                        sell_area,
+                    } => cmd_public_trades(&mut client, buy_area, sell_area).await,
                 }
             }
         }
