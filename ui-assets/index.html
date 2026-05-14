@@ -321,6 +321,22 @@ td { padding: 2px 6px; }
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
+.hero-controls {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+.hero-controls select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-family: inherit;
+  font-size: var(--fs-small);
+}
 .hero-legend { display: flex; gap: 10px; font-size: var(--fs-small); }
 .hero-legend span {
   display: inline-flex; align-items: center; gap: 4px;
@@ -509,8 +525,19 @@ td { padding: 2px 6px; }
 
 <section class="hero" aria-label="price tape">
   <div class="hero-head">
-    <h2>Price tape — last 30 min</h2>
-    <div class="hero-legend" id="chart-legend"></div>
+    <h2 id="chart-title">Price tape — delivery —</h2>
+    <div class="hero-controls">
+      <label>window
+        <select id="chart-window" onchange="setChartWindow(this.value)">
+          <option value="5">5 min</option>
+          <option value="10">10 min</option>
+          <option value="30" selected>30 min</option>
+          <option value="60">1 hour</option>
+          <option value="240">4 hours</option>
+        </select>
+      </label>
+      <div class="hero-legend" id="chart-legend"></div>
+    </div>
   </div>
   <canvas id="price-chart"></canvas>
 </section>
@@ -668,7 +695,14 @@ function initDensity() {
 // Tier 2 — price chart. Per-area circular buffers of recent
 // trade prints, redrawn on a 1s tick. Canvas is sized to its
 // parent's CSS width each draw so window resizes don't blur it.
-const PRICE_WINDOW_MS = 30 * 60 * 1000;
+//
+// Each entry stores periodMs so the chart can isolate a single
+// delivery period — without that filter, prints for delivery
+// 15:00 and 18:00 would land on the same line at the same
+// wallclock minute and the line would jump nonsensically.
+const PERIOD_STEP_MS = 15 * 60 * 1000;
+const MAX_WINDOW_MS = 4 * 60 * 60 * 1000;
+let chartWindowMs = 30 * 60 * 1000;
 const CHART_AREAS = [
   { code: '10YDE-EON------1', tag: 'TN', color: '#58a6ff' },
   { code: '10YDE-RWENET---I', tag: 'AM', color: '#a371f7' },
@@ -682,10 +716,50 @@ function recordTradePrice(t) {
   const arr = priceSeries.get(t.buy_area);
   if (!arr) return;
   const ms = Date.parse(t.execution_time);
-  if (!isFinite(ms)) return;
-  arr.push({ t: ms, price: parseFloat(t.price), period: t.period });
-  const cutoff = Date.now() - PRICE_WINDOW_MS;
+  const pms = Date.parse(t.period);
+  if (!isFinite(ms) || !isFinite(pms)) return;
+  arr.push({ t: ms, price: parseFloat(t.price), periodMs: pms });
+  const cutoff = Date.now() - MAX_WINDOW_MS;
   while (arr.length && arr[0].t < cutoff) arr.shift();
+}
+
+function setChartWindow(mins) {
+  chartWindowMs = parseInt(mins) * 60 * 1000;
+  drawChart();
+}
+
+/** Effective delivery period (epoch ms) the chart is plotting:
+ *  pinned period if the user clicked into one, otherwise the
+ *  soonest upcoming 15-min boundary (the contract that's about
+ *  to close + currently most-actively-traded). Rotates as
+ *  wallclock advances. */
+function effectivePeriodMs() {
+  if (periodFilter) return Date.parse(periodFilter);
+  const now = Date.now();
+  return Math.ceil(now / PERIOD_STEP_MS) * PERIOD_STEP_MS;
+}
+
+function pickXStep(windowMs) {
+  const candidates = [1, 2, 5, 10, 15, 30, 60, 120].map(m => m * 60 * 1000);
+  for (const c of candidates) if (windowMs / c <= 8) return c;
+  return windowMs;
+}
+
+function formatBack(mins) {
+  if (mins === 0) return 'now';
+  if (mins < 60) return `-${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `-${h}h${m}m` : `-${h}h`;
+}
+
+function updateChartTitle() {
+  const el = document.getElementById('chart-title');
+  if (!el) return;
+  const eff = effectivePeriodMs();
+  const hhmm = new Date(eff).toISOString().slice(11, 16);
+  const tag = periodFilter ? 'pinned' : 'auto';
+  el.textContent = `Price tape — delivery ${hhmm} (${tag})`;
 }
 
 function renderChartLegend() {
@@ -701,10 +775,7 @@ function drawChart() {
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.parentElement.clientWidth - 20;
-  // Chart height grows with viewport so a 4K window doesn't render
-  // the hero artifact as a postage stamp. Mirrors the CSS clamp on
-  // typography: 220 on laptops, up to 460 on tall windows.
-  const cssH = Math.round(Math.max(220, Math.min(460, window.innerHeight * 0.32)));
+  const cssH = 220;
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
   canvas.width = Math.max(1, Math.floor(cssW * dpr));
@@ -717,11 +788,17 @@ function drawChart() {
   const innerW = cssW - padL - padR;
   const innerH = cssH - padT - padB;
 
+  updateChartTitle();
+  const effMs = effectivePeriodMs();
+  const now = Date.now();
+  const tmin = now - chartWindowMs;
+
   let ymin = Infinity, ymax = -Infinity;
   for (const [code, arr] of priceSeries) {
     if (!activeAreas.has(code)) continue;
     for (const p of arr) {
-      if (periodFilter && p.period !== periodFilter) continue;
+      if (p.t < tmin) continue;
+      if (p.periodMs !== effMs) continue;
       if (p.price < ymin) ymin = p.price;
       if (p.price > ymax) ymax = p.price;
     }
@@ -731,9 +808,7 @@ function drawChart() {
   const ypad = (ymax - ymin) * 0.1;
   ymin -= ypad; ymax += ypad;
 
-  const now = Date.now();
-  const tmin = now - PRICE_WINDOW_MS;
-  const xs = t => padL + ((t - tmin) / PRICE_WINDOW_MS) * innerW;
+  const xs = t => padL + ((t - tmin) / chartWindowMs) * innerW;
   const ys = p => padT + (1 - (p - ymin) / (ymax - ymin)) * innerH;
 
   const styles = getComputedStyle(document.documentElement);
@@ -758,10 +833,11 @@ function drawChart() {
   }
 
   ctx.textAlign = 'center';
-  for (let mins = 30; mins >= 0; mins -= 5) {
-    const t = now - mins * 60 * 1000;
+  const xStep = pickXStep(chartWindowMs);
+  for (let offset = 0; offset <= chartWindowMs; offset += xStep) {
+    const t = now - offset;
     const x = xs(t);
-    ctx.fillText(mins === 0 ? 'now' : `-${mins}m`, x, cssH - 4);
+    ctx.fillText(formatBack(Math.round(offset / 60000)), x, cssH - 4);
   }
 
   ctx.lineWidth = 1.5;
@@ -769,9 +845,7 @@ function drawChart() {
   for (const a of CHART_AREAS) {
     if (!activeAreas.has(a.code)) continue;
     const raw = priceSeries.get(a.code) || [];
-    const arr = periodFilter
-      ? raw.filter(p => p.period === periodFilter)
-      : raw;
+    const arr = raw.filter(p => p.t >= tmin && p.periodMs === effMs);
     if (arr.length < 2) continue;
     ctx.strokeStyle = a.color;
     ctx.beginPath();
