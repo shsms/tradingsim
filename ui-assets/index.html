@@ -77,10 +77,19 @@ tr.row-sell td:first-child { color: var(--sell); }
   </div>
 
   <div class="panel">
-    <h2>Public order book (live events)</h2>
+    <h2>Public order book (top of book)</h2>
+    <div class="muted" style="margin-bottom:6px">
+      Aggregated by (area, period, side, price). Updated live; entries
+      removed when their qty drops to 0.
+    </div>
     <div class="scroll">
       <table>
-        <thead><tr><th>side</th><th>id</th><th>qty (MW)</th><th>price (EUR)</th><th>area</th></tr></thead>
+        <thead><tr>
+          <th style="width:8%">area</th>
+          <th style="width:18%">period</th>
+          <th style="width:38%; text-align:right" class="buy">bids (qty @ price)</th>
+          <th style="width:38%" class="sell">asks (price @ qty)</th>
+        </tr></thead>
         <tbody id="book"></tbody>
       </table>
     </div>
@@ -139,22 +148,89 @@ function openTradesWs() {
   ws.onclose = () => setTimeout(openTradesWs, 1000);
 }
 
+// Client-side book state: Map<orderId, {area, period, side, price, qty}>.
+// Each WS message updates one entry; qty=0 removes it. Then we
+// re-render aggregated by (area, period, side, price).
+const bookState = new Map();
+let bookDirty = false;
+
+function rerenderBook() {
+  // Group rows by (area, period). Within each group, aggregate
+  // bids and asks separately by price level.
+  const groups = new Map();
+  for (const r of bookState.values()) {
+    const key = `${r.area}|${r.period}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = { area: r.area, period: r.period, bids: new Map(), asks: new Map() };
+      groups.set(key, g);
+    }
+    const target = r.side === 1 ? g.bids : (r.side === 2 ? g.asks : null);
+    if (target == null) continue;
+    const prev = parseFloat(target.get(r.price) || '0');
+    const next = prev + parseFloat(r.qty || '0');
+    target.set(r.price, next.toFixed(1));
+  }
+
+  const tbody = document.getElementById('book');
+  tbody.innerHTML = '';
+  // Stable sort: most-imminent period first, then area code.
+  const sorted = Array.from(groups.values()).sort((a, b) =>
+    a.period < b.period ? -1 : a.period > b.period ? 1 : a.area.localeCompare(b.area)
+  );
+  for (const g of sorted) {
+    // Bids descending by price; asks ascending.
+    const bids = Array.from(g.bids.entries()).sort((a, b) =>
+      parseFloat(b[0]) - parseFloat(a[0])
+    );
+    const asks = Array.from(g.asks.entries()).sort((a, b) =>
+      parseFloat(a[0]) - parseFloat(b[0])
+    );
+    const bidStr = bids
+      .map(([p, q]) => `<span class="buy">${q} @ ${p}</span>`)
+      .join(' · ') || '<span class="muted">—</span>';
+    const askStr = asks
+      .map(([p, q]) => `<span class="sell">${p} @ ${q}</span>`)
+      .join(' · ') || '<span class="muted">—</span>';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="muted">${g.area.slice(0, 12)}</td>` +
+      `<td class="muted">${shortTime(g.period)}</td>` +
+      `<td style="text-align:right">${bidStr}</td>` +
+      `<td>${askStr}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
 function openBookWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-book`);
   ws.onmessage = (e) => {
     const r = JSON.parse(e.data);
-    const tbody = document.getElementById('book');
-    const klass = r.side === 1 ? 'row-buy' : (r.side === 2 ? 'row-sell' : '');
-    const row = document.createElement('tr');
-    row.className = klass;
-    row.innerHTML = `<td>${side(r.side)}</td><td>#${r.id}</td><td>${r.quantity}</td>` +
-      `<td>${r.price}</td><td>${r.area}</td>`;
-    tbody.insertBefore(row, tbody.firstChild);
-    while (tbody.children.length > 80) tbody.removeChild(tbody.lastChild);
+    const qty = parseFloat(r.quantity || '0');
+    if (qty <= 0) {
+      bookState.delete(r.id);
+    } else {
+      bookState.set(r.id, {
+        area: r.area,
+        period: r.period || '',
+        side: r.side,
+        price: r.price,
+        qty: r.quantity,
+      });
+    }
+    bookDirty = true;
   };
   ws.onclose = () => setTimeout(openBookWs, 1000);
 }
+
+// Re-render at most ~5 times/sec; the MM refreshes generate enough
+// churn that per-message rerenders would overdraw needlessly.
+setInterval(() => {
+  if (bookDirty) {
+    bookDirty = false;
+    rerenderBook();
+  }
+}, 200);
 
 (async () => {
   await Promise.all([loadInfo(), loadGridpools()]);
