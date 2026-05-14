@@ -370,15 +370,17 @@ fn apply_biases(
         }
         .clamp(0.0, 1.0)
     };
+    // Shared prelude for both loops: per-view area lookup +
+    // curve+weather-derived fundamentals reference at this quarter.
+    // Weather falls back to the registry's default location when
+    // the area isn't explicitly linked.
+    let fundamentals = |area_code: &str, offset: i64| -> Decimal {
+        let loc = weather.for_area(area_code);
+        effective_ref(curve, loc, period_hour_for(offset), day_of_year)
+    };
     for view in aggressors {
         let area_code = view.shared_config.read().area.code.clone();
-        let loc = weather.for_area(&area_code);
-        let new_ref = effective_ref(
-            curve,
-            loc,
-            period_hour_for(view.quarter_offset),
-            day_of_year,
-        );
+        let new_ref = fundamentals(&area_code, view.quarter_offset);
         let mut cfg = view.shared_config.write();
         cfg.side_bias = effective_for(view.quarter_offset);
         // Same fair-value anchor the MM uses for its baseline.
@@ -389,19 +391,9 @@ fn apply_biases(
     }
     for view in mms {
         let bias = effective_for(view.quarter_offset);
-        let imbalance = bias - 0.5;
-        let shift = imbalance * bias_scale;
-        // Look up the weather location for this MM's area (falls
-        // back to the registry's default when the area isn't
-        // explicitly linked).
+        let shift = (bias - 0.5) * bias_scale;
         let area_code = view.shared_config.read().area.code.clone();
-        let loc = weather.for_area(&area_code);
-        let new_ref = effective_ref(
-            curve,
-            loc,
-            period_hour_for(view.quarter_offset),
-            day_of_year,
-        );
+        let new_ref = fundamentals(&area_code, view.quarter_offset);
         let mut cfg = view.shared_config.write();
         // Write the fundamentals target — the MM refresh
         // (step_reference) mean-reverts the live reference_price

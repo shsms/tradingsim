@@ -52,12 +52,12 @@ instead of carrying its own duplicate. One source of truth.
 
 ** P1 — Refactors that simplify a lot
 
-*** TODO Extract =fundamentals_at= helper
-=apply_biases='s aggressor + MM loops both compute
-=(period_hour, effective_ref)= from
-=(curve, weather.for_area, period_hour_for(offset), day_of_year)=.
-Pull into one helper so each loop is just "compute side-bias /
-demand / surplus, write fields".
+*** DONE Extract =fundamentals= helper in =apply_biases=
+Introduced an in-scope =fundamentals(area_code, offset) -> Decimal=
+closure that captures =curve=, =weather=, =period_hour_for=, and
+=day_of_year=. Both loops now read like "compute side-bias /
+demand / surplus, write fields". Also folded the MM's redundant
+=imbalance= temporary into the =shift= computation.
 
 *** TODO =Order::limit= constructor
 Both =MarketMaker::refresh=, =Aggressor::fire=, and a dozen tests
