@@ -55,6 +55,11 @@ pub struct MarketMakerSpec {
     /// each MM is independently deterministic from a fixed lisp
     /// config.
     pub seed: u64,
+    /// Quarter-hours from the next 15-min boundary. The spawn task
+    /// rolls the SharedConfig's period forward each tick using this
+    /// offset, so the MM always quotes the contract starting
+    /// `quarter_offset` quarters from now.
+    pub quarter_offset: i64,
 }
 
 /// One gridpool from `(make-gridpool …)`. Same shape the binary will
@@ -91,6 +96,9 @@ pub struct AggressorSpec {
     pub shared_config: SharedAggressorConfig,
     pub seed: u64,
     pub rate_ms: u64,
+    /// Quarter-hours from the next 15-min boundary; same semantics
+    /// as [`MarketMakerSpec::quarter_offset`].
+    pub quarter_offset: i64,
 }
 
 #[derive(Clone)]
@@ -409,6 +417,7 @@ fn register_aggressors(
                         shared_config: Arc::new(RwLock::new(cfg)),
                         seed,
                         rate_ms,
+                        quarter_offset: a.quarter_offset.unwrap_or(0),
                     },
                 );
             }
@@ -577,7 +586,7 @@ AsPlist! {
     }
 }
 
-fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
+pub fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
     let secs = now.timestamp();
     let bucket = (secs / 900 + 1) * 900;
     DateTime::from_timestamp(bucket, 0).unwrap()
@@ -635,6 +644,7 @@ fn register_market_makers(
                         name: a.name.clone(),
                         shared_config: Arc::new(RwLock::new(cfg)),
                         seed,
+                        quarter_offset: a.quarter_offset.unwrap_or(0),
                     },
                 );
             }

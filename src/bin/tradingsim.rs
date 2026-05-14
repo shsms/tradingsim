@@ -35,26 +35,60 @@ fn next_hour_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Spawn one tokio task that ticks `mm.refresh(...)` every
-/// `MM_REFRESH_INTERVAL` against the shared world.
-fn spawn_mm_task(world: Arc<Mutex<World>>, mut mm: MarketMaker) {
+/// `MM_REFRESH_INTERVAL` against the shared world. `quarter_offset`
+/// rolls the MM's delivery period forward each tick so the MM
+/// always quotes the contract starting that many quarter-hours from
+/// the next 15-min boundary.
+fn spawn_mm_task(
+    world: Arc<Mutex<World>>,
+    mut mm: MarketMaker,
+    quarter_offset: i64,
+) {
+    let cfg = mm.shared_config();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(MM_REFRESH_INTERVAL);
         loop {
             tick.tick().await;
+            let now = Utc::now();
+            let new_start = tradingsim::lisp::next_quarter_boundary(now)
+                + chrono::Duration::minutes(15 * quarter_offset);
+            {
+                let mut c = cfg.write();
+                if c.period.start != new_start {
+                    c.period.start = new_start;
+                }
+            }
             let mut w = world.lock().await;
-            mm.refresh(&mut w, Utc::now());
+            mm.refresh(&mut w, now);
         }
     });
 }
 
 /// Spawn one tokio task that fires `ag.fire(...)` every `rate`.
-fn spawn_aggressor_task(world: Arc<Mutex<World>>, mut ag: Aggressor, rate: Duration) {
+/// Like the MM task, rolls the aggressor's target period forward
+/// each tick from `quarter_offset`.
+fn spawn_aggressor_task(
+    world: Arc<Mutex<World>>,
+    mut ag: Aggressor,
+    rate: Duration,
+    quarter_offset: i64,
+) {
+    let cfg = ag.shared_config();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(rate);
         loop {
             tick.tick().await;
+            let now = Utc::now();
+            let new_start = tradingsim::lisp::next_quarter_boundary(now)
+                + chrono::Duration::minutes(15 * quarter_offset);
+            {
+                let mut c = cfg.write();
+                if c.period.start != new_start {
+                    c.period.start = new_start;
+                }
+            }
             let mut w = world.lock().await;
-            ag.fire(&mut w, Utc::now());
+            ag.fire(&mut w, now);
         }
     });
 }
@@ -180,8 +214,9 @@ async fn main() {
                 cfg_now.surplus,
             );
             drop(cfg_now);
+            let offset = spec.quarter_offset;
             let mm = MarketMaker::with_shared_config(spec.shared_config, spec.seed);
-            spawn_mm_task(Arc::clone(&world), mm);
+            spawn_mm_task(Arc::clone(&world), mm, offset);
         }
     } else {
         log::info!(
@@ -203,7 +238,9 @@ async fn main() {
                 cfg.spread
             );
             let mm = MarketMaker::new(cfg, (hour_offset as u64).wrapping_mul(0x9E37_79B9));
-            spawn_mm_task(Arc::clone(&world), mm);
+            // Hardcoded fallback: hour_offset is in HOURS, but the
+            // rolling task works in quarter-hours. Multiply by 4.
+            spawn_mm_task(Arc::clone(&world), mm, hour_offset * 4);
         }
     }
 
@@ -231,8 +268,9 @@ async fn main() {
                 spec.rate_ms,
             );
             drop(cfg_now);
+            let offset = spec.quarter_offset;
             let ag = Aggressor::with_shared_config(spec.shared_config, spec.seed);
-            spawn_aggressor_task(Arc::clone(&world), ag, rate);
+            spawn_aggressor_task(Arc::clone(&world), ag, rate, offset);
         }
     }
 
