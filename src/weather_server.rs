@@ -280,13 +280,13 @@ fn apply_noise(
     let r: f64 = rng.gen_range(-1.0_f64..=1.0_f64);
     let noisy = truth + r * sigma;
     match feature {
-        // Physically non-negative quantities. Wind u/v components
-        // and 2 m temperature genuinely range across both signs
-        // (vector wind, sub-zero air); only solar irradiance must
-        // clip at zero — the noise was previously pushing the
-        // night-time truth of 0 down to -250 W/m² at long horizons,
-        // which is meaningless on the wire.
-        ForecastFeature::SurfaceSolarRadiationDownwards => noisy.max(0.0),
+        // Solar irradiance at surface is physically bounded:
+        // never below zero, never above the top-of-atmosphere
+        // solar constant (1361 W/m²). Long-horizon noise was
+        // reaching ±720 W/m² on top of small daytime truths,
+        // producing both negative night values and absurd
+        // 1000+ W/m² spikes that no real sensor could report.
+        ForecastFeature::SurfaceSolarRadiationDownwards => noisy.clamp(0.0, 1361.0),
         _ => noisy,
     }
 }
