@@ -1073,6 +1073,19 @@ impl World {
         let taker_side = order.side;
         let taker_currency = order.currency;
 
+        // Honour the order's execution option, same way submit_order
+        // does for gridpool orders. Aggressor sends IOC; the
+        // counterparty path used to ignore that and rest leftovers
+        // on the book at the slippage-cap price, which then got
+        // crossed by the *next* aggressor's opposite-side fire —
+        // generating a stream of trades at the cap value (e.g.
+        // repeated trades at exactly 55 EUR on a night-curve
+        // contract where the aggressor's reference was ~50).
+        let mode = match order.execution_option {
+            Some(ExecutionOption::Fok) => ExecMode::FillOrKill,
+            Some(ExecutionOption::Ioc) => ExecMode::ImmediateOrCancel,
+            _ => ExecMode::Resting,
+        };
         // Route through match_limit_across so the public order book
         // stream sees ADD records when a counterparty order rests
         // (and UPDATE records when a counterparty crosses an
@@ -1087,7 +1100,7 @@ impl World {
                 price: order.price,
                 quantity: order.quantity,
             },
-            ExecMode::Resting,
+            mode,
             taker_currency,
             now,
         );

@@ -755,4 +755,53 @@ mod tests {
         assert_eq!(trade_far.quantity, dec!(0.5));
         assert_eq!(trade_close.quantity, dec!(1.0));
     }
+
+    #[test]
+    fn aggressor_ioc_residual_does_not_rest() {
+        // Regression: pre-fix, submit_counterparty_order hardcoded
+        // ExecMode::Resting so an aggressor's IOC flag was ignored.
+        // A 1 MW aggressor buy at limit 55 with only 0.4 MW of
+        // crossable ask depth would rest 0.6 MW on the bid side at
+        // 55, and the next opposite-side fire would trade against
+        // it — producing a stream of trades at the slippage cap
+        // (e.g. repeated 55 EUR prints on night-curve contracts).
+        let (mut world, mm_cfg) = setup_world();
+        let key = crate::sim::world::ContractKey {
+            area: mm_cfg.area.clone(),
+            period: mm_cfg.period,
+        };
+        // Seed a thin MM ask at 50 with only 0.4 MW of depth.
+        let thin_ask = Order::limit(
+            mm_cfg.area.clone(),
+            mm_cfg.period,
+            Side::Sell,
+            dec!(50.00),
+            dec!(0.4),
+            Currency::Eur,
+        );
+        world
+            .submit_counterparty_order(thin_ask, t0())
+            .expect("seed thin ask");
+
+        // Aggressor with reference 50 + slippage 5 wants 1 MW.
+        // Eats the 0.4 MW thin ask; remainder (0.6 MW) must NOT
+        // rest at the slippage-cap (55) — IOC should kill it.
+        let ag_cfg = AggressorConfig {
+            side_bias: 1.0, // always buy
+            size: dec!(1.0),
+            reference_price: dec!(50.00),
+            max_slippage: dec!(5.00),
+            ..AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period)
+        };
+        let mut ag = Aggressor::new(ag_cfg, 0);
+        ag.fire(&mut world, t0());
+
+        // One fill happened (the 0.4 MW thin ask), and nothing
+        // rests on the bid side — IOC dropped the leftover.
+        let trades = world.public_trade_history();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].price, dec!(50.00));
+        let book = world.book(&key).unwrap();
+        assert_eq!(book.best_bid(), None);
+    }
 }
