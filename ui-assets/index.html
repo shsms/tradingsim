@@ -88,7 +88,7 @@ h1 {
    clientWidth grows, the next draw makes the canvas wider still,
    and the chart eventually shoves scenarios off the screen. */
 .tier-chart-scenarios { grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); }
-.tier-book-gridpools  { grid-template-columns: minmax(0, 7fr) minmax(0, 3fr); }
+.tier-book-gridpools  { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 @media (max-width: 900px) {
   .tier-row { grid-template-columns: 1fr; }
 }
@@ -363,12 +363,20 @@ td { padding: 2px 6px; }
   font-family: inherit;
   font-size: var(--fs-small);
 }
+/* Fixed-size ladders so the order book stays predictable as
+   areas come and go. Wraps to additional rows on narrow panels. */
 .book-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
-.book-row .ladder { min-width: 0; }
+.book-row .ladder {
+  flex: 0 0 220px;
+  /* Reserved height = head + 3 ask rows + spread + 3 bid rows
+     + padding. Ladders past 3 levels per side use the inline
+     '+N more' control which expands beyond this height. */
+  min-height: 180px;
+}
 .book-show-more {
   text-align: center;
   color: var(--muted);
@@ -402,6 +410,7 @@ td { padding: 2px 6px; }
   font-variant-numeric: tabular-nums;
   gap: 6px;
   padding: 1px 0;
+  min-height: 18px;
 }
 .ladder-row.ask { color: var(--sell); }
 .ladder-row.bid { color: var(--buy); }
@@ -475,10 +484,52 @@ td { padding: 2px 6px; }
 #trades tr { cursor: pointer; }
 #trades tr:hover td { background: var(--panel-2); }
 
-/* Compact rows for the gridpools + weather panels. One line per
-   item with an expand caret; click to reveal a small detail
-   block below. Keeps the default page short. */
+/* Compact rows for the gridpools panel. One line per item with
+   an expand caret; click reveals a detail block below. */
 .row-list { display: flex; flex-direction: column; gap: 4px; }
+
+/* Weather cells — fixed-width tiles laid out side-by-side. Each
+   cell shows one location's current values stacked vertically;
+   click toggles a small lat/lon detail block. Cells wrap to a
+   second row on narrow panels. */
+.weather-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.weather-cell {
+  flex: 0 0 180px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+.weather-cell:hover { border-color: var(--muted); }
+.weather-cell .weather-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.weather-cell .weather-metric { color: var(--text); }
+.weather-cell .weather-metric .muted { color: var(--muted); }
+.weather-cell .weather-detail {
+  display: none;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-mini);
+  color: var(--muted);
+}
+.weather-cell.open .weather-detail { display: block; }
+@media (min-height: 1200px) {
+  .weather-cell .weather-detail { display: block; }
+  .weather-cell { cursor: default; }
+}
 .row-item {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -612,7 +663,7 @@ td { padding: 2px 6px; }
       Rows match the active area chips. Click a row for lat/lon
       and wind direction.
     </div>
-    <div id="weather" class="row-list">loading…</div>
+    <div id="weather" class="weather-grid">loading…</div>
   </div>
 
   <!-- Tier E: trade tape (full width, bottom) -->
@@ -1019,25 +1070,25 @@ function rerenderWeather() {
   }
   el.innerHTML = filtered.map(l => {
     const tag = areaTag(l.area_code);
-    return `<div class="row-item" onclick="toggleRow(event)">
-      <div class="row-head">
+    return `<div class="weather-cell" onclick="toggleWeatherCell(event)">
+      <div class="weather-head">
         <span class="area-badge">${escapeHtml(tag)}</span>
         <span class="muted">☁ ${l.cloud_cover.toFixed(2)}</span>
-        <span class="muted row-sep">·</span>
-        <span>solar ${Math.round(l.solar_now)} W/m²</span>
-        <span class="muted row-sep">·</span>
-        <span>wind ${l.wind_now.toFixed(1)} m/s</span>
-        <span class="muted row-sep">·</span>
-        <span>${l.temp_c_now.toFixed(1)} °C</span>
-        <span class="row-caret"></span>
       </div>
-      <div class="row-detail">
-        lat ${l.lat.toFixed(1)} · lon ${l.lon.toFixed(1)}
-        · wind direction ${Math.round(l.wind_direction)}°
-        · mean wind ${l.mean_wind.toFixed(1)} m/s
+      <div class="weather-metric">solar <span class="muted">${Math.round(l.solar_now)} W/m²</span></div>
+      <div class="weather-metric">wind <span class="muted">${l.wind_now.toFixed(1)} m/s</span></div>
+      <div class="weather-metric">temp <span class="muted">${l.temp_c_now.toFixed(1)} °C</span></div>
+      <div class="weather-detail">
+        lat ${l.lat.toFixed(1)} · lon ${l.lon.toFixed(1)}<br>
+        wind direction ${Math.round(l.wind_direction)}°<br>
+        mean wind ${l.mean_wind.toFixed(1)} m/s
       </div>
     </div>`;
   }).join('');
+}
+
+function toggleWeatherCell(ev) {
+  ev.currentTarget.classList.toggle('open');
 }
 
 async function loadScenarios() {
