@@ -98,6 +98,10 @@ struct PublicTradeJson {
     id: u64,
     buy_area: String,
     sell_area: String,
+    /// Delivery-period start as RFC-3339 UTC. The UI shows this so
+    /// the reader can tell which contract a print belongs to without
+    /// inferring it from the price.
+    period: String,
     price: String,
     quantity: String,
     execution_time: String,
@@ -109,6 +113,7 @@ impl From<&PublicTrade> for PublicTradeJson {
             id: t.id.0,
             buy_area: t.buy_area.code.clone(),
             sell_area: t.sell_area.code.clone(),
+            period: t.period.start.to_rfc3339(),
             price: t.price.normalize().to_string(),
             quantity: t.quantity.normalize().to_string(),
             execution_time: t.execution_time.to_rfc3339(),

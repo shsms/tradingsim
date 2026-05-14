@@ -62,7 +62,10 @@ td { padding: 2px 6px; }
     <h2>Public trades (last 50)</h2>
     <div class="scroll">
       <table>
-        <thead><tr><th>id</th><th>qty (MW)</th><th>price (EUR)</th><th>area</th><th>time</th></tr></thead>
+        <thead><tr>
+          <th>id</th><th>qty (MW)</th><th>price (EUR)</th>
+          <th>area</th><th>delivery</th><th>exec</th>
+        </tr></thead>
         <tbody id="trades"></tbody>
       </table>
     </div>
@@ -125,9 +128,13 @@ function openTradesWs() {
     const t = JSON.parse(e.data);
     const tbody = document.getElementById('trades');
     const row = document.createElement('tr');
+    const area = t.buy_area === t.sell_area
+      ? t.buy_area
+      : t.buy_area + ' → ' + t.sell_area;
     row.innerHTML = `<td>#${t.id}</td><td>${t.quantity}</td><td>${t.price}</td>` +
-      `<td>${t.buy_area === t.sell_area ? t.buy_area : t.buy_area + ' → ' + t.sell_area}</td>` +
-      `<td>${shortTime(t.execution_time)}</td>`;
+      `<td class="muted">${area.slice(0, 12)}</td>` +
+      `<td class="muted">${shortTime(t.period)}</td>` +
+      `<td class="muted">${shortTime(t.execution_time)}</td>`;
     tbody.insertBefore(row, tbody.firstChild);
     while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
   };
