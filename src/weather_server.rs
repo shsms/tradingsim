@@ -265,5 +265,15 @@ fn apply_noise(
     }
     let mut rng = SmallRng::seed_from_u64(s);
     let r: f64 = rng.gen_range(-1.0_f64..=1.0_f64);
-    truth + r * sigma
+    let noisy = truth + r * sigma;
+    match feature {
+        // Physically non-negative quantities. Wind u/v components
+        // and 2 m temperature genuinely range across both signs
+        // (vector wind, sub-zero air); only solar irradiance must
+        // clip at zero — the noise was previously pushing the
+        // night-time truth of 0 down to -250 W/m² at long horizons,
+        // which is meaningless on the wire.
+        ForecastFeature::SurfaceSolarRadiationDownwards => noisy.max(0.0),
+        _ => noisy,
+    }
 }
