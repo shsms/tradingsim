@@ -224,7 +224,11 @@ fn build_forecast(state: &WeatherLocation, now: DateTime<Utc>) -> LocationForeca
     }
     LocationForecast {
         forecasts,
-        location: None,
+        location: Some(crate::proto::common_v1::Location {
+            latitude: state.lat as f32,
+            longitude: state.lon as f32,
+            country_code: String::new(),
+        }),
         create_time: Some(prost_types::Timestamp {
             seconds: create_secs,
             nanos: 0,

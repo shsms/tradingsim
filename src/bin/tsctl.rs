@@ -35,6 +35,11 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:8811")]
     ui_addr: String,
 
+    /// gRPC endpoint for the WeatherForecastService (sibling of the
+    /// trading service; binary defaults to [::1]:8812).
+    #[arg(long, default_value = "http://[::1]:8812")]
+    weather_addr: String,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -146,6 +151,27 @@ enum Cmd {
         #[command(subcommand)]
         action: ScenariosAction,
     },
+    /// Print the next live frame from the WeatherForecastService —
+    /// one row per registered location × forecast horizon. Add
+    /// --live to keep the stream open.
+    Weather {
+        /// One or more "lat,lon" pairs (0.1° grid) to request.
+        /// Omit to receive every registered location.
+        #[arg(long, value_parser = parse_latlon, num_args = 0..)]
+        location: Vec<(f32, f32)>,
+        /// Stream live frames instead of exiting after the first.
+        #[arg(long)]
+        live: bool,
+    },
+}
+
+fn parse_latlon(s: &str) -> Result<(f32, f32), String> {
+    let (lat, lon) = s
+        .split_once(',')
+        .ok_or_else(|| format!("expected \"lat,lon\"; got {s:?}"))?;
+    let lat: f32 = lat.parse().map_err(|e| format!("bad lat {lat:?}: {e}"))?;
+    let lon: f32 = lon.parse().map_err(|e| format!("bad lon {lon:?}: {e}"))?;
+    Ok((lat, lon))
 }
 
 #[derive(Subcommand, Debug)]
@@ -766,6 +792,82 @@ async fn cmd_orders(
     Ok(())
 }
 
+async fn cmd_weather(
+    addr: &str,
+    locations: Vec<(f32, f32)>,
+    live: bool,
+) -> Result<(), String> {
+    use tradingsim::proto::common_v1::Location;
+    use tradingsim::proto::weather::{
+        ForecastFeature, LocationForecast, ReceiveLiveWeatherForecastRequest,
+        weather_forecast_service_client::WeatherForecastServiceClient,
+    };
+    let mut client = WeatherForecastServiceClient::connect(addr.to_string())
+        .await
+        .map_err(|e| format!("weather connect ({addr}): {e}"))?;
+    let req = ReceiveLiveWeatherForecastRequest {
+        locations: locations
+            .into_iter()
+            .map(|(lat, lon)| Location {
+                latitude: lat,
+                longitude: lon,
+                country_code: String::new(),
+            })
+            .collect(),
+        features: vec![],
+        forecast_horizon: None,
+    };
+    let mut stream = client
+        .receive_live_weather_forecast(req)
+        .await
+        .map_err(|e| format!("weather stream: {e}"))?
+        .into_inner();
+    let feature_label = |f: i32| -> &'static str {
+        match ForecastFeature::try_from(f).ok() {
+            Some(ForecastFeature::SurfaceSolarRadiationDownwards) => "solar W/m²",
+            Some(ForecastFeature::UWindComponent100Metre) => "u100 m/s",
+            Some(ForecastFeature::VWindComponent100Metre) => "v100 m/s",
+            Some(ForecastFeature::Temperature2Metre) => "t2m K",
+            _ => "?",
+        }
+    };
+    let print_frame = |lfs: &[LocationForecast]| {
+        for lf in lfs {
+            let loc = lf
+                .location
+                .as_ref()
+                .map(|l| format!("{:.1},{:.1}", l.latitude, l.longitude))
+                .unwrap_or_else(|| "(unbound)".into());
+            for (i, h) in lf.forecasts.iter().enumerate() {
+                let ts = fmt_short_time(&h.valid_time);
+                let parts: Vec<String> = h
+                    .features
+                    .iter()
+                    .map(|f| {
+                        format!("{}={:.1}", feature_label(f.feature), f.value)
+                    })
+                    .collect();
+                println!("{loc} +{i:02}h {ts}  {}", parts.join("  "));
+            }
+        }
+    };
+    let first = stream
+        .next()
+        .await
+        .ok_or_else(|| "no frame received".to_string())?
+        .map_err(|e| format!("stream: {e}"))?;
+    print_frame(&first.location_forecasts);
+    if !live {
+        return Ok(());
+    }
+    while let Some(item) = stream.next().await {
+        let frame = item.map_err(|e| format!("stream: {e}"))?;
+        println!("---");
+        print_frame(&frame.location_forecasts);
+    }
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
@@ -778,10 +880,13 @@ async fn main() {
                 Ok(())
             }
             Cmd::Scenarios { action } => cmd_scenarios(&cli.ui_addr, action).await,
+            Cmd::Weather { location, live } => {
+                cmd_weather(&cli.weather_addr, location, live).await
+            }
             cmd => {
                 let mut client = connect(&cli.addr).await?;
                 match cmd {
-                    Cmd::Info | Cmd::Scenarios { .. } => unreachable!(),
+                    Cmd::Info | Cmd::Scenarios { .. } | Cmd::Weather { .. } => unreachable!(),
                     Cmd::Place {
                         pool,
                         side,
