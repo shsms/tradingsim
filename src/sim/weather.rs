@@ -161,15 +161,6 @@ pub struct WeatherRegistry {
     /// weather service reads the same value the MM pricing
     /// pipeline does without an extra shared handle.
     pub active_day_of_year: Option<u32>,
-    /// Hour-of-day (0.0–24.0) the *display* snapshot uses, written
-    /// each bias tick to the midpoint of the currently active
-    /// scenario stage. None ⇒ no scenario running, in which case
-    /// `/api/weather` falls back to the wallclock hour. Pricing
-    /// (`apply_biases`) ignores this and always anchors solar to
-    /// each MM's quoted *contract* hour — the override is purely
-    /// for showing midday conditions on the weather panel when the
-    /// user picks a midday stage.
-    pub active_hour: Option<f64>,
 }
 
 impl Default for WeatherRegistry {
@@ -183,7 +174,6 @@ impl Default for WeatherRegistry {
             by_key,
             by_area: HashMap::new(),
             active_day_of_year: None,
-            active_hour: None,
         }
     }
 }

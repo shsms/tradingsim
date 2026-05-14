@@ -347,13 +347,7 @@ async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
     let now = chrono::Utc::now();
     let clock = s.clock.read().clone();
     let reg = handle.read();
-    // active_hour pins the panel to the active stage's midpoint
-    // (e.g. 14.5 for a 13:00–16:00 "deep belly"), so a user
-    // picking that stage at 2 AM still sees midday solar /
-    // temperature. With no scenario running, fall back to the
-    // configured-tz local hour — wallclock would be UTC, which
-    // doesn't match the physics that uses local civil time.
-    let hour = reg.active_hour.unwrap_or_else(|| clock.local_hour(now));
+    let hour = clock.local_hour(now);
     let day = reg
         .active_day_of_year
         .unwrap_or_else(|| clock.local_day_of_year(now));
