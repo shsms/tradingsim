@@ -437,11 +437,7 @@ pub fn effective_ref(
     Decimal::new(cents, 2)
 }
 
-fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
-    let secs = now.timestamp();
-    let bucket = (secs / 900 + 1) * 900;
-    DateTime::from_timestamp(bucket, 0).unwrap()
-}
+use crate::lisp::next_quarter_boundary;
 
 #[cfg(test)]
 mod tests {

@@ -46,9 +46,9 @@ trades filter. Boot reads localStorage; user changes write through;
 =rerenderBook= / =rerenderTrades= drop stale persisted values that
 no longer match a live contract.
 
-*** TODO Unify =next_quarter_boundary=
-Defined identically in =src/lisp/mod.rs= and =src/scenarios.rs=.
-Pick one as canonical and re-export.
+*** DONE Unify =next_quarter_boundary=
+=scenarios.rs= now imports the existing =lisp::next_quarter_boundary=
+instead of carrying its own duplicate. One source of truth.
 
 ** P1 — Refactors that simplify a lot
 
