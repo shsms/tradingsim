@@ -77,6 +77,15 @@ impl OrderBook {
         removed
     }
 
+    /// Like `cancel`, but also returns the (side, price) the order
+    /// was resting at — used by the public book event emitter that
+    /// needs to publish a qty=0 record after a cancel.
+    pub fn cancel_with_meta(&mut self, id: OrderId) -> Option<(Side, Decimal)> {
+        let (side, price) = *self.by_id.get(&id)?;
+        self.cancel(id)?;
+        Some((side, price))
+    }
+
     /// Highest resting buy price (best bid), if any.
     pub fn best_bid(&self) -> Option<Decimal> {
         self.bids.keys().next_back().copied()
@@ -175,14 +184,16 @@ impl OrderBook {
     /// entry is fully drained, removes it (and the level, if it
     /// empties) and clears the by-id index.
     ///
-    /// Returns `(level_price, maker_id, taken_qty, fully_consumed)`
-    /// — `fully_consumed` is true when this call drained the entry
-    /// to zero. None when the opposite side is empty.
+    /// Returns `(level_price, maker_id, open_before, taken,
+    /// fully_consumed)`. `open_before` is the resting entry's qty
+    /// before this consume (so the caller can compute `open_after =
+    /// open_before - taken` for book-event emission). None when the
+    /// opposite side is empty.
     pub fn consume_front(
         &mut self,
         taker: Side,
         max_qty: Decimal,
-    ) -> Option<(Decimal, OrderId, Decimal, bool)> {
+    ) -> Option<(Decimal, OrderId, Decimal, Decimal, bool)> {
         debug_assert!(max_qty > Decimal::ZERO, "max_qty must be positive");
         let (level_price, queue) = match taker {
             Side::Buy => self.asks.iter_mut().next(),
@@ -191,7 +202,8 @@ impl OrderBook {
         }?;
         let level_price = *level_price;
         let resting = queue.front_mut()?;
-        let taken = max_qty.min(resting.open_qty);
+        let open_before = resting.open_qty;
+        let taken = max_qty.min(open_before);
         resting.open_qty -= taken;
         let maker_id = resting.id;
         let fully_consumed = resting.open_qty.is_zero();
@@ -206,7 +218,7 @@ impl OrderBook {
             }
             self.by_id.remove(&maker_id);
         }
-        Some((level_price, maker_id, taken, fully_consumed))
+        Some((level_price, maker_id, open_before, taken, fully_consumed))
     }
 }
 
@@ -241,10 +253,10 @@ mod tests {
         b.insert(Side::Buy, dec!(85.0), r(1, dec!(1.0)));
         b.insert(Side::Buy, dec!(85.0), r(2, dec!(1.0)));
         b.insert(Side::Buy, dec!(85.0), r(3, dec!(1.0)));
-        let (_, id, _, fully) = b.consume_front(Side::Sell, dec!(1.0)).unwrap();
+        let (_, id, _, _, fully) = b.consume_front(Side::Sell, dec!(1.0)).unwrap();
         assert_eq!(id, OrderId(1));
         assert!(fully);
-        let (_, id, _, _) = b.consume_front(Side::Sell, dec!(1.0)).unwrap();
+        let (_, id, _, _, _) = b.consume_front(Side::Sell, dec!(1.0)).unwrap();
         assert_eq!(id, OrderId(2));
     }
 
@@ -285,7 +297,7 @@ mod tests {
         let mut b = OrderBook::new();
         b.insert(Side::Sell, dec!(90.0), r(1, dec!(2.0)));
 
-        let (price, id, taken, fully) = b.consume_front(Side::Buy, dec!(0.5)).unwrap();
+        let (price, id, _, taken, fully) = b.consume_front(Side::Buy, dec!(0.5)).unwrap();
         assert_eq!(price, dec!(90.0));
         assert_eq!(id, OrderId(1));
         assert_eq!(taken, dec!(0.5));
@@ -293,7 +305,7 @@ mod tests {
         assert!(b.contains(OrderId(1)));
         assert_eq!(b.depth_at(Side::Sell, dec!(90.0)), dec!(1.5));
 
-        let (_, _, taken, fully) = b.consume_front(Side::Buy, dec!(5.0)).unwrap();
+        let (_, _, _, taken, fully) = b.consume_front(Side::Buy, dec!(5.0)).unwrap();
         assert_eq!(taken, dec!(1.5));
         assert!(fully);
         assert!(b.is_empty());

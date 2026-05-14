@@ -21,7 +21,8 @@ use crate::proto::trading::{
     CreateGridpoolOrderResponse, DeliveryTimeFilter, GetGridpoolOrderRequest,
     GetGridpoolOrderResponse, GridpoolOrderFilter, GridpoolTradeFilter, ListGridpoolOrdersRequest,
     ListGridpoolOrdersResponse, ListGridpoolTradesRequest, ListGridpoolTradesResponse,
-    PublicTradeFilter, ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolOrdersStreamResponse,
+    PublicOrderBookFilter, PublicOrderBookRecord, PublicTradeFilter,
+    ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolOrdersStreamResponse,
     ReceiveGridpoolTradesStreamRequest, ReceiveGridpoolTradesStreamResponse,
     ReceivePublicOrderBookStreamRequest, ReceivePublicOrderBookStreamResponse,
     ReceivePublicTradesStreamRequest, ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest,
@@ -158,6 +159,41 @@ fn matches_gridpool_trade_filter(t: &Trade, f: &GridpoolTradeFilter) -> bool {
         }
     }
     // `tag` filter requires an order lookup; deferred.
+    true
+}
+
+fn matches_public_book_filter(r: &PublicOrderBookRecord, f: &PublicOrderBookFilter) -> bool {
+    if let Some(want_period) = f.delivery_period.as_ref() {
+        let want_secs = want_period.start.as_ref().map(|ts| ts.seconds);
+        let got_secs = r
+            .delivery_period
+            .as_ref()
+            .and_then(|p| p.start.as_ref())
+            .map(|ts| ts.seconds);
+        if want_secs != got_secs {
+            return false;
+        }
+        let want_duration = want_period.duration;
+        let got_duration = r
+            .delivery_period
+            .as_ref()
+            .map(|p| p.duration)
+            .unwrap_or(0);
+        if want_duration != got_duration {
+            return false;
+        }
+    }
+    if let Some(area) = f.delivery_area.as_ref() {
+        let got = r.delivery_area.as_ref().map(|a| a.code.as_str()).unwrap_or("");
+        if area.code != got {
+            return false;
+        }
+    }
+    if let Some(want_side) = f.side {
+        if want_side != r.side {
+            return false;
+        }
+    }
     true
 }
 
@@ -524,10 +560,66 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
     async fn receive_public_order_book_stream(
         &self,
-        _request: Request<ReceivePublicOrderBookStreamRequest>,
+        request: Request<ReceivePublicOrderBookStreamRequest>,
     ) -> Result<Response<Self::ReceivePublicOrderBookStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "receive_public_order_book_stream: Phase 8",
-        ))
+        use tokio_stream::wrappers::ReceiverStream;
+        let req = request.into_inner();
+        let filter = req.filter.unwrap_or_default();
+        let start = req.start_time.as_ref().and_then(|ts| timestamp_from_proto(ts).ok());
+
+        // Snapshot history + take a live subscription under one lock.
+        let (history, live_rx) = {
+            let w = self.world.lock().await;
+            (w.public_book_history(), w.subscribe_public_book())
+        };
+
+        // Replay any matching records >= start_time (best-effort —
+        // updates that landed during the snapshot dance may
+        // duplicate against the broadcast tail).
+        let mut replay: Vec<PublicOrderBookRecord> = history
+            .into_iter()
+            .filter(|r| matches_public_book_filter(r, &filter))
+            .filter(|r| match start {
+                Some(s) => r
+                    .update_time
+                    .as_ref()
+                    .and_then(|ts| timestamp_from_proto(ts).ok())
+                    .map(|t| t >= s)
+                    .unwrap_or(true),
+                None => false,
+            })
+            .collect();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ReceivePublicOrderBookStreamResponse, Status>>(64);
+        tokio::spawn(async move {
+            for r in replay.drain(..) {
+                if tx
+                    .send(Ok(ReceivePublicOrderBookStreamResponse {
+                        public_order_book_records: vec![r],
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let mut live = BroadcastStream::new(live_rx);
+            while let Some(item) = live.next().await {
+                let Ok(r) = item else { continue };
+                if !matches_public_book_filter(&r, &filter) {
+                    continue;
+                }
+                if tx
+                    .send(Ok(ReceivePublicOrderBookStreamResponse {
+                        public_order_book_records: vec![r],
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 }

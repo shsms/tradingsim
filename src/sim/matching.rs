@@ -101,7 +101,7 @@ pub fn match_limit(
         if !crosses(taker.side, taker.price, level_price) {
             break;
         }
-        let (price, maker_id, taken, _fully) = book
+        let (price, maker_id, _open_before, taken, _fully) = book
             .consume_front(taker.side, taker.quantity)
             .expect("peek_opposite said this side is non-empty");
         debug_assert_eq!(price, level_price);

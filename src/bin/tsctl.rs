@@ -51,8 +51,8 @@ enum Cmd {
         /// Delivery period start, UTC ISO-8601 e.g. 2026-05-13T12:00:00Z.
         #[arg(long)]
         start: String,
-        /// Delivery duration in minutes: 5, 15, 30, or 60.
-        #[arg(long, default_value_t = 60)]
+        /// Delivery duration in minutes. Only 15 is admitted today.
+        #[arg(long, default_value_t = 15)]
         duration: u32,
         /// User-defined tag for grouping.
         #[arg(long)]
@@ -122,6 +122,15 @@ enum Cmd {
         /// Optional sell-side delivery area filter (EIC code).
         #[arg(long)]
         sell_area: Option<String>,
+    },
+    /// Stream the public order book event tape (one record per
+    /// resting-order state change).
+    PublicBook {
+        /// Optional delivery area filter (EIC code).
+        #[arg(long)]
+        area: Option<String>,
+        #[arg(long, value_enum)]
+        side: Option<SideArg>,
     },
 }
 
@@ -482,6 +491,62 @@ async fn cmd_trades(
     Ok(())
 }
 
+async fn cmd_public_book(
+    client: &mut ElectricityTradingServiceClient<Channel>,
+    area: Option<String>,
+    side: Option<SideArg>,
+) -> Result<(), String> {
+    use tradingsim::proto::trading::{PublicOrderBookFilter, ReceivePublicOrderBookStreamRequest};
+    let mk_area = |code: String| tradingsim::proto::common::grid::DeliveryArea {
+        code,
+        code_type: tradingsim::proto::common::grid::EnergyMarketCodeType::EuropeEic as i32,
+    };
+    let filter = PublicOrderBookFilter {
+        delivery_period: None,
+        delivery_area: area.map(mk_area),
+        side: side.map(|s| MarketSide::from(s) as i32),
+    };
+    let mut stream = client
+        .receive_public_order_book_stream(ReceivePublicOrderBookStreamRequest {
+            filter: Some(filter),
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .map_err(|e| format!("public-book stream: {e}"))?
+        .into_inner();
+    while let Some(item) = stream.next().await {
+        let resp = item.map_err(|e| format!("stream: {e}"))?;
+        for r in &resp.public_order_book_records {
+            let side = MarketSide::try_from(r.side)
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_else(|_| "?".into());
+            let area = r
+                .delivery_area
+                .as_ref()
+                .map(|a| a.code.clone())
+                .unwrap_or_else(|| "?".into());
+            let price = r
+                .price
+                .as_ref()
+                .and_then(|p| p.amount.as_ref())
+                .map(|a| a.value.clone())
+                .unwrap_or_else(|| "?".into());
+            let qty = r
+                .quantity
+                .as_ref()
+                .and_then(|p| p.mw.as_ref())
+                .map(|a| a.value.clone())
+                .unwrap_or_else(|| "?".into());
+            println!(
+                "book#{} {side} {qty} MW @ {price} EUR ({area})",
+                r.id
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn cmd_public_trades(
     client: &mut ElectricityTradingServiceClient<Channel>,
     buy_area: Option<String>,
@@ -623,6 +688,9 @@ async fn main() {
                         buy_area,
                         sell_area,
                     } => cmd_public_trades(&mut client, buy_area, sell_area).await,
+                    Cmd::PublicBook { area, side } => {
+                        cmd_public_book(&mut client, area, side).await
+                    }
                 }
             }
         }

@@ -12,13 +12,21 @@ use tokio::sync::broadcast;
 use crate::sim::book::OrderBook;
 use crate::sim::decimal::is_multiple_of;
 use crate::sim::gridpool::{Gridpool, GridpoolRegistry};
-use crate::sim::market::{Area, DeliveryPeriod, MarketRegistry};
+use crate::sim::market::{Area, Currency, DeliveryPeriod, MarketRegistry};
 use crate::sim::matching::{ExecMode, IncomingLimit, LimitMatchOutcome, match_limit};
 use crate::sim::order::{
     ExecutionOption, GridpoolId, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType,
     Side, StateDetail, StateReason,
 };
 use crate::sim::trade::{PublicTrade, Trade, TradeId, TradeState};
+use crate::proto::trading as proto_trading;
+use crate::proto_conv::{power_to_proto, price_to_proto, timestamp_to_proto};
+
+/// Cap on the in-memory public-tape history rings. Older entries are
+/// evicted FIFO once the cap is reached; replay requests for events
+/// older than the oldest retained record return nothing for that
+/// segment.
+const HISTORY_CAP: usize = 10_000;
 
 /// Per-gridpool order-update fan-out. Capacity is enough to keep the
 /// "lagged" failure mode rare under normal load; a stream consumer
@@ -64,6 +72,21 @@ pub struct World {
     /// fills go through the same path so the tape is the
     /// authoritative match log regardless of who initiated.
     public_trade_tx: broadcast::Sender<PublicTrade>,
+    /// Public order book event tape — one record per resting-order
+    /// state change (add / update / full-consume). proto-shaped so
+    /// the stream task ships records straight through without a
+    /// per-item conversion.
+    public_book_tx: broadcast::Sender<proto_trading::PublicOrderBookRecord>,
+    /// In-memory replay ring for public trades. Drained by stream
+    /// handlers asking for a `start_time` in the recent past.
+    public_trade_history: parking_lot::Mutex<std::collections::VecDeque<PublicTrade>>,
+    /// In-memory replay ring for public order book records.
+    public_book_history:
+        parking_lot::Mutex<std::collections::VecDeque<proto_trading::PublicOrderBookRecord>>,
+    /// First-seen timestamp per resting order id. Populated when a
+    /// book entry first appears; cleared on cancel / full-fill.
+    /// Used to populate PublicOrderBookRecord.create_time.
+    book_first_seen: HashMap<OrderId, DateTime<Utc>>,
     books: HashMap<ContractKey, OrderBook>,
     /// Reverse index from a resting OrderId to the gridpool that owns
     /// it. Populated when an order rests on the book; cleared on full
@@ -118,7 +141,8 @@ pub struct OrderUpdate {
 
 impl World {
     pub fn new(markets: MarketRegistry) -> Self {
-        let (public_trade_tx, _rx) = broadcast::channel(TRADE_BROADCAST_CAPACITY);
+        let (public_trade_tx, _) = broadcast::channel(TRADE_BROADCAST_CAPACITY);
+        let (public_book_tx, _) = broadcast::channel(TRADE_BROADCAST_CAPACITY);
         Self {
             markets,
             gridpools: GridpoolRegistry::new(),
@@ -126,6 +150,14 @@ impl World {
             gridpool_order_tx: HashMap::new(),
             gridpool_trade_tx: HashMap::new(),
             public_trade_tx,
+            public_book_tx,
+            public_trade_history: parking_lot::Mutex::new(
+                std::collections::VecDeque::with_capacity(HISTORY_CAP),
+            ),
+            public_book_history: parking_lot::Mutex::new(
+                std::collections::VecDeque::with_capacity(HISTORY_CAP),
+            ),
+            book_first_seen: HashMap::new(),
             books: HashMap::new(),
             order_to_gridpool: HashMap::new(),
             next_order_id: 1,
@@ -192,6 +224,27 @@ impl World {
         self.public_trade_tx.subscribe()
     }
 
+    /// Subscribe to the public order book event tape. Returns
+    /// proto-shaped records the stream task can ship through
+    /// unchanged.
+    pub fn subscribe_public_book(
+        &self,
+    ) -> broadcast::Receiver<proto_trading::PublicOrderBookRecord> {
+        self.public_book_tx.subscribe()
+    }
+
+    /// Snapshot the public-trade history ring; used by the stream
+    /// handler to replay events from a `start_time` before the
+    /// subscription point.
+    pub fn public_trade_history(&self) -> Vec<PublicTrade> {
+        self.public_trade_history.lock().iter().cloned().collect()
+    }
+
+    /// Snapshot the public-book history ring.
+    pub fn public_book_history(&self) -> Vec<proto_trading::PublicOrderBookRecord> {
+        self.public_book_history.lock().iter().cloned().collect()
+    }
+
     /// Publish an OrderDetail update for `gridpool_id`. No-op if no
     /// subscribers — broadcast::Sender::send returning Err means the
     /// receiver count was zero, which is fine for the sim.
@@ -208,7 +261,62 @@ impl World {
     }
 
     fn publish_public_trade(&self, trade: PublicTrade) {
+        {
+            let mut hist = self.public_trade_history.lock();
+            if hist.len() >= HISTORY_CAP {
+                hist.pop_front();
+            }
+            hist.push_back(trade.clone());
+        }
         let _ = self.public_trade_tx.send(trade);
+    }
+
+    fn publish_public_book_record(&self, rec: proto_trading::PublicOrderBookRecord) {
+        {
+            let mut hist = self.public_book_history.lock();
+            if hist.len() >= HISTORY_CAP {
+                hist.pop_front();
+            }
+            hist.push_back(rec.clone());
+        }
+        let _ = self.public_book_tx.send(rec);
+    }
+
+    /// Emit a PublicOrderBookRecord for a resting order whose state
+    /// just changed. `now` becomes the record's update_time;
+    /// create_time is tracked across calls via `book_first_seen`,
+    /// inserted on first emission and cleared when qty drops to 0.
+    fn emit_book_event(
+        &mut self,
+        order_id: OrderId,
+        side: Side,
+        area: Area,
+        period: DeliveryPeriod,
+        price: Decimal,
+        open_qty: Decimal,
+        currency: Currency,
+        now: DateTime<Utc>,
+    ) {
+        let create_time = *self
+            .book_first_seen
+            .entry(order_id)
+            .or_insert(now);
+        if open_qty.is_zero() {
+            self.book_first_seen.remove(&order_id);
+        }
+        let rec = proto_trading::PublicOrderBookRecord {
+            id: order_id.0,
+            delivery_area: Some((&area).into()),
+            delivery_period: Some(period.into()),
+            r#type: None, // ORDER_TYPE not tracked on the book entry today
+            side: side as i32,
+            price: Some(price_to_proto(price, currency)),
+            quantity: Some(power_to_proto(open_qty)),
+            execution_option: None,
+            create_time: Some(timestamp_to_proto(create_time)),
+            update_time: Some(timestamp_to_proto(now)),
+        };
+        self.publish_public_book_record(rec);
     }
 
     /// Record that `order_id` is now resting on the book and belongs
@@ -275,12 +383,16 @@ impl World {
     /// coupled-area books in global price-time priority. Each fill
     /// carries the maker area so the caller can emit a PublicTrade
     /// with the right buy/sell area split. Resting leftover always
-    /// lands on the taker's own area book.
+    /// lands on the taker's own area book. `currency` is used to
+    /// build the proto-shaped book event records.
+    #[allow(clippy::too_many_arguments)]
     fn match_limit_across(
         &mut self,
         taker_key: ContractKey,
         mut taker: IncomingLimit,
         mode: ExecMode,
+        currency: Currency,
+        now: DateTime<Utc>,
     ) -> (Vec<(crate::sim::matching::Fill, Area)>, Option<crate::sim::book::Resting>) {
         let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
         for other in self.coupled_areas(&taker_key.area) {
@@ -325,9 +437,10 @@ impl World {
                 });
             let Some((book_key, _)) = best else { break };
             let book = self.books.get_mut(&book_key).expect("found above");
-            let (price, maker_id, taken, _fully) = book
+            let (price, maker_id, open_before, taken, _fully) = book
                 .consume_front(taker.side, taker.quantity)
                 .expect("peek said non-empty");
+            let maker_open_after = open_before - taken;
             fills.push((
                 crate::sim::matching::Fill {
                     taker_id: taker.id,
@@ -337,6 +450,17 @@ impl World {
                 },
                 book_key.area.clone(),
             ));
+            // Maker's resting state just changed — emit a book event.
+            self.emit_book_event(
+                maker_id,
+                taker.side.opposite(),
+                book_key.area.clone(),
+                book_key.period,
+                price,
+                maker_open_after,
+                currency,
+                now,
+            );
             taker.quantity -= taken;
             if taker.quantity.is_zero() {
                 break;
@@ -348,7 +472,17 @@ impl World {
                 id: taker.id,
                 open_qty: taker.quantity,
             };
-            self.book_mut(taker_key).insert(taker.side, taker.price, r);
+            self.book_mut(taker_key.clone()).insert(taker.side, taker.price, r);
+            self.emit_book_event(
+                taker.id,
+                taker.side,
+                taker_key.area.clone(),
+                taker_key.period,
+                taker.price,
+                taker.quantity,
+                currency,
+                now,
+            );
             Some(r)
         } else {
             None
@@ -428,6 +562,8 @@ impl World {
                 quantity: total_qty,
             },
             mode,
+            taker_currency,
+            now,
         );
         let outcome = LimitMatchOutcome {
             fills: fills_with_areas.iter().map(|(f, _)| *f).collect(),
@@ -727,18 +863,33 @@ impl World {
     /// flip (counterparty orders don't have an OrderDetail). Returns
     /// true if the id was on the book, false otherwise.
     pub fn cancel_counterparty_order(&mut self, order_id: OrderId) -> bool {
-        let mut found = false;
-        for book in self.books.values_mut() {
-            if book.contains(order_id) {
-                book.cancel(order_id);
-                found = true;
+        let mut found_meta: Option<(Side, Decimal, ContractKey)> = None;
+        for (key, book) in self.books.iter_mut() {
+            if let Some((side, price)) = book.cancel_with_meta(order_id) {
+                found_meta = Some((side, price, key.clone()));
                 break;
             }
         }
         // Belt-and-suspenders: an accidental binding (shouldn't
         // happen, but cheap) gets cleared.
         self.unbind_resting_order(order_id);
-        found
+        if let Some((side, price, key)) = found_meta {
+            // Counterparty orders are EUR-only (the only currency
+            // the MM defaults emit).
+            self.emit_book_event(
+                order_id,
+                side,
+                key.area,
+                key.period,
+                price,
+                Decimal::ZERO,
+                Currency::Eur,
+                Utc::now(),
+            );
+            true
+        } else {
+            false
+        }
     }
 
     /// Walk every gridpool's order index and transition any
@@ -770,13 +921,23 @@ impl World {
         }
         let count = expirables.len();
         for (gp_id, order_id, key) in expirables {
-            // Remove from book if resting.
-            if self.owner_of(order_id) == Some(gp_id) {
+            // Remove from book if resting + remember the side/price
+            // so we can emit a qty=0 PublicOrderBookRecord.
+            let book_meta = if self.owner_of(order_id) == Some(gp_id) {
                 self.unbind_resting_order(order_id);
-                if let Some(book) = self.books.get_mut(&key) {
-                    book.cancel(order_id);
-                }
-            }
+                self.books
+                    .get_mut(&key)
+                    .and_then(|b| b.cancel_with_meta(order_id))
+            } else {
+                None
+            };
+            // Snapshot currency for the book event before the closure.
+            let currency = self
+                .gridpools
+                .get(gp_id)
+                .and_then(|g| g.get_order(order_id))
+                .map(|d| d.order.currency)
+                .unwrap_or(Currency::Eur);
             self.gridpools
                 .get_mut(gp_id)
                 .expect("gridpool present")
@@ -793,6 +954,18 @@ impl World {
                 .cloned()
             {
                 self.publish_order_update(gp_id, d);
+            }
+            if let Some((side, price)) = book_meta {
+                self.emit_book_event(
+                    order_id,
+                    side,
+                    key.area.clone(),
+                    key.period,
+                    price,
+                    Decimal::ZERO,
+                    currency,
+                    now,
+                );
             }
         }
         count
@@ -983,11 +1156,21 @@ impl World {
         // Remove from the book if still resting. For LIMIT-only we
         // can scan books by id since the resting set is small and
         // there's no Phase-4 contract index yet.
+        let mut cancelled_meta: Option<(Side, Decimal, ContractKey, Currency)> = None;
         if self.owner_of(order_id) == Some(gridpool_id) {
             self.unbind_resting_order(order_id);
-            for book in self.books.values_mut() {
-                if book.contains(order_id) {
-                    book.cancel(order_id);
+            // Snapshot enough to emit a DELETE book event after the
+            // cancel commits.
+            let detail = self
+                .gridpools
+                .get(gridpool_id)
+                .and_then(|g| g.get_order(order_id))
+                .cloned();
+            for (key, book) in self.books.iter_mut() {
+                if let Some((side, price)) = book.cancel_with_meta(order_id) {
+                    if let Some(d) = detail {
+                        cancelled_meta = Some((side, price, key.clone(), d.order.currency));
+                    }
                     break;
                 }
             }
@@ -1001,6 +1184,18 @@ impl World {
         });
         let detail = gp.get_order(order_id).cloned().unwrap();
         self.publish_order_update(gridpool_id, detail.clone());
+        if let Some((side, price, key, currency)) = cancelled_meta {
+            self.emit_book_event(
+                order_id,
+                side,
+                key.area,
+                key.period,
+                price,
+                Decimal::ZERO,
+                currency,
+                now,
+            );
+        }
         Ok(detail)
     }
 }
