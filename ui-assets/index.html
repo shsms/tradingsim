@@ -51,7 +51,44 @@ h1 {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-top: 12px;
+  grid-template-areas:
+    "trades  book"
+    "scenarios scenarios"
+    "gridpools gridpools"
+    "weather weather";
 }
+.panel-trades    { grid-area: trades; }
+.panel-book      { grid-area: book; }
+.panel-scenarios { grid-area: scenarios; }
+.panel-gridpools { grid-area: gridpools; }
+.panel-weather   { grid-area: weather; }
+
+/* Wide-screen workspace: three columns. Trades become a tall left
+   rim (one tape, full height), book takes the wide middle (more
+   ladders per row), and the three operator panels stack on the
+   right. Trigger at 1600 px so half-screen 4K still uses the
+   narrow layout. */
+@media (min-width: 1600px) {
+  .grid {
+    grid-template-columns: 1.4fr 2fr 1fr;
+    grid-template-areas:
+      "trades book scenarios"
+      "trades book gridpools"
+      "trades book weather";
+  }
+  .panel-trades, .panel-book {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .panel-trades .scroll,
+  .panel-book .scroll {
+    max-height: none;
+    flex: 1;
+    min-height: 0;
+  }
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -459,7 +496,7 @@ td { padding: 2px 6px; }
 </section>
 
 <div class="grid">
-  <div class="panel">
+  <div class="panel panel-trades">
     <h2>Public trades (last 50)</h2>
     <div class="scroll">
       <table>
@@ -472,7 +509,7 @@ td { padding: 2px 6px; }
     </div>
   </div>
 
-  <div class="panel">
+  <div class="panel panel-book">
     <h2>Order book</h2>
     <div class="muted" style="margin-bottom:8px">
       One ladder per contract, top 3 levels per side. Bar width
@@ -484,17 +521,17 @@ td { padding: 2px 6px; }
     </div>
   </div>
 
-  <div class="panel" style="grid-column: span 2">
-    <h2>Gridpools</h2>
-    <div id="gridpools" class="row-list muted">loading…</div>
-  </div>
-
-  <div class="panel" style="grid-column: span 2">
+  <div class="panel panel-scenarios">
     <h2>Scenarios</h2>
     <div id="scenarios" class="muted">loading…</div>
   </div>
 
-  <div class="panel" style="grid-column: span 2">
+  <div class="panel panel-gridpools">
+    <h2>Gridpools</h2>
+    <div id="gridpools" class="row-list muted">loading…</div>
+  </div>
+
+  <div class="panel panel-weather">
     <h2>Weather (now)</h2>
     <div class="muted" style="margin-bottom:6px">
       One row per registered location (0.1° lat/lon grid). Click a
