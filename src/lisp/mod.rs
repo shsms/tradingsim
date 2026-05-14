@@ -373,6 +373,7 @@ fn register_runtime(
     anchor: DateTime<Utc>,
 ) {
     add_log_functions(ctx);
+    register_time_helpers(ctx);
     register_metadata(ctx, metadata);
     register_markets(ctx, markets);
     register_couplings(ctx, couplings);
@@ -388,6 +389,7 @@ AsPlist! {
         name: String,
         description: Option<String> {= None},
         stages: Vec<Vec<String>>,
+        on_stop<":on-stop">: Option<String> {= None},
     }
 }
 
@@ -417,6 +419,7 @@ fn register_scenarios(
                 name: a.name.clone(),
                 description: a.description.unwrap_or_default(),
                 stages,
+                on_stop_fn: a.on_stop,
             };
             scenarios.lock().insert(
                 a.name.clone(),
@@ -656,6 +659,19 @@ pub fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
     let secs = now.timestamp();
     let bucket = (secs / 900 + 1) * 900;
     DateTime::from_timestamp(bucket, 0).unwrap()
+}
+
+fn register_time_helpers(ctx: &mut TulispContext) {
+    // Hour-of-day (UTC, fractional) for the contract delivered at
+    // the given quarter offset from "now". A scenario uses this to
+    // pick e.g. an aggressor side-bias from the time-of-day curve.
+    ctx.defun("quarter-offset-hour", |offset: i64| -> f64 {
+        let now = Utc::now();
+        let boundary = next_quarter_boundary(now);
+        let period_start = boundary + chrono::Duration::minutes(15 * offset);
+        use chrono::Timelike;
+        period_start.hour() as f64 + period_start.minute() as f64 / 60.0
+    });
 }
 
 fn f64_to_dec(v: f64) -> Decimal {

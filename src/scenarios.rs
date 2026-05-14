@@ -24,6 +24,10 @@ pub struct ScenarioDef {
     pub name: String,
     pub description: String,
     pub stages: Vec<Stage>,
+    /// Optional cleanup defun the UI invokes on POST /stop. Lets a
+    /// scenario undo whatever Start did (cancel a timer, reset knobs)
+    /// without forcing the operator to advance through every stage.
+    pub on_stop_fn: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

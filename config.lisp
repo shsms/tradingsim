@@ -68,3 +68,4 @@
 ;; (load "scenarios/gate-crunch.lisp")    ;; widening spread on tn-q3
 ;; (load "scenarios/curtailment.lisp")    ;; supply surge on tn-q2
 (load "scenarios/elaborate.lisp")         ;; six-phase tour — UI-driven
+(load "scenarios/duck-curve.lisp")        ;; flow follows German intraday curve

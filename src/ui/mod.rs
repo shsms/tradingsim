@@ -319,15 +319,17 @@ async fn api_scenario_stop(
     State(s): State<UiState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScenarioJson>, StatusCode> {
-    let Some(reg) = s.scenarios.as_ref() else {
-        return Err(StatusCode::NOT_FOUND);
+    let (on_stop_fn, payload) = {
+        let reg = s.scenarios.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+        let mut guard = reg.lock();
+        let entry = guard.get_mut(&name).ok_or(StatusCode::NOT_FOUND)?;
+        entry.runtime = ScenarioRuntime::default();
+        (entry.def.on_stop_fn.clone(), scenario_to_json(entry))
     };
-    let mut guard = reg.lock();
-    let Some(entry) = guard.get_mut(&name) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    entry.runtime = ScenarioRuntime::default();
-    Ok(Json(scenario_to_json(entry)))
+    if let Some(fn_name) = on_stop_fn {
+        invoke_stage_fn(&s, &fn_name);
+    }
+    Ok(Json(payload))
 }
 
 fn advance_scenario<F>(
