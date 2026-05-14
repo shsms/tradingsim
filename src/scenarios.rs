@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Timelike, TimeZone, Utc};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
 use rust_decimal::Decimal;
@@ -173,14 +173,19 @@ pub struct MmView {
     pub shared_config: SharedConfig,
 }
 
-/// EUR per (bias - 0.5) unit added to the MM's demand / surplus
-/// tilt. With scale = 25 and a scenario bias of 0.18 the imbalance
-/// is -0.32; that becomes an 8-EUR shift on both bid and ask, so
-/// each trade pulls the MM reference down by ~0.8 EUR per MM tick.
-/// At one trade per 2 s on the imminent quarters, that's enough to
-/// push prices into negative territory within ~3 minutes of a
-/// deep-belly stage — matching real intraday behaviour.
-const MM_BIAS_SCALE: f64 = 25.0;
+/// Fallback bias scale used when `config.lisp` doesn't call
+/// `(set-mm-bias-scale …)`. EUR per (bias - 0.5) unit added to the
+/// MM's demand / surplus tilt. With scale = 25 a deep-belly stage
+/// (bias 0.18, imbalance -0.32) becomes an 8-EUR shift on both
+/// bid and ask, enough to push prices into negative territory
+/// within ~3 minutes.
+pub const DEFAULT_MM_BIAS_SCALE: f64 = 25.0;
+
+pub type SharedBiasScale = Arc<RwLock<f64>>;
+
+pub fn new_bias_scale() -> SharedBiasScale {
+    Arc::new(RwLock::new(DEFAULT_MM_BIAS_SCALE))
+}
 
 /// Spawn a tokio task that, every `cadence`, walks `aggressors` and
 /// `mms` and writes their effective side-bias / demand / surplus to
@@ -194,6 +199,7 @@ pub fn spawn_bias_tick(
     aggressors: Vec<AggressorView>,
     mms: Vec<MmView>,
     scenarios: SharedScenarios,
+    bias_scale: SharedBiasScale,
     cadence: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -202,7 +208,8 @@ pub fn spawn_bias_tick(
             tick.tick().await;
             let now = Utc::now();
             let scenario_bias = pick_active_bias(&scenarios, now);
-            apply_biases(&aggressors, &mms, scenario_bias, now);
+            let scale = *bias_scale.read();
+            apply_biases(&aggressors, &mms, scenario_bias, scale, now);
         }
     })
 }
@@ -245,6 +252,7 @@ fn apply_biases(
     aggressors: &[AggressorView],
     mms: &[MmView],
     scenario_bias: Option<f64>,
+    bias_scale: f64,
     now: DateTime<Utc>,
 ) {
     // Hour-of-day for each aggressor's target contract changes only
@@ -271,7 +279,7 @@ fn apply_biases(
         // positive demand + negative surplus; bias < 0.5 does the
         // mirror image.
         let imbalance = bias - 0.5;
-        let shift = imbalance * MM_BIAS_SCALE;
+        let shift = imbalance * bias_scale;
         let mut cfg = view.shared_config.write();
         cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
         cfg.surplus = Decimal::try_from(-shift).unwrap_or(Decimal::ZERO);

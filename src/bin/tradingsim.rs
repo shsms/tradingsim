@@ -270,12 +270,13 @@ async fn main() {
     // immediate quote shift on top of the slower follow-last-trade
     // drift, so visible price moves land within seconds rather than
     // minutes.
-    if let Some(scenarios) = lisp_config_arc.as_ref().map(|c| c.scenarios()) {
+    if let Some(c) = lisp_config_arc.as_ref() {
         if !bias_views.is_empty() || !mm_views.is_empty() {
             tradingsim::scenarios::spawn_bias_tick(
                 bias_views,
                 mm_views,
-                scenarios,
+                c.scenarios(),
+                c.bias_scale(),
                 Duration::from_secs(5),
             );
         }

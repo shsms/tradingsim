@@ -113,6 +113,7 @@ pub struct Config {
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
+    bias_scale: crate::scenarios::SharedBiasScale,
     /// Extra paths registered via `(watch-file PATH)`; the notify
     /// watcher reloads on any of them changing in addition to the
     /// top-level config file.
@@ -141,6 +142,7 @@ impl Config {
         let couplings = Arc::new(Mutex::new(Vec::new()));
         let aggressors = Arc::new(Mutex::new(HashMap::new()));
         let scenarios = crate::scenarios::new_registry();
+        let bias_scale = crate::scenarios::new_bias_scale();
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
@@ -160,6 +162,7 @@ impl Config {
             couplings.clone(),
             aggressors.clone(),
             scenarios.clone(),
+            bias_scale.clone(),
             extra_watches.clone(),
             load_dir.clone(),
             anchor,
@@ -189,6 +192,7 @@ impl Config {
             couplings,
             aggressors,
             scenarios,
+            bias_scale,
             extra_watches,
             timer_handle,
             anchor,
@@ -345,6 +349,12 @@ impl Config {
         self.ctx.clone()
     }
 
+    /// Shared MM_BIAS_SCALE handle. `config.lisp` sets it via
+    /// `(set-mm-bias-scale FLOAT)`; the bias tick reads it.
+    pub fn bias_scale(&self) -> crate::scenarios::SharedBiasScale {
+        self.bias_scale.clone()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -368,6 +378,7 @@ fn register_runtime(
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
+    bias_scale: crate::scenarios::SharedBiasScale,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
     anchor: DateTime<Utc>,
@@ -381,7 +392,21 @@ fn register_runtime(
     register_market_makers(ctx, market_makers, anchor);
     register_aggressors(ctx, aggressors, anchor);
     register_scenarios(ctx, scenarios);
+    register_bias_scale(ctx, bias_scale);
     register_watches(ctx, extra_watches, load_dir);
+}
+
+fn register_bias_scale(
+    ctx: &mut TulispContext,
+    bias_scale: crate::scenarios::SharedBiasScale,
+) {
+    ctx.defun(
+        "set-mm-bias-scale",
+        move |value: f64| -> Result<f64, Error> {
+            *bias_scale.write() = value;
+            Ok(value)
+        },
+    );
 }
 
 /// Newtype around `TulispObject` so `Vec<RawStage>` satisfies the

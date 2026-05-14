@@ -18,6 +18,12 @@
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
 
+;; Bias-scale knob — EUR per (bias - 0.5) unit pushed into the MM's
+;; demand + surplus tilt. Higher = more dramatic price moves under a
+;; lopsided scenario stage. Rust falls back to 25.0 if this line is
+;; absent; tune up to 30-40 if you want negative prices faster.
+(set-mm-bias-scale 25.0)
+
 ;; --- TSO regions ----------------------------------------------------------
 ;;
 ;; Four German TSO control zones treated as separate delivery areas.
