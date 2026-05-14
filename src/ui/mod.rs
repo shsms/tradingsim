@@ -142,11 +142,24 @@ struct PublicBookJson {
     id: u64,
     side: i32,
     area: String,
+    /// Delivery-period start as RFC-3339 UTC. The UI uses this plus
+    /// `area` to bucket book entries by contract.
+    period: String,
     price: String,
     quantity: String,
 }
 
 fn book_record_to_json(r: &PublicOrderBookRecord) -> PublicBookJson {
+    let period = r
+        .delivery_period
+        .as_ref()
+        .and_then(|p| p.start.as_ref())
+        .map(|ts| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     PublicBookJson {
         id: r.id,
         side: r.side,
@@ -155,6 +168,7 @@ fn book_record_to_json(r: &PublicOrderBookRecord) -> PublicBookJson {
             .as_ref()
             .map(|a| a.code.clone())
             .unwrap_or_default(),
+        period,
         price: r
             .price
             .as_ref()
