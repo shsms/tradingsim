@@ -6,14 +6,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::proto::trading::{MarketSide, PublicOrderBookRecord};
+use crate::proto::trading::PublicOrderBookRecord;
 use crate::scenarios::{ScenarioEntry, ScenarioRuntime, SharedScenarios};
 use crate::sim::trade::PublicTrade;
 use crate::sim::world::World;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
 use serde::Serialize;
@@ -225,9 +225,6 @@ async fn ws_public_book(ws: WebSocketUpgrade, State(s): State<UiState>) -> impl 
 }
 
 async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
-    let _ = MarketSide::Buy; // silence "unused MarketSide" if the enum isn't referenced
-    let _ = header::CONTENT_TYPE; // silence unused header import on some configs
-
     // Capture the current book snapshot + subscribe under a single
     // lock so any concurrent event is either reflected in the
     // snapshot (already fired) or queued on the receiver (fires

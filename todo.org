@@ -12,10 +12,10 @@ Outcome of the exhaustive review. Tier ordering = bang-for-buck.
 
 ** P0 — Bugs / smells worth fixing now
 
-*** TODO Remove dead-code stubs in =src/ui/mod.rs=
+*** DONE Remove dead-code stubs in =src/ui/mod.rs=
 =let _ = MarketSide::Buy;= and =let _ = header::CONTENT_TYPE;=
-inside =handle_book_ws=. Either delete the imports too or drop the
-underscore-binding stubs.
+inside =handle_book_ws=. Both imports were genuinely unused — dropped
+the stubs and the imports.
 
 *** TODO Fix =/api/info= coupling undercount
 Walks =gridpools().areas= so couplings on markets without a pool
