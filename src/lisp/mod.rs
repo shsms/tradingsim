@@ -31,14 +31,18 @@ use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod, Marke
 /// Top-level identity + transport settings, set via lisp defuns.
 #[derive(Clone, Debug)]
 pub struct Metadata {
-    pub socket_addr: String,
+    pub trading_addr: String,
+    pub ui_addr: String,
+    pub weather_addr: String,
     pub physics_tick: Duration,
 }
 
 impl Default for Metadata {
     fn default() -> Self {
         Self {
-            socket_addr: "[::1]:8810".to_string(),
+            trading_addr: "[::1]:8810".to_string(),
+            ui_addr: "127.0.0.1:8811".to_string(),
+            weather_addr: "[::1]:8820".to_string(),
             physics_tick: Duration::from_millis(100),
         }
     }
@@ -344,8 +348,16 @@ impl Config {
         self.metadata.read().clone()
     }
 
-    pub fn socket_addr(&self) -> String {
-        self.metadata.read().socket_addr.clone()
+    pub fn trading_addr(&self) -> String {
+        self.metadata.read().trading_addr.clone()
+    }
+
+    pub fn ui_addr(&self) -> String {
+        self.metadata.read().ui_addr.clone()
+    }
+
+    pub fn weather_addr(&self) -> String {
+        self.metadata.read().weather_addr.clone()
     }
 
     /// Snapshot of all market-makers built by the lisp config. Each
@@ -1146,8 +1158,18 @@ fn register_market_makers(
 
 fn register_metadata(ctx: &mut TulispContext, metadata: Arc<RwLock<Metadata>>) {
     let m = metadata.clone();
-    ctx.defun("set-socket-addr", move |addr: String| -> String {
-        m.write().socket_addr = addr.clone();
+    ctx.defun("set-trading-addr", move |addr: String| -> String {
+        m.write().trading_addr = addr.clone();
+        addr
+    });
+    let m = metadata.clone();
+    ctx.defun("set-ui-addr", move |addr: String| -> String {
+        m.write().ui_addr = addr.clone();
+        addr
+    });
+    let m = metadata.clone();
+    ctx.defun("set-weather-addr", move |addr: String| -> String {
+        m.write().weather_addr = addr.clone();
         addr
     });
     let m = metadata.clone();
@@ -1157,8 +1179,8 @@ fn register_metadata(ctx: &mut TulispContext, metadata: Arc<RwLock<Metadata>>) {
         ms as i64
     });
     let m = metadata;
-    ctx.defun("get-socket-addr", move || -> String {
-        m.read().socket_addr.clone()
+    ctx.defun("get-trading-addr", move || -> String {
+        m.read().trading_addr.clone()
     });
 }
 
@@ -1185,15 +1207,37 @@ mod tests {
     async fn empty_config_yields_defaults() {
         let f = write_tmp(";; empty\n");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.socket_addr(), "[::1]:8810");
+        assert_eq!(cfg.trading_addr(), "[::1]:8810");
         assert_eq!(cfg.metadata().physics_tick, Duration::from_millis(100));
     }
 
     #[tokio::test]
-    async fn set_socket_addr_takes_effect() {
-        let f = write_tmp(r#"(set-socket-addr "[::]:9000")"#);
+    async fn set_trading_addr_takes_effect() {
+        let f = write_tmp(r#"(set-trading-addr "[::]:9000")"#);
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.socket_addr(), "[::]:9000");
+        assert_eq!(cfg.trading_addr(), "[::]:9000");
+    }
+
+    #[tokio::test]
+    async fn set_ui_addr_takes_effect() {
+        let f = write_tmp(r#"(set-ui-addr "0.0.0.0:9100")"#);
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.ui_addr(), "0.0.0.0:9100");
+    }
+
+    #[tokio::test]
+    async fn set_weather_addr_takes_effect() {
+        let f = write_tmp(r#"(set-weather-addr "[::]:9200")"#);
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.weather_addr(), "[::]:9200");
+    }
+
+    #[tokio::test]
+    async fn ui_and_weather_addrs_have_sensible_defaults() {
+        let f = write_tmp(";; empty\n");
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.ui_addr(), "127.0.0.1:8811");
+        assert_eq!(cfg.weather_addr(), "[::1]:8820");
     }
 
     #[tokio::test]

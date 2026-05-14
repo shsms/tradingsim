@@ -206,9 +206,9 @@ async fn main() {
         world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
     }
 
-    let socket_addr = lisp_config
+    let trading_addr = lisp_config
         .as_ref()
-        .map(|c| c.socket_addr())
+        .map(|c| c.trading_addr())
         .unwrap_or_else(|| "[::1]:8810".to_string());
 
     // Synthetic liquidity: either driven by lisp's (make-market-maker
@@ -401,8 +401,9 @@ async fn main() {
     }
 
     // UI server: spawns alongside the gRPC server, sharing the same
-    // World handle. Hardcoded port for now; lisp-driven addr can land
-    // alongside set-socket-addr.
+    // World handle. Address pulled from config.lisp via
+    // (set-ui-addr "…"); defaults to 127.0.0.1:8811 if no lisp
+    // config is loaded.
     {
         let world_for_ui = Arc::clone(&world);
         let scenarios = lisp_config_arc.as_ref().map(|c| c.scenarios());
@@ -413,7 +414,14 @@ async fn main() {
             .as_ref()
             .map(|c| c.clock())
             .unwrap_or_else(tradingsim::sim::clock::new_clock);
-        let ui_addr: std::net::SocketAddr = "127.0.0.1:8811".parse().unwrap();
+        let ui_addr_str = lisp_config_arc
+            .as_ref()
+            .map(|c| c.ui_addr())
+            .unwrap_or_else(|| "127.0.0.1:8811".to_string());
+        let ui_addr: std::net::SocketAddr = ui_addr_str.parse().unwrap_or_else(|e| {
+            log::error!("Invalid ui-addr {ui_addr_str:?} ({e}); falling back to 127.0.0.1:8811");
+            "127.0.0.1:8811".parse().unwrap()
+        });
         tokio::spawn(async move {
             if let Err(e) =
                 ui_server::serve(ui_addr, world_for_ui, scenarios, weather, clock).await
@@ -425,14 +433,21 @@ async fn main() {
 
     // Weather forecast service: exposes the sim's internal weather
     // state via the Frequenz weather API. Sibling port to the
-    // electricity-trading gRPC. Only spawned when a lisp config is
-    // present (the weather state lives there).
+    // electricity-trading gRPC, configurable via
+    // (set-weather-socket-addr "…"). Only spawned when a lisp
+    // config is present (the weather state lives there).
     if let Some(c) = lisp_config_arc.as_ref() {
         use tradingsim::proto::weather::weather_forecast_service_server::WeatherForecastServiceServer;
         use tradingsim::weather_server::WeatherForecastServer;
         let weather_handle = c.weather();
         let cadence_handle = c.weather_cadence();
-        let weather_addr: std::net::SocketAddr = "[::1]:8812".parse().unwrap();
+        let weather_addr_str = c.weather_addr();
+        let weather_addr: std::net::SocketAddr = weather_addr_str.parse().unwrap_or_else(|e| {
+            log::error!(
+                "Invalid weather-socket-addr {weather_addr_str:?} ({e}); falling back to [::1]:8820"
+            );
+            "[::1]:8820".parse().unwrap()
+        });
         tokio::spawn(async move {
             let service = WeatherForecastServiceServer::new(
                 WeatherForecastServer::new(weather_handle).with_cadence(cadence_handle),
@@ -451,8 +466,8 @@ async fn main() {
     let service =
         ElectricityTradingServiceServer::new(ElectricityTradingServer::new(Arc::clone(&world)));
 
-    let addr = socket_addr.parse().unwrap_or_else(|e| {
-        log::error!("invalid socket_addr {socket_addr:?}: {e}");
+    let addr = trading_addr.parse().unwrap_or_else(|e| {
+        log::error!("invalid trading-addr {trading_addr:?}: {e}");
         std::process::exit(1);
     });
     log::info!("ElectricityTrading gRPC server listening on {addr}");

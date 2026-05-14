@@ -15,7 +15,9 @@
 ;; Watch the support files so saving them also triggers a reload.
 (watch-file "sim/common.lisp")
 
-(set-socket-addr "[::1]:8810")
+(set-trading-addr "[::1]:8810")
+(set-ui-addr "127.0.0.1:8811")
+(set-weather-addr "[::1]:8820")
 (set-physics-tick-ms 100)
 
 ;; Bias-scale knob — EUR per (bias - 0.5) unit pushed into the MM's

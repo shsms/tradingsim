@@ -44,11 +44,11 @@ Run the server:
 By default the server loads `config.lisp` from the current directory and
 binds:
 
-| Service                  | Address              |
-| ------------------------ | -------------------- |
-| Electricity Trading gRPC | `[::1]:8810`         |
-| UI server (HTTP)         | `127.0.0.1:8811`     |
-| Weather Forecast gRPC    | `[::1]:8812`         |
+| Service                  | Default address      | Lisp defun                       |
+| ------------------------ | -------------------- | -------------------------------- |
+| Electricity Trading gRPC | `[::1]:8810`         | `(set-trading-addr "…")`         |
+| UI server (HTTP)         | `127.0.0.1:8811`     | `(set-ui-addr "…")`              |
+| Weather Forecast gRPC    | `[::1]:8820`         | `(set-weather-addr "…")`         |
 
 Point a browser at <http://127.0.0.1:8811/> to see the live order book,
 trade tape, weather panel, and scenario controls.
@@ -116,7 +116,9 @@ A minimal config:
 
 (reset-state)                          ;; clear timers from previous load
 
-(set-socket-addr "[::1]:8810")          ;; gRPC bind
+(set-trading-addr "[::1]:8810")         ;; electricity trading gRPC bind
+(set-ui-addr "127.0.0.1:8811")          ;; UI HTTP bind
+(set-weather-addr "[::1]:8820")         ;; weather forecast gRPC bind
 (set-physics-tick-ms 100)               ;; matcher loop cadence
 (set-timezone "Europe/Berlin")          ;; physics + scenario tz
 
@@ -137,7 +139,9 @@ neighbouring countries, weather locations, scenarios).
 
 | Defun                                  | Effect                                                  |
 | -------------------------------------- | ------------------------------------------------------- |
-| `(set-socket-addr "[::1]:8810")`       | gRPC bind address                                       |
+| `(set-trading-addr "[::1]:8810")`      | electricity-trading gRPC bind                           |
+| `(set-ui-addr "127.0.0.1:8811")`       | UI HTTP bind                                            |
+| `(set-weather-addr "[::1]:8820")`      | weather-forecast gRPC bind                              |
 | `(set-physics-tick-ms 100)`            | matcher loop cadence (ms)                               |
 | `(set-timezone "Europe/Berlin")`       | timezone the physics + scenario hours run in           |
 | `(set-weather-stream-cadence-seconds N)` | how often `ReceiveLiveWeatherForecast` emits          |
@@ -263,7 +267,7 @@ Global options:
 ```
   --addr ADDR           gRPC endpoint (default http://[::1]:8810)
   --ui-addr ADDR        HTTP endpoint for scenarios (default http://127.0.0.1:8811)
-  --weather-addr ADDR   gRPC endpoint for the weather service (default http://[::1]:8812)
+  --weather-addr ADDR   gRPC endpoint for the weather service (default http://[::1]:8820)
 ```
 
 Examples:

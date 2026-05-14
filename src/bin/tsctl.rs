@@ -36,8 +36,8 @@ struct Cli {
     ui_addr: String,
 
     /// gRPC endpoint for the WeatherForecastService (sibling of the
-    /// trading service; binary defaults to [::1]:8812).
-    #[arg(long, default_value = "http://[::1]:8812")]
+    /// trading service; binary defaults to [::1]:8820).
+    #[arg(long, default_value = "http://[::1]:8820")]
     weather_addr: String,
 
     #[command(subcommand)]

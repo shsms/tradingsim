@@ -48,7 +48,8 @@ LIMIT orders only, 15-min delivery duration only.
   reference, `Arc<RwLock<MarketMakerConfig>>` so lisp callbacks can
   hot-mutate demand/surplus/reference between refreshes
 - `src/lisp/mod.rs` — `Config::new(path)` evaluates a tulisp file
-  against runtime defuns: `(set-socket-addr STR)`,
+  against runtime defuns: `(set-trading-addr STR)`,
+  `(set-ui-addr STR)`, `(set-weather-addr STR)`,
   `(set-physics-tick-ms N)`, `(%make-market …)`,
   `(%make-gridpool …)`, `(%make-market-maker …)`,
   `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`,
@@ -63,7 +64,8 @@ LIMIT orders only, 15-min delivery duration only.
   public-book / scenarios (list / start / next / prev / jump / stop).
   --start accepts "next", "+N", or RFC-3339. The scenarios
   subcommands hit the HTTP UI server on --ui-addr (default 8811);
-  everything else uses the gRPC --addr (default [::1]:8810).
+  weather uses --weather-addr (default [::1]:8820); everything else
+  uses the gRPC --addr (default [::1]:8810).
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
   service
 
@@ -78,8 +80,10 @@ cargo run --bin tradingsim                # stub, exits
 cargo run --bin tsctl -- --help           # stub
 ```
 
-The server (when wired in Phase 4) defaults to `[::1]:8810` for gRPC
-and `127.0.0.1:8811` for the UI.
+The server defaults to `[::1]:8810` for the trading gRPC,
+`127.0.0.1:8811` for the UI, and `[::1]:8820` for the weather
+forecast gRPC. All three are configurable via the lisp defuns
+`(set-trading-addr)`, `(set-ui-addr)`, `(set-weather-addr)`.
 
 ## Proto submodule
 
