@@ -268,13 +268,18 @@ fn build_forecast(
 /// Deterministic uniform-in-±sigma noise. Per-feature `sigma_per_h`
 /// values are calibrated so a 24-hour-out forecast carries a
 /// meaningful uncertainty without dominating the truth:
-///   solar  30  W/m² per hour → ±720 W/m² at 24 h out
+///   solar  30  W/m² per hour, scaled by truth / 1361 so night
+///          (truth = 0) gets zero noise. Peak summer-noon truth
+///          ≈ 900 W/m² → effective σ ≈ 19.8 W/m² per horizon hour,
+///          giving ~±475 W/m² at the 24 h horizon — substantial
+///          uncertainty for sunny days, zero phantom irradiance
+///          at 22:00.
 ///   wind   0.5 m/s per hour  → ±12 m/s
 ///   temp   0.3 K per hour    → ±7.2 K
 /// Inputs feed an FNV-style seed so the same (create, valid,
 /// feature) tuple always yields the same noise — important so the
 /// same forecast appears identical to the history replay.
-fn apply_noise(
+pub(crate) fn apply_noise(
     truth: f64,
     horizon_h: f64,
     feature: ForecastFeature,
@@ -292,21 +297,98 @@ fn apply_noise(
     if sigma <= 0.0 {
         return truth;
     }
+    // Solar irradiance forecast error scales with magnitude in
+    // reality — sunny days have large absolute error, night has
+    // none. Without this scale, additive ±sigma noise generated
+    // phantom 28 W/m² readings on top of zero-truth night hours
+    // (clamped from a symmetric [-sigma, sigma] swing).
+    let truth_scale = match feature {
+        ForecastFeature::SurfaceSolarRadiationDownwards => (truth / 1361.0).clamp(0.0, 1.0),
+        _ => 1.0,
+    };
     let mut s: u64 = 0xCBF29CE484222325;
     for v in [create_secs as u64, valid_secs as u64, feature as i32 as u64] {
         s = s.wrapping_mul(0x100000001B3).wrapping_add(v);
     }
     let mut rng = SmallRng::seed_from_u64(s);
     let r: f64 = rng.gen_range(-1.0_f64..=1.0_f64);
-    let noisy = truth + r * sigma;
+    let noisy = truth + r * sigma * truth_scale;
     match feature {
         // Solar irradiance at surface is physically bounded:
         // never below zero, never above the top-of-atmosphere
-        // solar constant (1361 W/m²). Long-horizon noise was
-        // reaching ±720 W/m² on top of small daytime truths,
-        // producing both negative night values and absurd
-        // 1000+ W/m² spikes that no real sensor could report.
+        // solar constant (1361 W/m²).
         ForecastFeature::SurfaceSolarRadiationDownwards => noisy.clamp(0.0, 1361.0),
         _ => noisy,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solar_noise_is_zero_when_truth_is_zero() {
+        // 24-hour horizon, no daylight (truth = 0). Should stay
+        // exactly 0 instead of polluting with phantom irradiance.
+        let result = apply_noise(
+            0.0,
+            24.0,
+            ForecastFeature::SurfaceSolarRadiationDownwards,
+            1000,
+            2000,
+        );
+        assert_eq!(result, 0.0);
+    }
+
+    #[test]
+    fn solar_noise_scales_with_truth_magnitude() {
+        // Same horizon + seeds, only truth differs. Deviation
+        // from truth should grow with truth magnitude because σ
+        // scales with truth / 1361.
+        let dim = apply_noise(
+            50.0,
+            24.0,
+            ForecastFeature::SurfaceSolarRadiationDownwards,
+            1000,
+            2000,
+        );
+        let bright = apply_noise(
+            900.0,
+            24.0,
+            ForecastFeature::SurfaceSolarRadiationDownwards,
+            1000,
+            2000,
+        );
+        let dim_dev = (dim - 50.0).abs();
+        let bright_dev = (bright - 900.0).abs();
+        assert!(
+            bright_dev > dim_dev * 5.0,
+            "bright-day dev {bright_dev} should be much bigger than dim-day dev {dim_dev}"
+        );
+    }
+
+    #[test]
+    fn non_solar_noise_unchanged_by_truth_scale() {
+        // Temperature noise is additive — applies the same sigma
+        // regardless of truth magnitude (a forecast 24 h out has
+        // similar absolute uncertainty whether it's 270 or 295 K).
+        let cold = apply_noise(270.0, 24.0, ForecastFeature::Temperature2Metre, 1000, 2000);
+        let warm = apply_noise(295.0, 24.0, ForecastFeature::Temperature2Metre, 1000, 2000);
+        let cold_dev = (cold - 270.0).abs();
+        let warm_dev = (warm - 295.0).abs();
+        // Same seeds → same r → same |dev| within rounding.
+        assert!((cold_dev - warm_dev).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_horizon_returns_truth_exactly() {
+        let result = apply_noise(
+            800.0,
+            0.0,
+            ForecastFeature::SurfaceSolarRadiationDownwards,
+            1000,
+            2000,
+        );
+        assert_eq!(result, 800.0);
     }
 }
