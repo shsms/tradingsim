@@ -828,7 +828,13 @@ impl World {
         let taker_side = order.side;
         let taker_currency = order.currency;
 
-        let outcome = self.match_limit_in(
+        // Route through match_limit_across so the public order book
+        // stream sees ADD records when a counterparty order rests
+        // (and UPDATE records when a counterparty crosses an
+        // existing maker). match_limit_in skips the book-event
+        // emit path; that path used to make counterparty rests
+        // invisible on /ws/public-book.
+        let (fills_with_areas, _rested) = self.match_limit_across(
             key,
             IncomingLimit {
                 id: taker_id,
@@ -836,11 +842,11 @@ impl World {
                 price: order.price,
                 quantity: order.quantity,
             },
+            ExecMode::Resting,
+            taker_currency,
+            now,
         );
-        for fill in &outcome.fills {
-            // Counterparty submit currently doesn't go through the
-            // cross-area path — same-area only for now. maker_area
-            // = taker_area.
+        for (fill, maker_area) in &fills_with_areas {
             self.record_fill(
                 fill,
                 taker_id,
@@ -848,7 +854,7 @@ impl World {
                 taker_currency,
                 None,
                 order.area.clone(),
-                order.area.clone(),
+                maker_area.clone(),
                 order.period,
                 now,
             );
