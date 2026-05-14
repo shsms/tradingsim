@@ -20,7 +20,19 @@ slate; the running market-maker tasks keep going (their SharedConfig
 handles survive across reloads)."
   (dolist (tm active-timers)
     (cancel-timer tm))
-  (setq active-timers nil))
+  (setq active-timers nil)
+  (setq *fleet-seed-counter* 0))
+
+;; Monotonic counter so fleet helpers can auto-assign disjoint seed
+;; ranges per call. Reset on (reset-state) so seeds are deterministic
+;; across hot reloads.
+(unless (boundp '*fleet-seed-counter*)
+  (setq *fleet-seed-counter* 0))
+
+(defun fleet-next-seed-base ()
+  "Reserve the next 1000-id seed window and return its start."
+  (setq *fleet-seed-counter* (+ *fleet-seed-counter* 1))
+  (* *fleet-seed-counter* 1000))
 
 (defun every (&rest plist)
   "Call :call every :milliseconds ms. First firing happens after the
@@ -73,7 +85,7 @@ binary's spawn task so the fleet always covers the next-N quarters.
   :reference-slope  reference walk per quarter, EUR (default 0.10)
   :noise            random-walk noise on the reference (default 0.10)
   :follow           follow-last-trade rate (default 0.10; 0 = static)
-  :seed-base        starting seed (default 1)
+  :seed-base        starting seed (default: auto from a global counter)
 
 The band index for quarter i is `(* i n) / quarters` where n is the
 number of entries in :sizes — so a 4-element list maps to 4 evenly
@@ -87,7 +99,7 @@ spaced bands across the window."
          (ref-slope (or (plist-get plist :reference-slope) 0.10))
          (noise (or (plist-get plist :noise) 0.10))
          (follow (or (plist-get plist :follow) 0.10))
-         (seed-base (or (plist-get plist :seed-base) 1))
+         (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base)))
          (band-count (length sizes)))
     (dotimes (i quarters)
       (let* ((band (min (- band-count 1) (/ (* i band-count) quarters)))
@@ -117,14 +129,14 @@ P is the length of :sizes (one profile per entry). Names follow
                 (default '(500 1500 3500 8000));
                 effective rate = base × (quarter + 1)
   :side-bias    side bias for every profile (default 0.5)
-  :seed-base    starting seed (default 10000)"
+  :seed-base    starting seed (default: auto from a global counter)"
   (let* ((area (plist-get plist :area))
          (prefix (plist-get plist :prefix))
          (quarters (or (plist-get plist :quarters) 48))
          (sizes (or (plist-get plist :sizes) '(0.2 0.5 1.0 1.5)))
          (rates-base (or (plist-get plist :rates-base) '(500 1500 3500 8000)))
          (side-bias (or (plist-get plist :side-bias) 0.5))
-         (seed-base (or (plist-get plist :seed-base) 10000))
+         (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base)))
          (profiles (length sizes)))
     (dotimes (i quarters)
       (dotimes (p profiles)

@@ -42,17 +42,14 @@
 
 ;; Per-area MM + aggressor fleets. Each area gets 48 MMs (one per
 ;; quarter, rolling forward) and 4 × 48 = 192 aggressors. Seeds are
-;; offset by area index so RNG streams don't collide across regions.
-(dotimes (a 4)
-  (let ((entry (nth a areas)))
-    (mm-fleet :area (car entry)
-              :prefix (cadr entry)
-              :sizes (caddr entry)
-              :seed-base (+ 1 (* a 1000)))
-    (aggressor-fleet :area (car entry)
-                     :prefix (cadr entry)
-                     :sizes (cadddr entry)
-                     :seed-base (+ 10000 (* a 100000)))))
+;; auto-assigned per fleet call so RNG streams don't collide.
+(dolist (entry areas)
+  (mm-fleet :area (car entry)
+            :prefix (cadr entry)
+            :sizes (caddr entry))
+  (aggressor-fleet :area (car entry)
+                   :prefix (cadr entry)
+                   :sizes (cadddr entry)))
 
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
