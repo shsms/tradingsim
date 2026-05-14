@@ -1115,79 +1115,113 @@ lists what mechanism / scenario surfaces it.
 
 ** Implementation order
 
-Suggested commit sequence (~100 lines each):
+Suggested commit sequence (~100 lines each). [X] = landed, [ ] =
+pending.
 
-1. =sim/curve.rs= — ForwardCurve type, default table, hour-of-day
-   interpolation. Standalone module, no callers yet.
+1. [X] =sim/curve.rs= — ForwardCurve type, default table,
+   hour-of-day interpolation. (commit 2b63417)
 
-2. MM uses forward-curve reference at first quote
-   - Spawn task seeds MM reference from forward_curve(period.hour)
-   - Drop the hard-coded `85 + 0.10 * offset` from config.lisp
-   - Verify across all 192 MMs we see a 80–150 EUR range at boot
+2. [X] MM uses forward-curve reference at first quote. (commit
+   3732d32 combined with step 3)
 
-3. Rolling task pulls reference from curve each tick
-   - As MM rolls forward, reference tracks delivery hour
-   - Bias tick still applies on top
-   - Verify q0 reference drops from morning into belly across a
-     real-time hour
+3. [X] Rolling task pulls reference from curve each tick.
+   (commit 3732d32)
 
-4. Lisp =(set-forward-curve-base HOUR PRICE)= setter
-   - Per-hour overrides for the default curve
-   - Scenarios use this to bump entire curve
+4. [X] Lisp =(set-forward-curve-base HOUR PRICE)= setter.
+   (commit c447096)
 
-5. =sim/weather.rs= — WeatherState struct + default model
-   - Per-location lat/lon, solar/wind/temp
-   - One-minute tick advances state
+5. [X] =sim/weather.rs= — WeatherState struct + default model.
+   (commit 39350e9; single global state for now, per-location
+   defer to a follow-up)
 
-6. =(%make-weather-location …)= lisp defun
-   - Each area gets a location
-   - Default cloud_cover / mean_wind / temp configurable
+6. [X] Lisp weather setters: =(set-weather-cloud-cover)=,
+   =(set-weather-mean-wind)=, =(set-weather-direction)=,
+   =(set-weather-temperature-base)=. (commit 38dc9ca)
 
-7. Forward curve consumes weather state
-   - Reference price = base[hour] - solar_coef × max(0, solar - 200)
-                                  - wind_coef × max(0, wind - 5)
-                                  + load_coef × heating_demand(T)
-   - solar_coef etc. tuneable per location
+7. [X] Forward curve consumes weather state. =effective_ref=
+   helper in scenarios.rs combines base + solar/wind/load coefs
+   × weather state. (commit 38dc9ca)
 
-8. WeatherForecastService gRPC impl
-   - tonic service on :8812
-   - Live stream emits LocationForecast every minute
-   - Historical stream replays from a ring buffer
+8. [X] WeatherForecastService gRPC impl on =[::1]:8812=. Live
+   stream emits 24 hourly forecast points per frame, every 60 s.
+   Historical RPC is a placeholder; step 9 fills it. (commit
+   38925da; e2e tests in =tests/weather_e2e.rs=)
 
-9. Forecast noise + revisions
-   - Forecast = truth + noise(horizon)
-   - Re-issue every 6 sim-hours
+9. [ ] Forecast noise + revisions
+   - Forecast value = truth + noise(horizon) where noise scales
+     with hours-from-create_time (longer horizon, more noise).
+   - Live stream emits a new forecast every minute; each carries
+     a unique create_time so successive emits are "revisions".
+   - Historical stream replays previously-issued forecasts from
+     a ring buffer (e.g. last 24 h of emissions).
+   - ~80 lines + 1–2 e2e tests.
 
-10. New edge-case scenarios
-    - scarcity-spike, sell-side-absent, regional-crisis,
-      weather-shift, day-ahead-print
-    - One commit per scenario; each ~30 lines of lisp + smoke test
+10. [ ] New edge-case scenarios
+    - =scarcity-spike=, =sell-side-absent=, =regional-crisis=,
+      =weather-shift=, =day-ahead-print=. One commit per
+      scenario (~30 lines of lisp + smoke test each).
 
-11. Recall + suspension lisp defuns
-    - =(recall-order ID)=, =(suspend-market)=, =(resume-market)=
-    - SubmitError::SuspendedMarket variant + gRPC mapping
-    - ~50 lines + tests
+11. [ ] Recall + suspension lisp defuns
+    - =(recall-order ID)= force-cancels with Reason::Recall.
+    - =(suspend-market)= / =(resume-market)= flip a global
+      flag; submit paths reject with SubmitError::SuspendedMarket.
+    - gRPC error mapping → FailedPrecondition (or AlreadyExists?
+      pick the closest match). ~80 lines + tests.
 
-12. Optional: SIDC coupling capacity limits
-    - =(%make-coupling :areas ... :capacity 500)=
-    - Matcher respects per-edge capacity, edges saturate
-    - Bigger commit (~150 lines, matcher change)
+12. [ ] International areas + cross-border gates
+    - Add markets for FR, NL, BE, AT (initially); EIC codes per
+      ENTSO-E. EUR for all (real CH uses CHF, but keeping a
+      single currency keeps the matcher simple).
+    - Each international area gets a smaller MM fleet (~24 MMs
+      covering the next 6 h) + a single aggressor profile —
+      enough to demonstrate cross-border price action without
+      doubling the task count.
+    - Couplings DE-tn / am / hz / bw ↔ each international area
+      (4 × 4 = 16 new couplings).
+    - CouplingSpec gains =gate_offset_seconds= (default 0). For
+      cross-border couplings, set 3600 (60 min before delivery —
+      the real SIDC cross-border gate). Within-Germany couplings
+      stay at 0 (they're really within the DE-LU bidding zone).
+    - matching::match_limit_across consults the per-coupling gate
+      offset: skip a coupling when =now > period.start -
+      gate_offset=. The contract is still tradeable inside the
+      zone after that point; only the cross-border route closes.
+    - ~150 lines (matcher change + config restructuring) +
+      e2e test that confirms a German bid against a French ask
+      stops matching 60 min before delivery while the German
+      within-zone match continues.
 
-13. Optional: per-gridpool self-trade-policy
-    - =(%make-gridpool … :self-trade-policy 'reject)=
-    - Cancel-resting / reject-aggressive options later
+13. [ ] Optional: SIDC coupling capacity limits
+    - =(%make-coupling :areas (…) :capacity 500)= caps the MWh
+      that can flow through the edge for a single contract.
+    - Matcher tracks per-edge fill across the matching session;
+      stops crossing once the edge saturates.
+    - ~150 lines (matcher change).
 
-14. Optional: iceberg orders
-    - display_quantity ≪ quantity, slice-refresh on consume
-    - ~100-150 lines, matcher change
+14. [ ] Optional: per-gridpool self-trade-policy
+    - =(%make-gridpool … :self-trade-policy 'reject)= rejects an
+      aggressive order if it would match its own gridpool's
+      resting order. =cancel-resting= option later.
+    - ~50 lines + tests.
+
+15. Deferred: iceberg orders. Per user request 2026-05-14, this
+    is parked; revisit once steps 9–14 are in.
 
 *** Sequencing note
 
-Steps 1-4 are pure ref-pricing and unlock most realism without
-touching weather. Steps 5-9 add weather (the user's explicit
-ask). Steps 10-11 add the scenarios + control surfaces. Steps
-12-14 are bonus — they unlock specific edge-case tests but
-aren't on the critical path.
+Steps 1–4 (curve) and 5–8 (weather) unlocked most of the realism;
+the live trade tape now spans 20 → 156 EUR across the day under
+the default config (vs the prior 80–95 EUR everywhere). Remaining
+steps:
+
+- 9 makes the weather forecast model the *uncertainty* clients
+  see, which is what their re-quote logic responds to.
+- 10–11 add operator-facing levers to trigger specific edge
+  cases.
+- 12 adds the cross-border dimension: international areas,
+  matching across them, and the earlier gate-closure that real
+  SIDC enforces between zones.
+- 13–14 are optional and surface bonus testing edges.
 
 Calibration check after each step: boot the sim, run for 30 s
 under each canned scenario, eyeball the trade tape against the
