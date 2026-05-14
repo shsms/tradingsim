@@ -34,11 +34,18 @@ async fn spawn_server() -> String {
     let mut markets = MarketRegistry::new();
     markets.insert(MarketRules::de_lu());
     let mut world = World::new(markets);
-    world.register_gridpool(Gridpool::new(
-        GridpoolId(1),
-        "test",
-        vec![Area::eic("10Y1001A1001A82H")],
-    ));
+    // Several tests cross a buy + sell from the same pool to
+    // exercise the matcher / trade streams. The runtime default
+    // is now Reject; opt back into Allow here so those tests
+    // keep their self-cross setup.
+    world.register_gridpool(
+        Gridpool::new(
+            GridpoolId(1),
+            "test",
+            vec![Area::eic("10Y1001A1001A82H")],
+        )
+        .with_self_trade_policy(tradingsim::sim::gridpool::SelfTradePolicy::Allow),
+    );
     let world = Arc::new(RwLock::new(world));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

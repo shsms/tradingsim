@@ -251,6 +251,18 @@ pub struct AggressorConfig {
     /// from the MM's demand/surplus so an aggressor can simulate
     /// asymmetric trader flow without changing the MM's quote shape.
     pub side_bias: f64,
+    /// Fair-value anchor — what the aggressor thinks the contract
+    /// is worth. The bias tick writes this each cycle from
+    /// forward_curve + weather + scenario, same way it writes
+    /// MM reference_baseline. Aggressor fires at
+    /// reference_price ± max_slippage so a stale resting order
+    /// 100 EUR off market can't pull it away from sensible price.
+    pub reference_price: Decimal,
+    /// Maximum slippage (EUR) from reference the aggressor accepts.
+    /// 5.0 covers the MM's typical 0.40 half-spread plus a few
+    /// EUR of natural intraday wandering, and stays well under
+    /// what a runaway resting order needs to escape detection.
+    pub max_slippage: Decimal,
 }
 
 impl AggressorConfig {
@@ -261,6 +273,8 @@ impl AggressorConfig {
             currency: Currency::Eur,
             size: dec!(0.2),
             side_bias: 0.5,
+            reference_price: dec!(85.00),
+            max_slippage: dec!(5.00),
         }
     }
 }
@@ -288,9 +302,14 @@ impl Aggressor {
         self.config.clone()
     }
 
-    /// Pick a side (random with bias), look at the best opposite price
-    /// on the book, submit a marketable limit order at that price.
-    /// No-op when the opposite side is empty.
+    /// Pick a side (random with bias), check the book's best
+    /// opposite is within the aggressor's slippage band of its
+    /// reference, and submit an IOC limit at reference ± slippage.
+    /// No-op when the opposite side is empty or only carries
+    /// orders that are too far off fair value (previously the
+    /// aggressor would happily lift a 173 EUR resting ask while
+    /// it thought the contract was worth ~80 — IOC at a sane
+    /// limit price stops that).
     pub fn fire(&mut self, world: &mut World, now: DateTime<Utc>) {
         let cfg = self.config.read().clone();
         let side = if self.rng.gen_range(0.0..=1.0_f64) < cfg.side_bias {
@@ -302,14 +321,33 @@ impl Aggressor {
             area: cfg.area.clone(),
             period: cfg.period,
         };
-        let target_price = match world.book(&key).and_then(|b| match side {
-            Side::Buy => b.best_ask(),
-            Side::Sell => b.best_bid(),
-            _ => None,
-        }) {
-            Some(p) => p,
-            None => return,
+        let limit_price = match side {
+            Side::Buy => cfg.reference_price + cfg.max_slippage,
+            Side::Sell => cfg.reference_price - cfg.max_slippage,
+            Side::Unspecified => return,
         };
+        let limit_price = snap_to_tick(limit_price, dec!(0.01)).max(dec!(0.01));
+        // Bail if the book has nothing on the opposite side, or
+        // if its best price is outside the slippage band — the
+        // aggressor would rather not trade than lift a stale
+        // far-off order.
+        let crosses = world
+            .book(&key)
+            .and_then(|b| match side {
+                Side::Buy => b.best_ask(),
+                Side::Sell => b.best_bid(),
+                _ => None,
+            })
+            .map(|p| match side {
+                Side::Buy => p <= limit_price,
+                Side::Sell => p >= limit_price,
+                _ => false,
+            })
+            .unwrap_or(false);
+        if !crosses {
+            return;
+        }
+        let target_price = limit_price;
         // Grow per-fire size as the gate approaches: 1× at ≥2 h
         // out, ramping to 2× right at gate (gate_close_scale's
         // 1→3 ramp, halved). Combined with the rate ramp in the
@@ -334,7 +372,11 @@ impl Aggressor {
             stop_price: None,
             peak_price_delta: None,
             display_quantity: None,
-            execution_option: None,
+            // IOC — take what crosses at the slippage-bounded
+            // limit; kill the rest. Stops aggressors from
+            // accumulating resting residuals on the book that
+            // distort the bid/ask shape on subsequent fires.
+            execution_option: Some(crate::sim::order::ExecutionOption::Ioc),
             valid_until: None,
             payload: None,
             tag: None,
@@ -502,6 +544,61 @@ mod tests {
             .unwrap()
             .depth_at(Side::Sell, ask_before);
         assert_eq!(depth, dec!(0.5));
+    }
+
+    #[test]
+    fn aggressor_skips_when_best_opposite_exceeds_slippage() {
+        // Regression for: user places a sell at 173 EUR while the
+        // MM reference (and aggressor fair value) is ~80 EUR.
+        // With size > MM depth, an aggressor previously depleted
+        // the MM ask and then lifted the user's 173 sell on its
+        // next fire because target_price tracked best_ask
+        // blindly. The slippage clamp now stops that.
+        let (mut world, mm_cfg) = setup_world();
+        let key = crate::sim::world::ContractKey {
+            area: mm_cfg.area.clone(),
+            period: mm_cfg.period,
+        };
+        // Seed a far-off-market sell. Two crossing counterparty
+        // orders place it without anyone immediately taking it.
+        let stale_sell = Order {
+            area: mm_cfg.area.clone(),
+            period: mm_cfg.period,
+            order_type: OrderType::Limit,
+            side: Side::Sell,
+            price: dec!(173.00),
+            currency: Currency::Eur,
+            quantity: dec!(10.0),
+            stop_price: None,
+            peak_price_delta: None,
+            display_quantity: None,
+            execution_option: None,
+            valid_until: None,
+            payload: None,
+            tag: None,
+        };
+        world
+            .submit_counterparty_order(stale_sell, t0())
+            .expect("place stale sell");
+        let trades_before = world.public_trade_history().len();
+
+        // Aggressor with reference 80 + slippage 5 sees a 173 ask
+        // and refuses to fire — the crossing check fails.
+        let ag_cfg = AggressorConfig {
+            side_bias: 1.0, // always buy
+            size: dec!(0.5),
+            reference_price: dec!(80.00),
+            max_slippage: dec!(5.00),
+            ..AggressorConfig::de_lu_default(mm_cfg.area.clone(), mm_cfg.period)
+        };
+        let mut ag = Aggressor::new(ag_cfg, 0);
+        for _ in 0..10 {
+            ag.fire(&mut world, t0());
+        }
+        // No trades happened; the 173 sell still sits untouched.
+        assert_eq!(world.public_trade_history().len(), trades_before);
+        let book = world.book(&key).unwrap();
+        assert_eq!(book.depth_at(Side::Sell, dec!(173.00)), dec!(10.0));
     }
 
     #[test]

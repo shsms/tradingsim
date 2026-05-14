@@ -371,7 +371,21 @@ fn apply_biases(
         .clamp(0.0, 1.0)
     };
     for view in aggressors {
-        view.shared_config.write().side_bias = effective_for(view.quarter_offset);
+        let area_code = view.shared_config.read().area.code.clone();
+        let loc = weather.for_area(&area_code);
+        let new_ref = effective_ref(
+            curve,
+            loc,
+            period_hour_for(view.quarter_offset),
+            day_of_year,
+        );
+        let mut cfg = view.shared_config.write();
+        cfg.side_bias = effective_for(view.quarter_offset);
+        // Same fair-value anchor the MM uses for its baseline.
+        // Without this, the aggressor's slippage clamp would
+        // still be measuring off the stale 85 EUR boot seed and
+        // miss real curve / weather drift.
+        cfg.reference_price = new_ref;
     }
     for view in mms {
         let bias = effective_for(view.quarter_offset);

@@ -811,6 +811,11 @@ fn register_aggressors(
                 currency: Currency::Eur,
                 size: a.size.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.2)),
                 side_bias: a.side_bias.unwrap_or(0.5).clamp(0.0, 1.0),
+                // Seed the reference at the conventional EUR
+                // anchor; the bias tick will replace it within
+                // a few seconds based on curve + weather.
+                reference_price: f64_to_dec(85.00),
+                max_slippage: f64_to_dec(5.00),
             };
             let seed = a.seed.unwrap_or(1) as u64;
             let rate_ms = a.rate_ms.unwrap_or(1000).max(50) as u64;
@@ -974,8 +979,8 @@ fn register_gridpools(ctx: &mut TulispContext, gridpools: Arc<Mutex<Vec<Gridpool
                 ));
             }
             let policy = match a.self_trade_policy.as_deref() {
-                None | Some("allow") => SelfTradePolicy::Allow,
-                Some("reject") => SelfTradePolicy::Reject,
+                None | Some("reject") => SelfTradePolicy::Reject,
+                Some("allow") => SelfTradePolicy::Allow,
                 Some(other) => {
                     return Err(Error::os_error(format!(
                         "make-gridpool: :self-trade-policy must be \"allow\" or \"reject\"; got {other:?}"
@@ -1328,13 +1333,16 @@ mod tests {
             r#"
             (%make-gridpool :id 1 :areas '("10Y1001A1001A82H"))
             (%make-gridpool :id 2 :areas '("10Y1001A1001A82H")
-                            :self-trade-policy "reject")
+                            :self-trade-policy "allow")
             "#,
         );
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         let gps = cfg.gridpools();
-        assert_eq!(gps[0].self_trade_policy, SelfTradePolicy::Allow);
-        assert_eq!(gps[1].self_trade_policy, SelfTradePolicy::Reject);
+        // Default is Reject — sensible for a single-trader sim
+        // (avoids surprise self-fills). :self-trade-policy "allow"
+        // opts back in to permissive crossing.
+        assert_eq!(gps[0].self_trade_policy, SelfTradePolicy::Reject);
+        assert_eq!(gps[1].self_trade_policy, SelfTradePolicy::Allow);
     }
 
     #[tokio::test]

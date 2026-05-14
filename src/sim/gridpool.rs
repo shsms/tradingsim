@@ -19,18 +19,20 @@ use crate::sim::trade::Trade;
 /// What the matcher does when an incoming aggressive order would
 /// cross a resting order owned by the same gridpool.
 ///
-/// - `Allow` (default): the order matches normally. Same as
-///   pre-policy behaviour, kept as the default so existing
-///   tests / configs don't need updating.
-/// - `Reject`: pre-trade check rejects the incoming order before
-///   any state mutates; the gRPC layer maps this to
-///   `FailedPrecondition`. This mirrors the simplest STPF
-///   variant: any prospective self-trade kills the new order.
+/// - `Reject` (default): pre-trade check rejects the incoming
+///   order before any state mutates; the gRPC layer maps this
+///   to `FailedPrecondition`. Mirrors the simplest STPF
+///   variant — any prospective self-trade kills the new order.
+///   Sensible default for a single-trader sim: avoids the
+///   surprise of e.g. a buy at 50 filling against your own
+///   sell at 50 just because both rested on the same pool.
+/// - `Allow`: the order matches normally; whoever's on the
+///   other side, including yourself, is a counterparty.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SelfTradePolicy {
     #[default]
-    Allow,
     Reject,
+    Allow,
 }
 
 #[derive(Clone, Debug)]
@@ -49,7 +51,7 @@ impl Gridpool {
             id,
             name: name.into(),
             areas,
-            self_trade_policy: SelfTradePolicy::Allow,
+            self_trade_policy: SelfTradePolicy::Reject,
             orders: HashMap::new(),
             trades: Vec::new(),
         }

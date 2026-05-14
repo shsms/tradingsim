@@ -1581,11 +1581,19 @@ mod tests {
     }
 
     fn setup_world_with_pool() -> (World, GridpoolId) {
+        // Tests built on this fixture exercise self-crossing within
+        // a single pool (buy + sell from gp #1 filling each other).
+        // The runtime default flipped to Reject, so opt back into
+        // Allow here to keep those tests exercising the matcher
+        // mechanics they were written for.
         let mut markets = MarketRegistry::new();
         markets.insert(MarketRules::de_lu());
         let mut w = World::new(markets);
         let area = Area::eic("10Y1001A1001A82H");
-        w.register_gridpool(Gridpool::new(GridpoolId(1), "test", vec![area]));
+        w.register_gridpool(
+            Gridpool::new(GridpoolId(1), "test", vec![area])
+                .with_self_trade_policy(crate::sim::gridpool::SelfTradePolicy::Allow),
+        );
         (w, GridpoolId(1))
     }
 
