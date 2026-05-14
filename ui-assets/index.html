@@ -241,7 +241,12 @@ td { padding: 2px 6px; }
 }
 .stage-list-row {
   display: grid;
-  grid-template-columns: 14px 14px minmax(0, 1fr) 92px 86px 90px;
+  /* Name shrinks to its content, weather gets the room — the
+     scenario stage names are usually short ("overnight", "deep
+     belly") so a fixed 120 px is plenty, and the weather chips
+     ("☁ 0.10 · 3.0 m/s · 14 °C") want >= 160 px to avoid the
+     row scrolling sideways. */
+  grid-template-columns: 14px 14px 120px 92px 86px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   padding: 2px 4px;
@@ -253,6 +258,9 @@ td { padding: 2px 6px; }
   font-size: var(--fs-mini);
   text-align: right;
   white-space: nowrap;
+  /* Visual breathing room between cloud / wind / temp; the
+     entries are separated by " · " from the JS side. */
+  letter-spacing: 0.01em;
 }
 .stage-list-row.current .stage-weather { color: var(--bg); }
 .stage-list-row:hover { background: var(--panel-2); }
@@ -559,9 +567,7 @@ td { padding: 2px 6px; }
 }
 .contract-pill:hover { filter: brightness(1.1); }
 
-/* Hover affordance for the rows / headers that drive drill-down. */
-.ladder-head { cursor: pointer; }
-.ladder-head:hover { color: var(--accent); }
+/* Hover affordance for trade rows that drive drill-down. */
 #trades tr { cursor: pointer; }
 #trades tr:hover td { background: var(--panel-2); }
 
@@ -751,7 +757,12 @@ td { padding: 2px 6px; }
 
   <!-- Tier E: trade tape (full width, bottom) -->
   <div class="panel panel-trades">
-    <h2>Public trades (last 50)</h2>
+    <div class="book-head">
+      <h2>Public trades — last 50</h2>
+      <span class="muted">delivery
+        <select id="trades-period-select" onchange="selectTradesPeriod(this.value)"></select>
+      </span>
+    </div>
     <div class="scroll">
       <table>
         <thead><tr>
@@ -1103,10 +1114,10 @@ function renderScenarioActive(s, safe) {
     const time = `${fmtStageHour(st.hour_from)}–${fmtStageHour(st.hour_to)}`;
     const bias = `${st.bias_from.toFixed(2)} → ${st.bias_to.toFixed(2)}`;
     const weatherParts = [];
-    if (st.cloud_cover != null) weatherParts.push(`☁${st.cloud_cover.toFixed(2)}`);
-    if (st.mean_wind != null) weatherParts.push(`${st.mean_wind.toFixed(1)}m/s`);
-    if (st.temperature_base != null) weatherParts.push(`${Math.round(st.temperature_base - 273.15)}°C`);
-    const weather = weatherParts.join(' ');
+    if (st.cloud_cover != null) weatherParts.push(`☁ ${st.cloud_cover.toFixed(2)}`);
+    if (st.mean_wind != null) weatherParts.push(`${st.mean_wind.toFixed(1)} m/s`);
+    if (st.temperature_base != null) weatherParts.push(`${Math.round(st.temperature_base - 273.15)} °C`);
+    const weather = weatherParts.join(' · ');
     return `<div class="${cls}" onclick="scenarioJump('${safe}', ${i})" title="${escapeHtml(st.name)}">
       <span class="stage-num">${i + 1}</span>
       <span class="stage-state">${state}</span>
@@ -1311,22 +1322,7 @@ function openTradesWs() {
     const t = JSON.parse(e.data);
     recordTrade(t);
     recordTradePrice(t);
-    const tbody = document.getElementById('trades');
-    const row = document.createElement('tr');
-    row.dataset.buyArea = t.buy_area;
-    row.dataset.sellArea = t.sell_area;
-    row.dataset.period = t.period;
-    row.onclick = () => setPeriodFilter(t.period);
-    const area = t.buy_area === t.sell_area
-      ? `<span class="area-badge">${areaTag(t.buy_area)}</span>`
-      : `<span class="area-badge">${areaTag(t.buy_area)}</span><span class="area-cross">→</span><span class="area-badge">${areaTag(t.sell_area)}</span>`;
-    row.innerHTML = `<td>#${t.id}</td><td>${t.quantity}</td><td>${t.price}</td>` +
-      `<td>${area}</td>` +
-      `<td class="muted">${shortTime(t.period)}</td>` +
-      `<td class="muted">${shortTime(t.execution_time)}</td>`;
-    if (!tradePassesFilter(t)) row.style.display = 'none';
-    tbody.insertBefore(row, tbody.firstChild);
-    while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+    pushTrade(t);
   };
   ws.onclose = () => {
     setPill('pill-trades', 'down', 'trades');
@@ -1370,14 +1366,14 @@ function setPeriodFilter(period) {
   bookContract.period = period;
   renderPeriodPill();
   rerenderBook();
-  applyFilterToTrades();
+  rerenderTrades();
 }
 
 function clearPeriodFilter() {
   periodFilter = null;
   renderPeriodPill();
   rerenderBook();
-  applyFilterToTrades();
+  rerenderTrades();
 }
 
 function renderPeriodPill() {
@@ -1397,7 +1393,7 @@ function toggleArea(code) {
   else activeAreas.add(code);
   renderFilterChips();
   rerenderBook();
-  applyFilterToTrades();
+  rerenderTrades();
   rerenderWeather();
 }
 
@@ -1410,7 +1406,7 @@ function toggleNeighbours() {
   }
   renderFilterChips();
   rerenderBook();
-  applyFilterToTrades();
+  rerenderTrades();
   rerenderWeather();
 }
 
@@ -1425,23 +1421,74 @@ function renderFilterChips() {
   el.innerHTML = chips + nb;
 }
 
-function tradePassesFilter(t) {
+// Public-trade tape — JS-side ring of the last 500 prints. Each
+// rerender takes the 50 latest matching the current filters
+// (area chips, focused-period pill, trades-delivery dropdown) so
+// "last 50" stays true regardless of which combination is on.
+const TRADES_BUFFER_CAP = 500;
+const TRADES_DISPLAY_CAP = 50;
+const tradesBuffer = [];
+let tradesDirty = false;
+let tradesPeriodFilter = null; // null = all deliveries
+
+function pushTrade(t) {
+  tradesBuffer.unshift(t);
+  if (tradesBuffer.length > TRADES_BUFFER_CAP) {
+    tradesBuffer.length = TRADES_BUFFER_CAP;
+  }
+  tradesDirty = true;
+}
+
+function selectTradesPeriod(value) {
+  tradesPeriodFilter = value === 'all' ? null : value;
+  blurActive();
+  rerenderTrades();
+}
+
+function tradeMatchesActiveFilters(t) {
   if (periodFilter && t.period !== periodFilter) return false;
+  if (tradesPeriodFilter && t.period !== tradesPeriodFilter) return false;
   return activeAreas.has(t.buy_area) || activeAreas.has(t.sell_area);
 }
 
-function rowPassesFilter(buy, sell, period) {
-  if (periodFilter && period !== periodFilter) return false;
-  return activeAreas.has(buy) || activeAreas.has(sell);
+function renderTradeRow(t) {
+  const area = t.buy_area === t.sell_area
+    ? `<span class="area-badge">${areaTag(t.buy_area)}</span>`
+    : `<span class="area-badge">${areaTag(t.buy_area)}</span><span class="area-cross">→</span><span class="area-badge">${areaTag(t.sell_area)}</span>`;
+  return `<tr onclick="setPeriodFilter('${String(t.period).replace(/'/g, '%27')}')">` +
+    `<td>#${t.id}</td><td>${t.quantity}</td><td>${t.price}</td>` +
+    `<td>${area}</td>` +
+    `<td class="muted">${shortTime(t.period)}</td>` +
+    `<td class="muted">${shortTime(t.execution_time)}</td>` +
+    `</tr>`;
 }
 
-function applyFilterToTrades() {
+function rerenderTrades() {
   const tbody = document.getElementById('trades');
   if (!tbody) return;
-  for (const tr of tbody.children) {
-    const visible = rowPassesFilter(tr.dataset.buyArea, tr.dataset.sellArea, tr.dataset.period);
-    tr.style.display = visible ? '' : 'none';
+  // Keep the delivery dropdown's options in sync with whatever
+  // periods we've seen in the buffer; skip while the user is
+  // focused on the <select> so it doesn't snap shut.
+  const sel = document.getElementById('trades-period-select');
+  if (sel && document.activeElement !== sel) {
+    const periods = new Set();
+    for (const t of tradesBuffer) periods.add(t.period);
+    const sorted = Array.from(periods).sort();
+    const opts = ['<option value="all">all deliveries</option>']
+      .concat(sorted.map(p => {
+        const sel = p === tradesPeriodFilter ? ' selected' : '';
+        return `<option value="${p}"${sel}>${shortTime(p)}</option>`;
+      }))
+      .join('');
+    sel.innerHTML = opts;
   }
+  const visible = [];
+  for (const t of tradesBuffer) {
+    if (!tradeMatchesActiveFilters(t)) continue;
+    visible.push(t);
+    if (visible.length === TRADES_DISPLAY_CAP) break;
+  }
+  tbody.innerHTML = visible.map(renderTradeRow).join('');
 }
 
 const TOP_LEVELS = 3;
@@ -1507,10 +1554,9 @@ function renderLadder(g) {
     ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">collapse</div>`
     : '';
 
-  const periodAttr = String(g.period).replace(/'/g, '%27');
   return `
     <div class="ladder">
-      <div class="ladder-head" onclick="setPeriodFilter('${periodAttr}')" title="focus this delivery start across all areas">
+      <div class="ladder-head">
         <span><span class="area-badge">${areaTag(g.area)}</span> ${shortTime(g.period)}</span>
         <span class="midprice">mid ${mid}</span>
       </div>
@@ -1660,6 +1706,10 @@ setInterval(() => {
   if (bookDirty) {
     bookDirty = false;
     rerenderBook();
+  }
+  if (tradesDirty) {
+    tradesDirty = false;
+    rerenderTrades();
   }
 }, 200);
 
