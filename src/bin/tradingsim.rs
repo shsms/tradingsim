@@ -150,8 +150,14 @@ async fn main() {
     // Apply lisp-declared SIDC couplings before any orders flow.
     if let Some(c) = lisp_config.as_ref() {
         for cs in c.couplings() {
-            log::info!("Coupling: {} <-> {}", cs.area_a, cs.area_b);
-            world.add_coupling(Area::eic(cs.area_a), Area::eic(cs.area_b));
+            let offset = std::time::Duration::from_secs(cs.gate_offset_seconds.max(0) as u64);
+            log::info!(
+                "Coupling: {} <-> {} (gate offset {} s)",
+                cs.area_a,
+                cs.area_b,
+                offset.as_secs()
+            );
+            world.add_coupling(Area::eic(cs.area_a), Area::eic(cs.area_b), offset);
         }
         // Share the lisp-side market-suspended flag so
         // `(suspend-market)` actually rejects future submissions.

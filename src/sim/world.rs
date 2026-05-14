@@ -52,15 +52,13 @@ pub struct ContractKey {
 pub struct World {
     markets: MarketRegistry,
     gridpools: GridpoolRegistry,
-    /// SIDC-style couplings between delivery areas. Symmetric set:
-    /// if A→B is here, B→A is too. An incoming order in area A
-    /// can match resting orders in any area in `couplings[A]` at
-    /// the same delivery period; the resulting PublicTrade carries
-    /// distinct buy_delivery_area / sell_delivery_area.
-    ///
-    /// Capacity tracking is deferred; today couplings are
-    /// effectively unbounded.
-    couplings: HashMap<Area, std::collections::HashSet<Area>>,
+    /// SIDC-style couplings between delivery areas. Symmetric:
+    /// if A→B is here, B→A is too. The inner `Duration` is the
+    /// cross-border gate offset — a coupling stops carrying flow
+    /// `gate_offset` before the contract's delivery start. Zero
+    /// (intra-zone) means the coupling stays open until the
+    /// regular gate at delivery time.
+    couplings: HashMap<Area, HashMap<Area, std::time::Duration>>,
     /// Per-gridpool fan-out for OrderDetail updates. ReceiveGridpoolOrdersStream
     /// subscribes once and applies the request filter per item.
     gridpool_order_tx: HashMap<GridpoolId, broadcast::Sender<OrderDetail>>,
@@ -201,20 +199,31 @@ impl World {
     }
 
     /// Register a symmetric SIDC-style coupling between two
-    /// delivery areas. Subsequent orders in either area can match
-    /// against the other at the same delivery period.
-    pub fn add_coupling(&mut self, a: Area, b: Area) {
+    /// delivery areas. `gate_offset` is the lead time before
+    /// delivery at which the coupling closes; pass `Duration::ZERO`
+    /// for intra-zone couplings (close at delivery start) and e.g.
+    /// 60 min for cross-border SIDC.
+    pub fn add_coupling(
+        &mut self,
+        a: Area,
+        b: Area,
+        gate_offset: std::time::Duration,
+    ) {
         if a == b {
             return;
         }
-        self.couplings.entry(a.clone()).or_default().insert(b.clone());
-        self.couplings.entry(b).or_default().insert(a);
+        self.couplings
+            .entry(a.clone())
+            .or_default()
+            .insert(b.clone(), gate_offset);
+        self.couplings.entry(b).or_default().insert(a, gate_offset);
     }
 
-    pub fn coupled_areas(&self, area: &Area) -> Vec<Area> {
+    /// Coupled areas with their respective gate-offset durations.
+    pub fn coupled_areas(&self, area: &Area) -> Vec<(Area, std::time::Duration)> {
         self.couplings
             .get(area)
-            .map(|set| set.iter().cloned().collect())
+            .map(|map| map.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default()
     }
 
@@ -464,7 +473,17 @@ impl World {
         now: DateTime<Utc>,
     ) -> (Vec<(crate::sim::matching::Fill, Area)>, Option<crate::sim::book::Resting>) {
         let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
-        for other in self.coupled_areas(&taker_key.area) {
+        for (other, gate_offset) in self.coupled_areas(&taker_key.area) {
+            // Cross-border gate: the coupling stops carrying flow
+            // `gate_offset` before delivery start. Intra-zone uses
+            // ZERO, so this filter is a no-op for those edges.
+            if gate_offset > std::time::Duration::ZERO {
+                let cutoff = taker_key.period.start
+                    - chrono::Duration::from_std(gate_offset).unwrap_or_default();
+                if now >= cutoff {
+                    continue;
+                }
+            }
             keys.push(ContractKey {
                 area: other,
                 period: taker_key.period,
@@ -1849,7 +1868,7 @@ mod tests {
         let mut w = World::new(markets);
         let de = Area::eic("10Y1001A1001A82H");
         let fr = Area::eic("10YFR-RTE------C");
-        w.add_coupling(de.clone(), fr.clone());
+        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::ZERO);
         w.register_gridpool(Gridpool::new(
             GridpoolId(1),
             "de",
@@ -1876,6 +1895,51 @@ mod tests {
         assert_eq!(pt.buy_area, de);
         assert_eq!(pt.sell_area, fr);
         assert_eq!(pt.price, dec!(84.0));
+    }
+
+    #[test]
+    fn cross_border_gate_blocks_late_cross_match_but_not_early() {
+        // Same setup as cross_area_match_emits_split_public_trade
+        // but the coupling carries a 60-minute gate offset.
+        let mut markets = MarketRegistry::new();
+        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::for_area(
+            Area::eic("10YFR-RTE------C"),
+            Currency::Eur,
+        ));
+        let mut w = World::new(markets);
+        let de = Area::eic("10Y1001A1001A82H");
+        let fr = Area::eic("10YFR-RTE------C");
+        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::from_secs(3600));
+        w.register_gridpool(Gridpool::new(GridpoolId(1), "de", vec![de.clone()]));
+        w.register_gridpool(Gridpool::new(GridpoolId(2), "fr", vec![fr.clone()]));
+
+        let de_buy = sample_buy(dec!(1.0), dec!(85.0));
+        let period_start = de_buy.period.start;
+
+        // FR gridpool rests a sell at 84.0 (cheap; should be the
+        // best price the German bid can hit if cross-border is open).
+        let fr_sell = Order {
+            area: fr.clone(),
+            ..sample_sell(dec!(1.0), dec!(84.0))
+        };
+        w.submit_order(GridpoolId(2), fr_sell, t0()).unwrap();
+
+        // Late submission: now is 30 min before delivery — INSIDE
+        // the 60-min cross-border gate. The matcher should skip the
+        // FR book and the German bid should rest.
+        let late = period_start - chrono::Duration::minutes(30);
+        let de_buy_late = de_buy.clone();
+        let late_detail = w.submit_order(GridpoolId(1), de_buy_late, late).unwrap();
+        assert_eq!(late_detail.state.state, OrderState::Active);
+        assert_eq!(late_detail.filled_quantity, dec!(0));
+
+        // Early submission: now is 90 min before delivery — OUTSIDE
+        // the gate. The buyer should now cross to the FR sell.
+        let early = period_start - chrono::Duration::minutes(90);
+        let early_detail = w.submit_order(GridpoolId(1), de_buy, early).unwrap();
+        assert_eq!(early_detail.state.state, OrderState::Filled);
+        assert_eq!(early_detail.filled_quantity, dec!(1.0));
     }
 
     #[test]

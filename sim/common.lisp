@@ -60,14 +60,28 @@ block can sit anywhere in the config relative to what it references."
     (dolist (e eics)
       (%make-market :area e :currency currency))))
 
-(defun couple-all-pairs (eics)
-  "Couple every distinct pair of EICs in `eics` (K_n graph)."
-  (let ((n (length eics)))
+(defun couple-all-pairs (eics &rest plist)
+  "Couple every distinct pair of EICs in `eics` (K_n graph). Pass
+:gate-offset-seconds N to set a cross-border gate (defaults to 0,
+meaning intra-zone — closes at the regular delivery start)."
+  (let ((offset (or (plist-get plist :gate-offset-seconds) 0))
+        (n (length eics)))
     (dotimes (i n)
       (dotimes (j n)
         (when (< i j)
           (%make-coupling
-           :areas (list (nth i eics) (nth j eics))))))))
+           :areas (list (nth i eics) (nth j eics))
+           :gate-offset-seconds offset))))))
+
+(defun couple-pairs-across (a-list b-list &rest plist)
+  "Couple every EIC in `a-list` to every EIC in `b-list` (Cartesian
+product). Same :gate-offset-seconds knob as couple-all-pairs."
+  (let ((offset (or (plist-get plist :gate-offset-seconds) 0)))
+    (dolist (a a-list)
+      (dolist (b b-list)
+        (%make-coupling
+         :areas (list a b)
+         :gate-offset-seconds offset)))))
 
 (defun mm-fleet (&rest plist)
   "Spawn :quarters market-makers covering one delivery area — one per

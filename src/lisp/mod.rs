@@ -80,11 +80,15 @@ pub struct MarketSpec {
 }
 
 /// One SIDC-style coupling from `(%make-coupling …)`. The binary
-/// calls `World::add_coupling` for each entry.
+/// calls `World::add_coupling` for each entry. `gate_offset_seconds`
+/// is the cross-border-gate lead time before delivery; 0 for
+/// intra-zone couplings (close at delivery), e.g. 3600 for SIDC
+/// cross-border (close 60 min before delivery).
 #[derive(Clone, Debug)]
 pub struct CouplingSpec {
     pub area_a: String,
     pub area_b: String,
+    pub gate_offset_seconds: i64,
 }
 
 /// One aggressor from `(%make-aggressor …)`. The binary spawns one
@@ -721,6 +725,7 @@ fn register_watches(
 AsPlist! {
     pub struct MakeCouplingArgs {
         areas<":areas">: Vec<String>,
+        gate_offset_seconds<":gate-offset-seconds">: Option<i64> {= None},
     }
 }
 
@@ -740,6 +745,7 @@ fn register_couplings(
             couplings.lock().push(CouplingSpec {
                 area_a: a.areas[0].clone(),
                 area_b: a.areas[1].clone(),
+                gate_offset_seconds: a.gate_offset_seconds.unwrap_or(0),
             });
             Ok(true)
         },

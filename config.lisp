@@ -57,6 +57,49 @@
                    :prefix (cadr entry)
                    :sizes (cadddr entry)))
 
+;; --- International coupling ----------------------------------------------
+;;
+;; Four neighbouring bidding zones, each coupled to every German TSO
+;; area via SIDC. Real SIDC closes the cross-border route 60 min
+;; before delivery; :gate-offset-seconds 3600 below tells the
+;; matcher to stop crossing the edge by then. Inside Germany,
+;; trading continues until the regular gate.
+
+(setq international-areas
+      '(("10YFR-RTE------C"   "fr")    ;; France
+        ("10YNL----------L"   "nl")    ;; Netherlands
+        ("10YBE----------2"   "be")    ;; Belgium
+        ("10YAT-APG------L"   "at")))  ;; Austria
+
+(register-markets (mapcar 'car international-areas))
+
+;; Smaller fleets — 4 MMs covering the next hour, two aggressor
+;; profiles per quarter. Enough to demonstrate cross-border
+;; matching without doubling the task count.
+(dolist (entry international-areas)
+  (mm-fleet :area (car entry)
+            :prefix (cadr entry)
+            :quarters 4
+            :sizes '(0.5 0.4 0.3 0.2)
+            :reference-base 75.0)
+  (aggressor-fleet :area (car entry)
+                   :prefix (cadr entry)
+                   :quarters 4
+                   :sizes '(0.1 0.2)
+                   :rates-base '(1500 4000)))
+
+;; Re-register the gridpool with all eight areas so the user can
+;; place orders in any of them through the same default pool.
+(%make-gridpool
+ :id 1
+ :name "default"
+ :areas (append (mapcar 'car areas) (mapcar 'car international-areas)))
+
+;; Every DE TSO zone ↔ every international area, 60-min gate.
+(couple-pairs-across (mapcar 'car areas)
+                     (mapcar 'car international-areas)
+                     :gate-offset-seconds 3600)
+
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
 ;; Uncomment to skew an individual MM's quoting:
