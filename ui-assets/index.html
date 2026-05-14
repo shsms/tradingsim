@@ -49,6 +49,16 @@ td { padding: 2px 6px; }
 .status { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; background: var(--panel); }
 .status.live { color: var(--buy); }
 .status.offline { color: var(--sell); }
+.scenario { margin-bottom: 10px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
+.scenario-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+.scenario-head strong { color: var(--accent); }
+.stages { font-size: 11px; margin: 6px 0 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.stage { padding: 2px 6px; border-radius: 3px; background: var(--bg); color: var(--muted); }
+.stage.current { background: var(--accent); color: var(--bg); }
+.stage.done { color: var(--buy); }
+.scenario-controls button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 3px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 11px; margin-right: 4px; }
+.scenario-controls button:disabled { opacity: 0.35; cursor: not-allowed; }
+.scenario-controls button:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
 </style>
 </head>
 <body>
@@ -95,6 +105,11 @@ td { padding: 2px 6px; }
     <h2>Gridpools</h2>
     <div id="gridpools" class="muted">loading…</div>
   </div>
+
+  <div class="panel" style="grid-column: span 2">
+    <h2>Scenarios</h2>
+    <div id="scenarios" class="muted">loading…</div>
+  </div>
 </div>
 
 <script>
@@ -120,6 +135,56 @@ async function loadGridpools() {
   );
   document.getElementById('gridpools').innerHTML = lines.length
     ? lines.join('<br>') : '<i>no gridpools registered</i>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+function renderScenario(s) {
+  const cur = s.current_stage;
+  const running = cur !== null;
+  const last = s.stages.length - 1;
+  const stages = s.stages.map((name, i) => {
+    let cls = 'stage';
+    if (cur === i) cls += ' current';
+    else if (running && i < cur) cls += ' done';
+    return `<span class="${cls}">${i + 1}. ${escapeHtml(name)}</span>`;
+  }).join('');
+  const startDis = running ? 'disabled' : '';
+  const nextDis = (!running || cur >= last) ? 'disabled' : '';
+  const stopDis = !running ? 'disabled' : '';
+  const safe = encodeURIComponent(s.name);
+  return `
+    <div class="scenario">
+      <div class="scenario-head">
+        <strong>${escapeHtml(s.name)}</strong>
+        <span class="muted">${escapeHtml(s.description)}</span>
+      </div>
+      <div class="stages">${stages}</div>
+      <div class="scenario-controls">
+        <button onclick="scenarioAction('${safe}', 'start')" ${startDis}>Start</button>
+        <button onclick="scenarioAction('${safe}', 'next')"  ${nextDis}>Next</button>
+        <button onclick="scenarioAction('${safe}', 'stop')"  ${stopDis}>Stop</button>
+      </div>
+    </div>`;
+}
+
+async function loadScenarios() {
+  const r = await fetch('/api/scenarios');
+  if (!r.ok) return;
+  const list = await r.json();
+  const el = document.getElementById('scenarios');
+  el.innerHTML = list.length
+    ? list.map(renderScenario).join('')
+    : '<i>no scenarios registered</i>';
+}
+
+async function scenarioAction(name, action) {
+  await fetch(`/api/scenarios/${name}/${action}`, { method: 'POST' });
+  loadScenarios();
 }
 
 // Connection heartbeat — both WebSockets must be open for the
@@ -257,8 +322,9 @@ setInterval(() => {
 }, 200);
 
 (async () => {
-  await Promise.all([loadInfo(), loadGridpools()]);
+  await Promise.all([loadInfo(), loadGridpools(), loadScenarios()]);
   setInterval(loadGridpools, 5000);
+  setInterval(loadScenarios, 2000);
   openTradesWs();
   openBookWs();
 })();
