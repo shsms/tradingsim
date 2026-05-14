@@ -53,12 +53,15 @@ pub struct World {
     markets: MarketRegistry,
     gridpools: GridpoolRegistry,
     /// SIDC-style couplings between delivery areas. Symmetric:
-    /// if A→B is here, B→A is too. The inner `Duration` is the
-    /// cross-border gate offset — a coupling stops carrying flow
-    /// `gate_offset` before the contract's delivery start. Zero
-    /// (intra-zone) means the coupling stays open until the
-    /// regular gate at delivery time.
-    couplings: HashMap<Area, HashMap<Area, std::time::Duration>>,
+    /// if A→B is here, B→A is too. The inner `Coupling` carries
+    /// the cross-border gate offset and an optional capacity cap
+    /// (MWh per contract).
+    couplings: HashMap<Area, HashMap<Area, Coupling>>,
+    /// Per-(unordered area pair, contract) total MWh that has
+    /// crossed the edge. Used to enforce per-edge capacity limits
+    /// during matching. Pair is stored with the lexically-smaller
+    /// area first so (A, B, k) and (B, A, k) hash the same.
+    coupling_fills: HashMap<(Area, Area, ContractKey), Decimal>,
     /// Per-gridpool fan-out for OrderDetail updates. ReceiveGridpoolOrdersStream
     /// subscribes once and applies the request filter per item.
     gridpool_order_tx: HashMap<GridpoolId, broadcast::Sender<OrderDetail>>,
@@ -105,6 +108,24 @@ pub struct World {
     /// Held in an Arc<RwLock<bool>> so the lisp layer and World
     /// share the same flag without going through World every time.
     market_suspended: Arc<parking_lot::RwLock<bool>>,
+}
+
+/// One symmetric coupling edge. Cross-border gate plus optional
+/// per-contract capacity in MWh.
+#[derive(Clone, Copy, Debug)]
+pub struct Coupling {
+    pub gate_offset: std::time::Duration,
+    /// Max MWh that can flow across this edge for a single
+    /// contract. `None` = unlimited.
+    pub capacity_mw: Option<Decimal>,
+}
+
+fn canon_pair(a: &Area, b: &Area) -> (Area, Area) {
+    if a.code <= b.code {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    }
 }
 
 /// Why submit_order can reject. Maps onto the proto's
@@ -174,6 +195,7 @@ impl World {
             next_order_id: 1,
             next_trade_id: 1,
             market_suspended: Arc::new(parking_lot::RwLock::new(false)),
+            coupling_fills: HashMap::new(),
         }
     }
 
@@ -201,30 +223,96 @@ impl World {
     /// Register a symmetric SIDC-style coupling between two
     /// delivery areas. `gate_offset` is the lead time before
     /// delivery at which the coupling closes; pass `Duration::ZERO`
-    /// for intra-zone couplings (close at delivery start) and e.g.
-    /// 60 min for cross-border SIDC.
+    /// for intra-zone couplings. `capacity_mw` is an optional
+    /// per-contract cap in MWh; `None` = unlimited.
     pub fn add_coupling(
         &mut self,
         a: Area,
         b: Area,
         gate_offset: std::time::Duration,
+        capacity_mw: Option<Decimal>,
     ) {
         if a == b {
             return;
         }
+        let coupling = Coupling {
+            gate_offset,
+            capacity_mw,
+        };
         self.couplings
             .entry(a.clone())
             .or_default()
-            .insert(b.clone(), gate_offset);
-        self.couplings.entry(b).or_default().insert(a, gate_offset);
+            .insert(b.clone(), coupling);
+        self.couplings.entry(b).or_default().insert(a, coupling);
     }
 
-    /// Coupled areas with their respective gate-offset durations.
-    pub fn coupled_areas(&self, area: &Area) -> Vec<(Area, std::time::Duration)> {
+    /// Coupled areas with the full coupling record for each.
+    pub fn coupled_areas(&self, area: &Area) -> Vec<(Area, Coupling)> {
         self.couplings
             .get(area)
             .map(|map| map.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default()
+    }
+
+    /// MWh remaining on the (a, b) edge for the given contract.
+    /// Returns `None` when the edge is uncapped.
+    pub fn remaining_capacity(
+        &self,
+        a: &Area,
+        b: &Area,
+        period: DeliveryPeriod,
+    ) -> Option<Decimal> {
+        let coupling = self.couplings.get(a)?.get(b)?;
+        let cap = coupling.capacity_mw?;
+        let used = self
+            .coupling_fills
+            .get(&(
+                canon_pair(a, b).0,
+                canon_pair(a, b).1,
+                ContractKey {
+                    area: a.clone(),
+                    period,
+                },
+            ))
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        // Use any of A or B as the ContractKey.area; the lookup is
+        // keyed on canon pair + period, area inside ContractKey is
+        // a placeholder for now (we don't have a no-area key type).
+        // To make the lookup robust, fall back to the symmetric
+        // entry when needed.
+        let _ = used;
+        // Simpler: scan both possible area entries under the pair.
+        let key_a = ContractKey {
+            area: a.clone(),
+            period,
+        };
+        let key_b = ContractKey {
+            area: b.clone(),
+            period,
+        };
+        let used = self
+            .coupling_fills
+            .get(&(canon_pair(a, b).0, canon_pair(a, b).1, key_a))
+            .copied()
+            .or_else(|| {
+                self.coupling_fills
+                    .get(&(canon_pair(a, b).0, canon_pair(a, b).1, key_b))
+                    .copied()
+            })
+            .unwrap_or(Decimal::ZERO);
+        Some((cap - used).max(Decimal::ZERO))
+    }
+
+    fn debit_capacity(&mut self, a: &Area, b: &Area, period: DeliveryPeriod, mw: Decimal) {
+        let (lo, hi) = canon_pair(a, b);
+        // Store the fill under the canon pair + period; use lo as
+        // ContractKey.area as the canonical placeholder.
+        let key = ContractKey {
+            area: lo.clone(),
+            period,
+        };
+        *self.coupling_fills.entry((lo, hi, key)).or_insert(Decimal::ZERO) += mw;
     }
 
     pub fn markets(&self) -> &MarketRegistry {
@@ -473,14 +561,23 @@ impl World {
         now: DateTime<Utc>,
     ) -> (Vec<(crate::sim::matching::Fill, Area)>, Option<crate::sim::book::Resting>) {
         let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
-        for (other, gate_offset) in self.coupled_areas(&taker_key.area) {
+        for (other, coupling) in self.coupled_areas(&taker_key.area) {
             // Cross-border gate: the coupling stops carrying flow
             // `gate_offset` before delivery start. Intra-zone uses
             // ZERO, so this filter is a no-op for those edges.
-            if gate_offset > std::time::Duration::ZERO {
+            if coupling.gate_offset > std::time::Duration::ZERO {
                 let cutoff = taker_key.period.start
-                    - chrono::Duration::from_std(gate_offset).unwrap_or_default();
+                    - chrono::Duration::from_std(coupling.gate_offset).unwrap_or_default();
                 if now >= cutoff {
+                    continue;
+                }
+            }
+            // Capacity exhaustion: if the edge is already at its
+            // per-contract cap, skip it entirely.
+            if let Some(remaining) =
+                self.remaining_capacity(&taker_key.area, &other, taker_key.period)
+            {
+                if remaining <= Decimal::ZERO {
                     continue;
                 }
             }
@@ -529,6 +626,19 @@ impl World {
                 .consume_front(taker.side, taker.quantity)
                 .expect("peek said non-empty");
             let maker_open_after = open_before - taken;
+            // Cross-area fill: debit the per-edge capacity. The
+            // check before the loop already gates further crosses
+            // once the edge is exhausted, but one fill may push
+            // past the cap (the soft-cap behaviour real SIDC
+            // doesn't have but the sim accepts for simplicity).
+            if book_key.area != taker_key.area {
+                self.debit_capacity(
+                    &taker_key.area,
+                    &book_key.area,
+                    taker_key.period,
+                    taken,
+                );
+            }
             fills.push((
                 crate::sim::matching::Fill {
                     taker_id: taker.id,
@@ -1868,7 +1978,7 @@ mod tests {
         let mut w = World::new(markets);
         let de = Area::eic("10Y1001A1001A82H");
         let fr = Area::eic("10YFR-RTE------C");
-        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::ZERO);
+        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::ZERO, None);
         w.register_gridpool(Gridpool::new(
             GridpoolId(1),
             "de",
@@ -1910,7 +2020,7 @@ mod tests {
         let mut w = World::new(markets);
         let de = Area::eic("10Y1001A1001A82H");
         let fr = Area::eic("10YFR-RTE------C");
-        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::from_secs(3600));
+        w.add_coupling(de.clone(), fr.clone(), std::time::Duration::from_secs(3600), None);
         w.register_gridpool(Gridpool::new(GridpoolId(1), "de", vec![de.clone()]));
         w.register_gridpool(Gridpool::new(GridpoolId(2), "fr", vec![fr.clone()]));
 
@@ -1940,6 +2050,73 @@ mod tests {
         let early_detail = w.submit_order(GridpoolId(1), de_buy, early).unwrap();
         assert_eq!(early_detail.state.state, OrderState::Filled);
         assert_eq!(early_detail.filled_quantity, dec!(1.0));
+    }
+
+    #[test]
+    fn cross_border_capacity_caps_cross_match_volume() {
+        // DE+FR with the coupling capped at 0.5 MW per contract.
+        // After ~0.5 MW has crossed, further DE buys can't reach
+        // the FR sell and rest in DE instead.
+        let mut markets = MarketRegistry::new();
+        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::for_area(
+            Area::eic("10YFR-RTE------C"),
+            Currency::Eur,
+        ));
+        let mut w = World::new(markets);
+        let de = Area::eic("10Y1001A1001A82H");
+        let fr = Area::eic("10YFR-RTE------C");
+        w.add_coupling(
+            de.clone(),
+            fr.clone(),
+            std::time::Duration::ZERO,
+            Some(dec!(0.5)),
+        );
+        w.register_gridpool(Gridpool::new(GridpoolId(1), "de", vec![de.clone()]));
+        w.register_gridpool(Gridpool::new(GridpoolId(2), "fr", vec![fr.clone()]));
+
+        // FR posts a fat 2 MW resting sell @ 84.
+        let fr_sell = Order {
+            area: fr.clone(),
+            quantity: dec!(2.0),
+            ..sample_sell(dec!(1.0), dec!(84.0))
+        };
+        w.submit_order(GridpoolId(2), fr_sell, t0()).unwrap();
+
+        // First DE buy of 0.4 MW @ 85 crosses to FR (within cap).
+        let buy1 = Order {
+            quantity: dec!(0.4),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        assert_eq!(
+            w.submit_order(GridpoolId(1), buy1, t0())
+                .unwrap()
+                .filled_quantity,
+            dec!(0.4)
+        );
+
+        // Second DE buy. Edge is at 0.4/0.5 — one more soft-cap
+        // fill is allowed; capacity ends overshot at 0.8 MW used.
+        let buy2 = Order {
+            quantity: dec!(0.4),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        assert_eq!(
+            w.submit_order(GridpoolId(1), buy2, t0())
+                .unwrap()
+                .filled_quantity,
+            dec!(0.4)
+        );
+
+        // Third DE buy: edge exhausted (0.8 > 0.5). With no DE-side
+        // ask on the book, the buy rests.
+        let buy3 = Order {
+            quantity: dec!(0.4),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        let d3 = w.submit_order(GridpoolId(1), buy3, t0()).unwrap();
+        assert_eq!(d3.state.state, OrderState::Active);
+        assert_eq!(d3.filled_quantity, dec!(0));
     }
 
     #[test]

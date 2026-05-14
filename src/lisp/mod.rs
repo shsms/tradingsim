@@ -83,12 +83,15 @@ pub struct MarketSpec {
 /// calls `World::add_coupling` for each entry. `gate_offset_seconds`
 /// is the cross-border-gate lead time before delivery; 0 for
 /// intra-zone couplings (close at delivery), e.g. 3600 for SIDC
-/// cross-border (close 60 min before delivery).
+/// cross-border (close 60 min before delivery). `capacity_mw`
+/// caps per-contract MWh that can flow across; `None` (negative
+/// or omitted in lisp) means unlimited.
 #[derive(Clone, Debug)]
 pub struct CouplingSpec {
     pub area_a: String,
     pub area_b: String,
     pub gate_offset_seconds: i64,
+    pub capacity_mw: Option<f64>,
 }
 
 /// One aggressor from `(%make-aggressor …)`. The binary spawns one
@@ -726,6 +729,7 @@ AsPlist! {
     pub struct MakeCouplingArgs {
         areas<":areas">: Vec<String>,
         gate_offset_seconds<":gate-offset-seconds">: Option<i64> {= None},
+        capacity_mw<":capacity">: Option<f64> {= None},
     }
 }
 
@@ -746,6 +750,7 @@ fn register_couplings(
                 area_a: a.areas[0].clone(),
                 area_b: a.areas[1].clone(),
                 gate_offset_seconds: a.gate_offset_seconds.unwrap_or(0),
+                capacity_mw: a.capacity_mw,
             });
             Ok(true)
         },

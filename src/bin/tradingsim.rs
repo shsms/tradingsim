@@ -149,15 +149,23 @@ async fn main() {
 
     // Apply lisp-declared SIDC couplings before any orders flow.
     if let Some(c) = lisp_config.as_ref() {
+        use rust_decimal::Decimal;
         for cs in c.couplings() {
             let offset = std::time::Duration::from_secs(cs.gate_offset_seconds.max(0) as u64);
+            let capacity = cs
+                .capacity_mw
+                .filter(|v| *v > 0.0)
+                .and_then(|v| Decimal::try_from(v).ok());
             log::info!(
-                "Coupling: {} <-> {} (gate offset {} s)",
+                "Coupling: {} <-> {} (gate offset {} s, capacity {})",
                 cs.area_a,
                 cs.area_b,
-                offset.as_secs()
+                offset.as_secs(),
+                capacity
+                    .map(|c| format!("{c} MWh"))
+                    .unwrap_or_else(|| "unlimited".into())
             );
-            world.add_coupling(Area::eic(cs.area_a), Area::eic(cs.area_b), offset);
+            world.add_coupling(Area::eic(cs.area_a), Area::eic(cs.area_b), offset, capacity);
         }
         // Share the lisp-side market-suspended flag so
         // `(suspend-market)` actually rejects future submissions.
