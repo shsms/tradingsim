@@ -47,6 +47,11 @@ proptest = "1"
 [lib]
 name = "tradingsim"
 path = "src/lib.rs"
+# Auto-generated proto carries mkdocs-style admonitions (!!! note),
+# Unicode quotes, and ```text code fences that rustdoc tries to
+# compile as doctests. Disable doctests at the crate level — we
+# don't author any of our own.
+doctest = false
 
 [[bin]]
 name = "tradingsim"
