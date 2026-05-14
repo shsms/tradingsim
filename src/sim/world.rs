@@ -769,59 +769,14 @@ impl World {
             }
         }
 
-        // 5. Admit. Mint id; build the contract key.
-        let taker_id = self.next_id();
-        let key = ContractKey {
-            area: order.area.clone(),
-            period: order.period,
-        };
-        let taker_side = order.side;
-        let taker_price = order.price;
-        let taker_currency = order.currency;
+        // 5-7. Admit + match + record fills via the shared core.
         let total_qty = order.quantity;
-
-        // 6. Match across the taker's own area + any coupled areas.
-        // Execution option picks the matcher mode.
-        let mode = match order.execution_option {
-            Some(ExecutionOption::Fok) => ExecMode::FillOrKill,
-            Some(ExecutionOption::Ioc) => ExecMode::ImmediateOrCancel,
-            _ => ExecMode::Resting,
-        };
-        let (fills_with_areas, rested) = self.match_limit_across(
-            key.clone(),
-            IncomingLimit {
-                id: taker_id,
-                side: taker_side,
-                price: taker_price,
-                quantity: total_qty,
-            },
-            mode,
-            taker_currency,
-            now,
-        );
+        let (taker_id, fills_with_areas, rested, mode) =
+            self.admit_and_match(&order, Some(gridpool_id), now);
         let outcome = LimitMatchOutcome {
             fills: fills_with_areas.iter().map(|(f, _)| *f).collect(),
             rested,
         };
-
-        // 7. Record trades + update maker state. The taker is always
-        // a gridpool order; the maker may be a gridpool order or an
-        // unbound counterparty order — owner_of returns None for the
-        // latter. Each fill carries the maker's area so the public
-        // tape can distinguish cross-area matches.
-        for (fill, maker_area) in &fills_with_areas {
-            self.record_fill(
-                fill,
-                taker_id,
-                taker_side,
-                taker_currency,
-                Some(gridpool_id),
-                order.area.clone(),
-                maker_area.clone(),
-                order.period,
-                now,
-            );
-        }
 
         // 8. Build the taker's OrderDetail.
         let filled: Decimal = outcome.fills.iter().map(|f| f.quantity).sum();
@@ -1058,69 +1013,83 @@ impl World {
     /// the OrderId of the admitted order; the caller uses it for
     /// subsequent cancel_counterparty_order calls. Fills emit
     /// public-tape events and maker-side gridpool trades as usual.
+    /// Honors `order.execution_option` (FOK / IOC) the same way
+    /// submit_order does — without this, an IOC residual would
+    /// rest at the slippage-cap and the next opposite-side fire
+    /// would trade against it at the cap repeatedly.
     pub fn submit_counterparty_order(
         &mut self,
         order: Order,
         now: DateTime<Utc>,
     ) -> Result<OrderId, SubmitError> {
         self.validate_common(&order, now)?;
+        let (taker_id, _, _, _) = self.admit_and_match(&order, None, now);
+        // Counterparty leftovers (in Resting mode) sit on the book
+        // without a binding — owner_of stays None, and
+        // cancel_counterparty_order is the only way they leave.
+        Ok(taker_id)
+    }
 
+    /// Common admit + match + record-fills core, called by both
+    /// gridpool and counterparty submit paths. The pre-trade
+    /// checks (gridpool gate, area allow, self-trade prevention,
+    /// AON / valid_until rejection) and the post-trade work
+    /// (OrderDetail construction, state machine, pool record,
+    /// resting-order binding, order-update fanout) live in the
+    /// caller. `taker_gridpool` is the taker's owning pool for
+    /// gridpool submissions, or `None` for unbound counterparty
+    /// orders — `record_fill` reads it to skip the pool-side
+    /// bookkeeping on the counterparty path.
+    fn admit_and_match(
+        &mut self,
+        order: &Order,
+        taker_gridpool: Option<GridpoolId>,
+        now: DateTime<Utc>,
+    ) -> (
+        OrderId,
+        Vec<(crate::sim::matching::Fill, Area)>,
+        Option<crate::sim::book::Resting>,
+        ExecMode,
+    ) {
         let taker_id = self.next_id();
         let key = ContractKey {
             area: order.area.clone(),
             period: order.period,
         };
-        let taker_side = order.side;
-        let taker_currency = order.currency;
-
-        // Honour the order's execution option, same way submit_order
-        // does for gridpool orders. Aggressor sends IOC; the
-        // counterparty path used to ignore that and rest leftovers
-        // on the book at the slippage-cap price, which then got
-        // crossed by the *next* aggressor's opposite-side fire —
-        // generating a stream of trades at the cap value (e.g.
-        // repeated trades at exactly 55 EUR on a night-curve
-        // contract where the aggressor's reference was ~50).
         let mode = match order.execution_option {
             Some(ExecutionOption::Fok) => ExecMode::FillOrKill,
             Some(ExecutionOption::Ioc) => ExecMode::ImmediateOrCancel,
             _ => ExecMode::Resting,
         };
-        // Route through match_limit_across so the public order book
-        // stream sees ADD records when a counterparty order rests
-        // (and UPDATE records when a counterparty crosses an
-        // existing maker). match_limit_in skips the book-event
-        // emit path; that path used to make counterparty rests
-        // invisible on /ws/public-book.
-        let (fills_with_areas, _rested) = self.match_limit_across(
+        // match_limit_across (not match_limit_in) so the public
+        // order-book stream sees ADD records when an order rests,
+        // and UPDATE records when fills change a maker's depth.
+        let (fills_with_areas, rested) = self.match_limit_across(
             key,
             IncomingLimit {
                 id: taker_id,
-                side: taker_side,
+                side: order.side,
                 price: order.price,
                 quantity: order.quantity,
             },
             mode,
-            taker_currency,
+            order.currency,
             now,
         );
         for (fill, maker_area) in &fills_with_areas {
             self.record_fill(
                 fill,
                 taker_id,
-                taker_side,
-                taker_currency,
-                None,
+                order.side,
+                order.currency,
+                taker_gridpool,
                 order.area.clone(),
                 maker_area.clone(),
                 order.period,
                 now,
             );
         }
-        // Counterparty leftovers rest on the book without a binding —
-        // owner_of stays None, and cancel_counterparty_order is the
-        // only way they leave.
-        Ok(taker_id)
+        (taker_id, fills_with_areas, rested, mode)
     }
 
     /// Remove a resting counterparty order from the book. No state

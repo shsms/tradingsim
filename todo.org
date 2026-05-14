@@ -68,10 +68,14 @@ sample fixtures all collapsed onto it. The submit-error test cases that
 override one field via =..sample_buy(...)= keep their struct-update form;
 no need to break that pattern.
 
-*** TODO Merge =World::submit_order= + =submit_counterparty_order= core
-90% overlap. Shared core (validate → mint id → match → record
-fills) in one place; two thin public entrypoints pick the
-"submitter context" (gridpool-owned vs counterparty).
+*** DONE Merge =World::submit_order= + =submit_counterparty_order= core
+Extracted =admit_and_match(order, taker_gridpool, now)= for the
+shared "mint id → resolve mode → match → record fills" core.
+=submit_order= keeps the gridpool checks (pool exists, area
+allow, AON / valid_until rejection, self-trade prevention) and
+the post-match work (OrderDetail + state machine + pool record +
+binding + fanout); =submit_counterparty_order= is now a 3-line
+wrapper that validates + calls the core.
 
 *** DONE Generic server filter helpers
 Four little =bool=-returning helpers — =enum_list_passes=,
