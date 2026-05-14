@@ -1329,6 +1329,171 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_timezone_overrides_default_berlin() {
+        let f = write_tmp(r#"(set-timezone "America/New_York")"#);
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let tz = cfg.clock().read().tz;
+        assert_eq!(tz, chrono_tz::America::New_York);
+    }
+
+    #[tokio::test]
+    async fn set_timezone_unknown_name_errors() {
+        let f = write_tmp(r#"(set-timezone "Not/A/Zone")"#);
+        let path = f.path().to_str().unwrap().to_string();
+        match Config::new(&path) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(e.contains("Not/A/Zone"), "got: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_timezone_default_is_europe_berlin() {
+        let f = write_tmp(";; no set-timezone\n");
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.clock().read().tz, chrono_tz::Europe::Berlin);
+    }
+
+    #[tokio::test]
+    async fn set_mm_bias_scale_overrides_default() {
+        let f = write_tmp("(set-mm-bias-scale 40.0)");
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert!((*cfg.bias_scale().read() - 40.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn set_mm_reference_snaps_baseline_and_price() {
+        // (set-mm-reference …) is the explicit-snap path — it
+        // must write both baseline and live price so a lisp
+        // callback can peg the MM without waiting for mean
+        // reversion.
+        let f = write_tmp(
+            r#"
+            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (set-mm-reference "h0" 100.0)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let mm = cfg.market_makers().pop().unwrap();
+        let inner = mm.shared_config.read();
+        assert_eq!(inner.reference_baseline, rust_decimal::dec!(100.0));
+        assert_eq!(inner.reference_price, rust_decimal::dec!(100.0));
+    }
+
+    #[tokio::test]
+    async fn mm_setters_update_each_field() {
+        let f = write_tmp(
+            r#"
+            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (set-mm-spread "h0" 0.80)
+            (set-mm-size "h0" 3.5)
+            (set-mm-noise "h0" 0.25)
+            (set-mm-follow-last-trade "h0" 0.30)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let mm = cfg.market_makers().pop().unwrap();
+        let inner = mm.shared_config.read();
+        assert_eq!(inner.spread, rust_decimal::dec!(0.80));
+        assert_eq!(inner.size, rust_decimal::dec!(3.5));
+        assert_eq!(inner.price_noise, rust_decimal::dec!(0.25));
+        assert_eq!(inner.follow_last_trade, rust_decimal::dec!(0.30));
+    }
+
+    #[tokio::test]
+    async fn set_mm_follow_clamps_to_unit_range() {
+        let f = write_tmp(
+            r#"
+            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (set-mm-follow-last-trade "h0" 1.50)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let mm = cfg.market_makers().pop().unwrap();
+        assert_eq!(mm.shared_config.read().follow_last_trade, rust_decimal::dec!(1.0));
+    }
+
+    #[tokio::test]
+    async fn suspend_resume_market_toggles_flag() {
+        let f = write_tmp("(suspend-market)");
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert!(*cfg.market_suspended().read());
+
+        // Re-evaluate the file with resume-market: simulate the
+        // way (every) callbacks would mutate state. Easier to just
+        // load a second file.
+        let f2 = write_tmp("(resume-market)");
+        let cfg2 = Config::new(f2.path().to_str().unwrap()).unwrap();
+        assert!(!*cfg2.market_suspended().read());
+    }
+
+    #[tokio::test]
+    async fn recall_order_enqueues_for_drain() {
+        let f = write_tmp(
+            r#"
+            (recall-order 42)
+            (recall-order 99)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let q = cfg.recall_queue();
+        let g = q.lock();
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[0], 42);
+        assert_eq!(g[1], 99);
+    }
+
+    #[tokio::test]
+    async fn recall_order_rejects_non_positive_id() {
+        let f = write_tmp("(recall-order 0)");
+        let path = f.path().to_str().unwrap().to_string();
+        match Config::new(&path) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(e.contains("must be positive"), "got: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_weather_stream_cadence_updates_handle() {
+        let f = write_tmp("(set-weather-stream-cadence-seconds 5)");
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(*cfg.weather_cadence().read(), Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn set_weather_stream_cadence_floors_at_one_second() {
+        // The defun clamps to 1s minimum so a typo'd 0 can't
+        // hot-spin the emit loop.
+        let f = write_tmp("(set-weather-stream-cadence-seconds 0.1)");
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(*cfg.weather_cadence().read(), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn set_forward_curve_base_updates_per_hour() {
+        let f = write_tmp(
+            r#"
+            (set-forward-curve-base 12 50.0)
+            (set-forward-curve-base 18 110.0)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let curve = cfg.curve();
+        let c = curve.read();
+        assert_eq!(c.base_price_at(12.0), rust_decimal::dec!(50.0));
+        assert_eq!(c.base_price_at(18.0), rust_decimal::dec!(110.0));
+    }
+
+    #[tokio::test]
+    async fn set_forward_curve_base_rejects_out_of_range_hour() {
+        let f = write_tmp("(set-forward-curve-base 25 50.0)");
+        let path = f.path().to_str().unwrap().to_string();
+        match Config::new(&path) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(e.contains("0..=24"), "got: {e}"),
+        }
+    }
+
+    #[tokio::test]
     async fn run_with_timer_callback_fires_and_mutates_shared_config() {
         // tulisp-async exposes `(run-with-timer first repeat fn …)`.
         // The (every …) sugar wrapper is built on top of it in
