@@ -57,11 +57,11 @@ pub struct World {
     /// the cross-border gate offset and an optional capacity cap
     /// (MWh per contract).
     couplings: HashMap<Area, HashMap<Area, Coupling>>,
-    /// Per-(unordered area pair, contract) total MWh that has
-    /// crossed the edge. Used to enforce per-edge capacity limits
-    /// during matching. Pair is stored with the lexically-smaller
-    /// area first so (A, B, k) and (B, A, k) hash the same.
-    coupling_fills: HashMap<(Area, Area, ContractKey), Decimal>,
+    /// Per-(unordered area pair, delivery period) total MWh that
+    /// has crossed the edge. Used to enforce per-edge capacity
+    /// limits during matching. Pair is stored with the lexically-
+    /// smaller area first so (A, B, p) and (B, A, p) hash the same.
+    coupling_fills: HashMap<(Area, Area, DeliveryPeriod), Decimal>,
     /// Per-gridpool fan-out for OrderDetail updates. ReceiveGridpoolOrdersStream
     /// subscribes once and applies the request filter per item.
     gridpool_order_tx: HashMap<GridpoolId, broadcast::Sender<OrderDetail>>,
@@ -269,55 +269,18 @@ impl World {
     ) -> Option<Decimal> {
         let coupling = self.couplings.get(a)?.get(b)?;
         let cap = coupling.capacity_mw?;
+        let (lo, hi) = canon_pair(a, b);
         let used = self
             .coupling_fills
-            .get(&(
-                canon_pair(a, b).0,
-                canon_pair(a, b).1,
-                ContractKey {
-                    area: a.clone(),
-                    period,
-                },
-            ))
+            .get(&(lo, hi, period))
             .copied()
-            .unwrap_or(Decimal::ZERO);
-        // Use any of A or B as the ContractKey.area; the lookup is
-        // keyed on canon pair + period, area inside ContractKey is
-        // a placeholder for now (we don't have a no-area key type).
-        // To make the lookup robust, fall back to the symmetric
-        // entry when needed.
-        let _ = used;
-        // Simpler: scan both possible area entries under the pair.
-        let key_a = ContractKey {
-            area: a.clone(),
-            period,
-        };
-        let key_b = ContractKey {
-            area: b.clone(),
-            period,
-        };
-        let used = self
-            .coupling_fills
-            .get(&(canon_pair(a, b).0, canon_pair(a, b).1, key_a))
-            .copied()
-            .or_else(|| {
-                self.coupling_fills
-                    .get(&(canon_pair(a, b).0, canon_pair(a, b).1, key_b))
-                    .copied()
-            })
             .unwrap_or(Decimal::ZERO);
         Some((cap - used).max(Decimal::ZERO))
     }
 
     fn debit_capacity(&mut self, a: &Area, b: &Area, period: DeliveryPeriod, mw: Decimal) {
         let (lo, hi) = canon_pair(a, b);
-        // Store the fill under the canon pair + period; use lo as
-        // ContractKey.area as the canonical placeholder.
-        let key = ContractKey {
-            area: lo.clone(),
-            period,
-        };
-        *self.coupling_fills.entry((lo, hi, key)).or_insert(Decimal::ZERO) += mw;
+        *self.coupling_fills.entry((lo, hi, period)).or_insert(Decimal::ZERO) += mw;
     }
 
     pub fn markets(&self) -> &MarketRegistry {
