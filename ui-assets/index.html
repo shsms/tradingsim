@@ -81,8 +81,14 @@ h1 {
   display: grid;
   gap: 12px;
 }
-.tier-chart-scenarios { grid-template-columns: 11fr 9fr; }
-.tier-book-gridpools  { grid-template-columns: 7fr 3fr; }
+/* `minmax(0, Nfr)` lets the column shrink below its content's
+   intrinsic min-width — without that, a canvas whose attribute
+   width is set to clientWidth * dpr (~2000+ px on HiDPI) reports
+   that as min-content, the grid track expands, the parent's
+   clientWidth grows, the next draw makes the canvas wider still,
+   and the chart eventually shoves scenarios off the screen. */
+.tier-chart-scenarios { grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); }
+.tier-book-gridpools  { grid-template-columns: minmax(0, 7fr) minmax(0, 3fr); }
 @media (max-width: 900px) {
   .tier-row { grid-template-columns: 1fr; }
 }
@@ -333,7 +339,7 @@ td { padding: 2px 6px; }
 .chart-legend .dot {
   width: 10px; height: 2px; display: inline-block;
 }
-#price-chart { display: block; }
+#price-chart { display: block; max-width: 100%; }
 
 /* Book ladders — one mini-ladder per active area, all for the
    same delivery period. DE TSO zones come first, international
