@@ -17,20 +17,20 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
 use serde::Serialize;
-use tokio::sync::Mutex;
+use parking_lot::RwLock;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 #[derive(Clone)]
 struct UiState {
-    world: Arc<Mutex<World>>,
+    world: Arc<RwLock<World>>,
     scenarios: Option<SharedScenarios>,
     weather: Option<crate::sim::weather::SharedWeather>,
 }
 
 pub async fn serve(
     addr: SocketAddr,
-    world: Arc<Mutex<World>>,
+    world: Arc<RwLock<World>>,
     scenarios: Option<SharedScenarios>,
     weather: Option<crate::sim::weather::SharedWeather>,
 ) -> std::io::Result<()> {
@@ -71,7 +71,7 @@ struct InfoResp {
 }
 
 async fn api_info(State(s): State<UiState>) -> Json<InfoResp> {
-    let w = s.world.lock().await;
+    let w = s.world.read();
     Json(InfoResp {
         version: env!("CARGO_PKG_VERSION"),
         gridpools: w.gridpools().len(),
@@ -96,7 +96,7 @@ struct GridpoolResp {
 }
 
 async fn api_gridpools(State(s): State<UiState>) -> Json<Vec<GridpoolResp>> {
-    let w = s.world.lock().await;
+    let w = s.world.read();
     let pools: Vec<GridpoolResp> = w
         .gridpools()
         .iter()
@@ -144,7 +144,7 @@ async fn ws_public_trades(ws: WebSocketUpgrade, State(s): State<UiState>) -> imp
 }
 
 async fn handle_trades_ws(mut socket: WebSocket, s: UiState) {
-    let rx = s.world.lock().await.subscribe_public_trades();
+    let rx = s.world.read().subscribe_public_trades();
     let mut stream = BroadcastStream::new(rx);
     while let Some(item) = stream.next().await {
         let Ok(t) = item else { continue };
@@ -217,7 +217,7 @@ async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
     // snapshot (already fired) or queued on the receiver (fires
     // after) — never lost.
     let (snapshot, rx) = {
-        let w = s.world.lock().await;
+        let w = s.world.read();
         let snap = w.snapshot_books(chrono::Utc::now());
         let rx = w.subscribe_public_book();
         (snap, rx)

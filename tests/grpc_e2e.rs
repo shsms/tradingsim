@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use parking_lot::RwLock;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
@@ -37,7 +37,7 @@ async fn spawn_server() -> String {
         "test",
         vec![Area::eic("10Y1001A1001A82H")],
     ));
-    let world = Arc::new(Mutex::new(world));
+    let world = Arc::new(RwLock::new(world));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

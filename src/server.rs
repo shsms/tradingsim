@@ -1,13 +1,14 @@
 //! gRPC service implementation. The server owns a shared
-//! `Arc<Mutex<World>>` and handles RPCs by briefly locking the world
-//! to mutate state, then releasing the lock before any await on a
-//! channel. Streams hold only their broadcast receiver across awaits.
+//! `Arc<RwLock<World>>` (parking_lot) and handles RPCs by taking a
+//! read or write guard for the duration of one synchronous block,
+//! then dropping it before any await on a channel. Streams hold only
+//! their broadcast receiver across awaits.
 
 use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Utc;
-use tokio::sync::Mutex;
+use parking_lot::RwLock;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
@@ -47,11 +48,11 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
 #[derive(Clone)]
 pub struct ElectricityTradingServer {
-    world: Arc<Mutex<World>>,
+    world: Arc<RwLock<World>>,
 }
 
 impl ElectricityTradingServer {
-    pub fn new(world: Arc<Mutex<World>>) -> Self {
+    pub fn new(world: Arc<RwLock<World>>) -> Self {
         Self { world }
     }
 }
@@ -282,7 +283,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         let order = Order::try_from(&order_proto).map_err(conv_err_to_status)?;
 
         let detail = {
-            let mut w = self.world.lock().await;
+            let mut w = self.world.write();
             w.submit_order(gridpool_id, order, Utc::now())
                 .map_err(submit_err_to_status)?
         };
@@ -322,7 +323,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         }
 
         let detail = {
-            let mut w = self.world.lock().await;
+            let mut w = self.world.write();
             w.modify_order(gridpool_id, order_id, update, Utc::now())
                 .map_err(submit_err_to_status)?
         };
@@ -340,7 +341,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         let gridpool_id = GridpoolId(req.gridpool_id);
         let order_id = OrderId(req.order_id);
         let detail = {
-            let mut w = self.world.lock().await;
+            let mut w = self.world.write();
             w.cancel_order(gridpool_id, order_id, Utc::now())
                 .map_err(submit_err_to_status)?
         };
@@ -355,7 +356,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         request: Request<CancelAllGridpoolOrdersRequest>,
     ) -> Result<Response<CancelAllGridpoolOrdersResponse>, Status> {
         let gridpool_id = GridpoolId(request.into_inner().gridpool_id);
-        let mut w = self.world.lock().await;
+        let mut w = self.world.write();
         // Snapshot the non-terminal ids first; cancel_order is &mut
         // on the World and would alias the iterator otherwise.
         let ids: Vec<OrderId> = w
@@ -384,7 +385,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         let req = request.into_inner();
         let gridpool_id = GridpoolId(req.gridpool_id);
         let order_id = OrderId(req.order_id);
-        let w = self.world.lock().await;
+        let w = self.world.read();
         let gp = w
             .gridpools()
             .get(gridpool_id)
@@ -407,7 +408,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         let (page_size, cursor) = parse_pagination(&req.pagination_params)?;
         let filter = req.filter.unwrap_or_default();
 
-        let w = self.world.lock().await;
+        let w = self.world.read();
         let gp = w
             .gridpools()
             .get(gridpool_id)
@@ -454,7 +455,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         // Subscribe under the lock; release before consuming the stream
         // so other RPCs aren't held up by long-lived subscribers.
         let receiver = {
-            let w = self.world.lock().await;
+            let w = self.world.read();
             w.subscribe_orders(gridpool_id)
                 .ok_or_else(|| Status::not_found("unknown gridpool"))?
         };
@@ -481,7 +482,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         let (page_size, cursor) = parse_pagination(&req.pagination_params)?;
         let filter = req.filter.unwrap_or_default();
 
-        let w = self.world.lock().await;
+        let w = self.world.read();
         let gp = w
             .gridpools()
             .get(gridpool_id)
@@ -523,7 +524,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         let gridpool_id = GridpoolId(req.gridpool_id);
         let filter = req.filter.unwrap_or_default();
         let rx = {
-            let w = self.world.lock().await;
+            let w = self.world.read();
             w.subscribe_gridpool_trades(gridpool_id)
                 .ok_or_else(|| Status::not_found("unknown gridpool"))?
         };
@@ -549,7 +550,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
         // start_time / end_time replay is deferred — we serve live
         // from the subscription point on. The proto's stream lifetime
         // contract allows that ("best-effort").
-        let rx = self.world.lock().await.subscribe_public_trades();
+        let rx = self.world.read().subscribe_public_trades();
         let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
             Ok(t) if matches_public_trade_filter(&t, &filter) => {
                 Some(Ok(ReceivePublicTradesStreamResponse {
@@ -577,7 +578,7 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
         // Snapshot history + take a live subscription under one lock.
         let (history, live_rx) = {
-            let w = self.world.lock().await;
+            let w = self.world.read();
             (w.public_book_history(), w.subscribe_public_book())
         };
 

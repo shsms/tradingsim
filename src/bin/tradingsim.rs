@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use simplelog::{ColorChoice, Config as LogConfig, LevelFilter, TermLogger, TerminalMode};
-use tokio::sync::Mutex;
+use parking_lot::RwLock;
 use tonic::transport::Server;
 use tradingsim::{
     lisp::Config as LispConfig,
@@ -39,7 +39,7 @@ fn next_hour_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
 /// rolls the MM's delivery period forward each tick so the MM
 /// always quotes the contract starting that many quarter-hours from
 /// the next 15-min boundary.
-fn spawn_mm_task(world: Arc<Mutex<World>>, mut mm: MarketMaker, quarter_offset: i64) {
+fn spawn_mm_task(world: Arc<RwLock<World>>, mut mm: MarketMaker, quarter_offset: i64) {
     let cfg = mm.shared_config();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(MM_REFRESH_INTERVAL);
@@ -54,7 +54,7 @@ fn spawn_mm_task(world: Arc<Mutex<World>>, mut mm: MarketMaker, quarter_offset: 
                     c.period.start = new_start;
                 }
             }
-            let mut w = world.lock().await;
+            let mut w = world.write();
             mm.refresh(&mut w, now);
         }
     });
@@ -64,7 +64,7 @@ fn spawn_mm_task(world: Arc<Mutex<World>>, mut mm: MarketMaker, quarter_offset: 
 /// Like the MM task, rolls the aggressor's target period forward
 /// each tick from `quarter_offset`.
 fn spawn_aggressor_task(
-    world: Arc<Mutex<World>>,
+    world: Arc<RwLock<World>>,
     mut ag: Aggressor,
     rate: Duration,
     quarter_offset: i64,
@@ -83,7 +83,7 @@ fn spawn_aggressor_task(
                     c.period.start = new_start;
                 }
             }
-            let mut w = world.lock().await;
+            let mut w = world.write();
             ag.fire(&mut w, now);
         }
     });
@@ -217,7 +217,7 @@ async fn main() {
         c.spawn_file_watcher();
     }
 
-    let world = Arc::new(Mutex::new(world));
+    let world = Arc::new(RwLock::new(world));
 
     let mut mm_views: Vec<tradingsim::scenarios::MmView> = Vec::new();
     if !mm_specs.is_empty() {
@@ -337,8 +337,7 @@ async fn main() {
             loop {
                 tick.tick().await;
                 let n = world_for_expiry
-                    .lock()
-                    .await
+                    .write()
                     .expire_lapsed_orders(Utc::now());
                 if n > 0 {
                     log::info!("Expired {n} order(s) on the valid_until deadline");
@@ -364,7 +363,7 @@ async fn main() {
                 if drained.is_empty() {
                     continue;
                 }
-                let mut w = world_for_recall.lock().await;
+                let mut w = world_for_recall.write();
                 for id in drained {
                     let order_id = tradingsim::sim::order::OrderId(id);
                     match w.recall_order(order_id, Utc::now()) {
