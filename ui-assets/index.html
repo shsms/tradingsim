@@ -198,6 +198,39 @@ td { padding: 2px 6px; }
   min-height: 1px;
   border-radius: 1px;
 }
+
+/* Tier 2 — hero price chart. Full-width canvas-backed panel; one
+   line per DE area, last 30 min, no overlay framework. Distinct
+   hues per area so lines stay separable; chart palette is kept
+   apart from the buy/sell semantic colours used everywhere else. */
+.hero {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.hero-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.hero-head h2 {
+  margin: 0;
+  font-size: var(--fs-h2);
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.hero-legend { display: flex; gap: 10px; font-size: var(--fs-small); }
+.hero-legend span {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--muted);
+}
+.hero-legend .dot {
+  width: 10px; height: 2px; display: inline-block;
+}
+#price-chart { display: block; }
 </style>
 </head>
 <body>
@@ -220,6 +253,14 @@ td { padding: 2px 6px; }
     <span id="scenario-indicator" class="muted">—</span>
   </div>
   <div class="pulse-clock" id="clock">--:--:--</div>
+</section>
+
+<section class="hero" aria-label="price tape">
+  <div class="hero-head">
+    <h2>Price tape — last 30 min</h2>
+    <div class="hero-legend" id="chart-legend"></div>
+  </div>
+  <canvas id="price-chart"></canvas>
 </section>
 
 <div class="grid">
@@ -358,6 +399,117 @@ function tickClock() {
   document.getElementById('clock').textContent = now.toISOString().slice(11, 19);
 }
 
+// Tier 2 — price chart. Per-area circular buffers of recent
+// trade prints, redrawn on a 1s tick. Canvas is sized to its
+// parent's CSS width each draw so window resizes don't blur it.
+const PRICE_WINDOW_MS = 30 * 60 * 1000;
+const CHART_AREAS = [
+  { code: '10YDE-EON------1', tag: 'TN', color: '#58a6ff' },
+  { code: '10YDE-RWENET---I', tag: 'AM', color: '#a371f7' },
+  { code: '10YDE-VE-------2', tag: 'HZ', color: '#9ee493' },
+  { code: '10YDE-ENBW-----N', tag: 'BW', color: '#e1af6c' },
+];
+const priceSeries = new Map();
+for (const a of CHART_AREAS) priceSeries.set(a.code, []);
+
+function recordTradePrice(t) {
+  const arr = priceSeries.get(t.buy_area);
+  if (!arr) return;
+  const ms = Date.parse(t.execution_time);
+  if (!isFinite(ms)) return;
+  arr.push({ t: ms, price: parseFloat(t.price) });
+  const cutoff = Date.now() - PRICE_WINDOW_MS;
+  while (arr.length && arr[0].t < cutoff) arr.shift();
+}
+
+function renderChartLegend() {
+  const el = document.getElementById('chart-legend');
+  if (!el) return;
+  el.innerHTML = CHART_AREAS
+    .map(a => `<span><span class="dot" style="background:${a.color}"></span>${a.tag}</span>`)
+    .join('');
+}
+
+function drawChart() {
+  const canvas = document.getElementById('price-chart');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.parentElement.clientWidth - 20;
+  const cssH = 220;
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  canvas.width = Math.max(1, Math.floor(cssW * dpr));
+  canvas.height = Math.max(1, Math.floor(cssH * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padL = 38, padR = 8, padT = 6, padB = 18;
+  const innerW = cssW - padL - padR;
+  const innerH = cssH - padT - padB;
+
+  let ymin = Infinity, ymax = -Infinity;
+  for (const arr of priceSeries.values()) {
+    for (const p of arr) {
+      if (p.price < ymin) ymin = p.price;
+      if (p.price > ymax) ymax = p.price;
+    }
+  }
+  if (!isFinite(ymin)) { ymin = 70; ymax = 100; }
+  if (ymax - ymin < 1) { ymax = ymin + 1; }
+  const ypad = (ymax - ymin) * 0.1;
+  ymin -= ypad; ymax += ypad;
+
+  const now = Date.now();
+  const tmin = now - PRICE_WINDOW_MS;
+  const xs = t => padL + ((t - tmin) / PRICE_WINDOW_MS) * innerW;
+  const ys = p => padT + (1 - (p - ymin) / (ymax - ymin)) * innerH;
+
+  const styles = getComputedStyle(document.documentElement);
+  const borderC = styles.getPropertyValue('--border').trim() || '#30363d';
+  const mutedC = styles.getPropertyValue('--muted').trim() || '#8b949e';
+
+  ctx.strokeStyle = borderC;
+  ctx.fillStyle = mutedC;
+  ctx.font = '10px ui-monospace, monospace';
+  ctx.lineWidth = 1;
+
+  const ySteps = 5;
+  for (let i = 0; i <= ySteps; i++) {
+    const y = padT + (i / ySteps) * innerH;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(cssW - padR, y);
+    ctx.stroke();
+    const v = ymax - (i / ySteps) * (ymax - ymin);
+    ctx.textAlign = 'right';
+    ctx.fillText(v.toFixed(0), padL - 4, y + 3);
+  }
+
+  ctx.textAlign = 'center';
+  for (let mins = 30; mins >= 0; mins -= 5) {
+    const t = now - mins * 60 * 1000;
+    const x = xs(t);
+    ctx.fillText(mins === 0 ? 'now' : `-${mins}m`, x, cssH - 4);
+  }
+
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  for (const a of CHART_AREAS) {
+    const arr = priceSeries.get(a.code) || [];
+    if (arr.length < 2) continue;
+    ctx.strokeStyle = a.color;
+    ctx.beginPath();
+    for (let i = 0; i < arr.length; i++) {
+      const x = xs(arr[i].t);
+      const y = ys(arr[i].price);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
 async function loadGridpools() {
   const r = await fetch('/api/gridpools');
   if (!r.ok) return;
@@ -489,6 +641,7 @@ function openTradesWs() {
   ws.onmessage = (e) => {
     const t = JSON.parse(e.data);
     recordTrade(t);
+    recordTradePrice(t);
     const tbody = document.getElementById('trades');
     const row = document.createElement('tr');
     const area = t.buy_area === t.sell_area
@@ -606,6 +759,8 @@ setInterval(() => {
 (async () => {
   tickClock();
   renderSparkbars();
+  renderChartLegend();
+  drawChart();
   setPill('pill-trades', 'down', 'trades');
   setPill('pill-book', 'down', 'book');
   setPill('pill-weather', 'down', 'weather');
@@ -616,6 +771,8 @@ setInterval(() => {
   setInterval(tickClock, 1000);
   setInterval(rotateSparkBuckets, SPARK_BUCKET_MS);
   setInterval(renderSparkbars, 1000);
+  setInterval(drawChart, 1000);
+  window.addEventListener('resize', drawChart);
   openTradesWs();
   openBookWs();
 })();
