@@ -96,6 +96,24 @@ impl OrderBook {
             .collect()
     }
 
+    /// Like `iter_with_meta` but also includes each resting entry's
+    /// open quantity — for the WS book-snapshot path that serialises
+    /// the live state on a fresh subscriber connect.
+    pub fn iter_with_quantity(&self) -> Vec<(OrderId, Side, Decimal, Decimal)> {
+        let mut out = Vec::with_capacity(self.by_id.len());
+        for (price, queue) in &self.bids {
+            for r in queue {
+                out.push((r.id, Side::Buy, *price, r.open_qty));
+            }
+        }
+        for (price, queue) in &self.asks {
+            for r in queue {
+                out.push((r.id, Side::Sell, *price, r.open_qty));
+            }
+        }
+        out
+    }
+
     /// Highest resting buy price (best bid), if any.
     pub fn best_bid(&self) -> Option<Decimal> {
         self.bids.keys().next_back().copied()

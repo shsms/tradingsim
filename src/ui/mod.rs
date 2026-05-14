@@ -199,7 +199,26 @@ async fn ws_public_book(
 async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
     let _ = MarketSide::Buy; // silence "unused MarketSide" if the enum isn't referenced
     let _ = header::CONTENT_TYPE; // silence unused header import on some configs
-    let rx = s.world.lock().await.subscribe_public_book();
+
+    // Capture the current book snapshot + subscribe under a single
+    // lock so any concurrent event is either reflected in the
+    // snapshot (already fired) or queued on the receiver (fires
+    // after) — never lost.
+    let (snapshot, rx) = {
+        let w = s.world.lock().await;
+        let snap = w.snapshot_books(chrono::Utc::now());
+        let rx = w.subscribe_public_book();
+        (snap, rx)
+    };
+    for rec in snapshot {
+        let payload = book_record_to_json(&rec);
+        if let Ok(s) = serde_json::to_string(&payload) {
+            if socket.send(Message::Text(s.into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
     let mut stream = BroadcastStream::new(rx);
     while let Some(item) = stream.next().await {
         let Ok(r) = item else { continue };

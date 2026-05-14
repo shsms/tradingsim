@@ -167,9 +167,17 @@ let bookDirty = false;
 
 function rerenderBook() {
   // Group rows by (area, period). Within each group, aggregate
-  // bids and asks separately by price level.
+  // bids and asks separately by price level. Contracts whose gate
+  // has already closed are dropped — the server expires them too,
+  // but this is the belt-and-suspenders if a qty=0 event was
+  // missed (e.g. broadcast lag while the tab was backgrounded).
   const groups = new Map();
+  const cutoff = Date.now();
   for (const r of bookState.values()) {
+    if (r.period) {
+      const ts = Date.parse(r.period);
+      if (!Number.isNaN(ts) && ts <= cutoff) continue;
+    }
     const key = `${r.area}|${r.period}`;
     let g = groups.get(key);
     if (!g) {

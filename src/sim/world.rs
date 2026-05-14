@@ -249,6 +249,40 @@ impl World {
         self.public_book_history.lock().iter().cloned().collect()
     }
 
+    /// Snapshot every resting order on every still-tradeable book
+    /// as proto-shaped records. The WS book stream sends this on
+    /// connect so a fresh subscriber sees the current state instead
+    /// of an empty book until the next live event. Books whose gate
+    /// has already closed are skipped.
+    pub fn snapshot_books(&self, now: DateTime<Utc>) -> Vec<proto_trading::PublicOrderBookRecord> {
+        let mut out = Vec::new();
+        for (key, book) in &self.books {
+            if key.period.start <= now {
+                continue;
+            }
+            for (order_id, side, price, qty) in book.iter_with_quantity() {
+                let create_time = self
+                    .book_first_seen
+                    .get(&order_id)
+                    .copied()
+                    .unwrap_or(now);
+                out.push(proto_trading::PublicOrderBookRecord {
+                    id: order_id.0,
+                    delivery_area: Some((&key.area).into()),
+                    delivery_period: Some(key.period.into()),
+                    r#type: None,
+                    side: side as i32,
+                    price: Some(price_to_proto(price, Currency::Eur)),
+                    quantity: Some(power_to_proto(qty)),
+                    execution_option: None,
+                    create_time: Some(timestamp_to_proto(create_time)),
+                    update_time: Some(timestamp_to_proto(now)),
+                });
+            }
+        }
+        out
+    }
+
     /// Publish an OrderDetail update for `gridpool_id`. No-op if no
     /// subscribers — broadcast::Sender::send returning Err means the
     /// receiver count was zero, which is fine for the sim.
