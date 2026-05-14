@@ -134,14 +134,6 @@ async fn main() {
         .map(|c| c.socket_addr())
         .unwrap_or_else(|| "[::1]:8810".to_string());
 
-    // Drain tulisp-async timers (every / run-with-timer) on a fixed
-    // cadence so scheduled callbacks in config.lisp actually fire.
-    if let Some(c) = lisp_config.as_ref() {
-        c.spawn_timer_loop(Duration::from_millis(100));
-    }
-
-    let world = Arc::new(Mutex::new(world));
-
     // Synthetic liquidity: either driven by lisp's (make-market-maker
     // …) entries, or — when no config.lisp is loaded — the prior
     // four-hour fallback so the demo still has a quoted book.
@@ -149,6 +141,18 @@ async fn main() {
         .as_ref()
         .map(|c| c.market_makers())
         .unwrap_or_default();
+
+    // Drain tulisp-async timers (every / run-with-timer) on a fixed
+    // cadence so scheduled callbacks in config.lisp actually fire.
+    // Also spawn the notify-rs file watcher so edits to config.lisp
+    // (or any (watch-file …) entry) trigger an automatic reload.
+    let lisp_config_arc: Option<Arc<LispConfig>> = lisp_config.map(Arc::new);
+    if let Some(c) = lisp_config_arc.as_ref() {
+        c.spawn_timer_loop(Duration::from_millis(100));
+        c.spawn_file_watcher();
+    }
+
+    let world = Arc::new(Mutex::new(world));
 
     if !mm_specs.is_empty() {
         log::info!("Spawning {} market-maker(s) from config.lisp", mm_specs.len());

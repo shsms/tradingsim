@@ -9,6 +9,14 @@
   (load "sim/common.lisp")
   (load "sim/scenarios.lisp"))
 
+;; Cancel any timers from a previous load before the new config
+;; re-registers them. Required for hot reload to start clean.
+(reset-state)
+
+;; Watch the support files so saving them also triggers a reload.
+(watch-file "sim/common.lisp")
+(watch-file "sim/scenarios.lisp")
+
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
 

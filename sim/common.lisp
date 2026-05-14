@@ -8,8 +8,18 @@
 ;; `(every :milliseconds N :call FN)` to schedule a periodic callback
 ;; that nudges market-maker knobs over time.
 
-;; Active timers — tracked so a future (reset-state) can cancel them.
+;; Active timers — tracked so (reset-state) can cancel them on hot
+;; reload.
 (unless (boundp 'active-timers)
+  (setq active-timers nil))
+
+(defun reset-state ()
+  "Cancel every timer registered via (every …) and reset the bookkeeping.
+Call at the top of config.lisp so a hot reload starts from a clean
+slate; the running market-maker tasks keep going (their SharedConfig
+handles survive across reloads)."
+  (dolist (tm active-timers)
+    (cancel-timer tm))
   (setq active-timers nil))
 
 (defun every (&rest plist)

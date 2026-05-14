@@ -11,12 +11,14 @@
 //! a value that the gRPC service or the market-maker task is reading
 //! concurrently.
 
+use std::collections::HashSet;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use notify::{RecommendedWatcher, Watcher};
 use parking_lot::{Mutex, RwLock};
 use rust_decimal::Decimal;
 use tulisp::{AsPlist, Error, Plist, SharedMut, TulispContext};
@@ -88,6 +90,10 @@ pub struct Config {
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
+    /// Extra paths registered via `(watch-file PATH)`; the notify
+    /// watcher reloads on any of them changing in addition to the
+    /// top-level config file.
+    extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     /// tulisp-async timer queue. The binary calls `spawn_timer_loop`
     /// to drain it on a tokio interval; without that, `(every …)` /
     /// `(run-with-timer …)` registrations from config.lisp would
@@ -110,6 +116,7 @@ impl Config {
         let gridpools = Arc::new(Mutex::new(Vec::new()));
         let markets = Arc::new(Mutex::new(Vec::new()));
         let couplings = Arc::new(Mutex::new(Vec::new()));
+        let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
         let load_dir: PathBuf = match Path::new(filename).parent() {
@@ -126,6 +133,8 @@ impl Config {
             gridpools.clone(),
             markets.clone(),
             couplings.clone(),
+            extra_watches.clone(),
+            load_dir.clone(),
             anchor,
         );
 
@@ -151,9 +160,98 @@ impl Config {
             gridpools,
             markets,
             couplings,
+            extra_watches,
             timer_handle,
             anchor,
         })
+    }
+
+    /// Re-evaluate the config file against the existing context. The
+    /// file is expected to call `(reset-state)` at the top so timers
+    /// from the previous load are cancelled before new ones are
+    /// installed. (%make-market-maker) calls update existing
+    /// SharedConfigs by name rather than replacing them, so the
+    /// running MM tasks pick up new knobs on their next refresh.
+    pub fn reload(&self) -> Result<(), String> {
+        let start = std::time::Instant::now();
+        let mut ctx = self.ctx.borrow_mut();
+        if let Err(e) = ctx.eval_file(&self.filename) {
+            let formatted = e.format(&ctx);
+            log::error!("Reload failed:\n{formatted}");
+            return Err(formatted);
+        }
+        log::info!(
+            "Reloaded config in {:.1}ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(())
+    }
+
+    /// Spawn a notify-rs watcher on the config file plus any path
+    /// registered via `(watch-file …)`. On any modify event (with
+    /// 150ms debounce), call `reload()`.
+    pub fn spawn_file_watcher(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            me.watch().await;
+        });
+    }
+
+    async fn watch(self: Arc<Self>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<notify::Event, notify::Error>>(8);
+        let mut watcher = match RecommendedWatcher::new(
+            move |res| {
+                futures::executor::block_on(async {
+                    let _ = tx.send(res).await;
+                });
+            },
+            notify::Config::default(),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                log::error!("notify watcher: {e}");
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(
+            Path::new(&self.filename),
+            notify::RecursiveMode::NonRecursive,
+        ) {
+            log::error!("watch {}: {e}", self.filename);
+            return;
+        }
+        for path in self.extra_watches.lock().iter() {
+            if let Err(e) = watcher.watch(path, notify::RecursiveMode::NonRecursive) {
+                log::warn!("watch-file {}: {e}", path.display());
+            }
+        }
+
+        const DEBOUNCE: Duration = Duration::from_millis(150);
+        while let Some(res) = rx.recv().await {
+            let event = match res {
+                Ok(e) => e,
+                Err(e) => {
+                    log::error!("watch error: {:?}", e);
+                    return;
+                }
+            };
+            if !matches!(event.kind, notify::EventKind::Modify(_)) {
+                continue;
+            }
+            // Drain follow-up events arriving within DEBOUNCE.
+            loop {
+                match tokio::time::timeout(DEBOUNCE, rx.recv()).await {
+                    Ok(Some(Ok(_))) => continue,
+                    Ok(Some(Err(e))) => {
+                        log::error!("watch error: {:?}", e);
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(_) => break,
+                }
+            }
+            let _ = self.reload();
+        }
     }
 
     /// Spawn the drain task that ticks pending `(every …)` /
@@ -222,6 +320,8 @@ fn register_runtime(
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
+    extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
+    load_dir: PathBuf,
     anchor: DateTime<Utc>,
 ) {
     add_log_functions(ctx);
@@ -230,6 +330,24 @@ fn register_runtime(
     register_couplings(ctx, couplings);
     register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
+    register_watches(ctx, extra_watches, load_dir);
+}
+
+fn register_watches(
+    ctx: &mut TulispContext,
+    extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
+    load_dir: PathBuf,
+) {
+    ctx.defun("watch-file", move |path: String| -> Result<bool, Error> {
+        let p = Path::new(&path);
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            load_dir.join(p)
+        };
+        extra_watches.lock().insert(abs);
+        Ok(true)
+    });
 }
 
 AsPlist! {
@@ -387,16 +505,26 @@ fn register_market_makers(
             };
             // demand/surplus are already in cfg; nothing else to set.
             let _ = &mut cfg;
-            let shared = Arc::new(RwLock::new(cfg));
             let seed = a.seed.unwrap_or(1) as u64;
-            mm.lock().insert(
-                a.name.clone(),
-                MarketMakerSpec {
-                    name: a.name.clone(),
-                    shared_config: shared,
-                    seed,
-                },
-            );
+            let mut map = mm.lock();
+            if let Some(existing) = map.get(&a.name) {
+                // Reload-friendly: keep the SharedConfig handle alive
+                // so the running MM task picks up the new values on
+                // its next refresh. Seed only takes effect on first
+                // insert; rotating an MM's seed needs a process
+                // restart.
+                let mut w = existing.shared_config.write();
+                *w = cfg;
+            } else {
+                map.insert(
+                    a.name.clone(),
+                    MarketMakerSpec {
+                        name: a.name.clone(),
+                        shared_config: Arc::new(RwLock::new(cfg)),
+                        seed,
+                    },
+                );
+            }
             Ok(a.name)
         },
     );
