@@ -36,17 +36,32 @@
 ;; task in the binary: as a contract gates out, the MM that quoted
 ;; it migrates to the next-12h slot. Names are stable ("de-lu-q0"
 ;; … "de-lu-q47") so scenarios can still address individual MMs.
+;;
+;; Liquidity + price curve:
+;;   reference  85.00 EUR at q0, +0.10 EUR per quarter (upward slope)
+;;   size       1.0 MW at q0, stepping down to 0.3 MW past q36
+;;   spread     0.40 EUR at q0, widening to 0.90 past q36
+;; Reflects real intraday markets: imminent contracts trade deep
+;; and tight, long-dated ones trade thin and wide.
 
 (dotimes (i 48)
-  (%make-market-maker
-   :name (format "de-lu-q%d" i)
-   :area "10Y1001A1001A82H"
-   :quarter-offset i
-   :reference 85.00
-   :spread 0.40
-   :size 1.0
-   :noise 0.10
-   :seed (+ 1 i)))
+  (let ((sz (cond ((< i 12) 1.0)
+                  ((< i 24) 0.7)
+                  ((< i 36) 0.5)
+                  (t 0.3)))
+        (sp (cond ((< i 12) 0.40)
+                  ((< i 24) 0.55)
+                  ((< i 36) 0.70)
+                  (t 0.90))))
+    (%make-market-maker
+     :name (format "de-lu-q%d" i)
+     :area "10Y1001A1001A82H"
+     :quarter-offset i
+     :reference (+ 85.0 (* 0.10 i))
+     :spread sp
+     :size sz
+     :noise 0.10
+     :seed (+ 1 i))))
 
 ;; --- Aggressors ------------------------------------------------------------
 ;;
