@@ -30,6 +30,11 @@ struct Cli {
     #[arg(long, default_value = "http://[::1]:8810")]
     addr: String,
 
+    /// HTTP endpoint for the UI server (scenarios live here, not on
+    /// the gRPC channel).
+    #[arg(long, default_value = "http://127.0.0.1:8811")]
+    ui_addr: String,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -136,6 +141,27 @@ enum Cmd {
         #[arg(long, value_enum)]
         side: Option<SideArg>,
     },
+    /// Inspect or drive a time-of-day scenario via the UI server.
+    Scenarios {
+        #[command(subcommand)]
+        action: ScenariosAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScenariosAction {
+    /// List every registered scenario and its current state.
+    List,
+    /// Activate a scenario at the wallclock-matching stage.
+    Start { name: String },
+    /// Advance one stage forward.
+    Next { name: String },
+    /// Step one stage backward.
+    Prev { name: String },
+    /// Jump to a specific stage index (0-based).
+    Jump { name: String, idx: usize },
+    /// Deactivate a scenario; aggressors fall back to the natural curve.
+    Stop { name: String },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -348,6 +374,75 @@ async fn connect(addr: &str) -> Result<ElectricityTradingServiceClient<Channel>,
     ElectricityTradingServiceClient::connect(addr.to_string())
         .await
         .map_err(|e| format!("connect {addr}: {e}"))
+}
+
+fn render_scenario_brief(s: &serde_json::Value) -> String {
+    let name = s["name"].as_str().unwrap_or("?");
+    let cur = s["current_stage"].as_u64();
+    let stages = s["stages"].as_array().map(|a| a.len()).unwrap_or(0);
+    let manual = s["manual_override"].as_bool().unwrap_or(false);
+    let wc = s["wallclock_stage"].as_u64();
+    let stage_label = cur
+        .map(|c| {
+            let label = s["stages"]
+                .get(c as usize)
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("{}/{} {}", c + 1, stages, label)
+        })
+        .unwrap_or_else(|| "idle".into());
+    let wc_label = wc
+        .map(|w| {
+            let label = s["stages"]
+                .get(w as usize)
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("now={}", label)
+        })
+        .unwrap_or_default();
+    let manual_label = if manual { " [manual]" } else { "" };
+    let desc = s["description"].as_str().unwrap_or("");
+    format!("{name:24} {stage_label}{manual_label} {wc_label}  — {desc}")
+}
+
+async fn cmd_scenarios(ui_addr: &str, action: ScenariosAction) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let base = ui_addr.trim_end_matches('/');
+    let (method, path) = match &action {
+        ScenariosAction::List => ("GET", "/api/scenarios".to_string()),
+        ScenariosAction::Start { name } => ("POST", format!("/api/scenarios/{name}/start")),
+        ScenariosAction::Next { name } => ("POST", format!("/api/scenarios/{name}/next")),
+        ScenariosAction::Prev { name } => ("POST", format!("/api/scenarios/{name}/prev")),
+        ScenariosAction::Jump { name, idx } => {
+            ("POST", format!("/api/scenarios/{name}/jump/{idx}"))
+        }
+        ScenariosAction::Stop { name } => ("POST", format!("/api/scenarios/{name}/stop")),
+    };
+    let url = format!("{base}{path}");
+    let req = match method {
+        "GET" => client.get(&url),
+        _ => client.post(&url),
+    };
+    let resp = req.send().await.map_err(|e| format!("{method} {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{method} {url}: HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value =
+        resp.json().await.map_err(|e| format!("parse response: {e}"))?;
+    match action {
+        ScenariosAction::List => {
+            let arr = body.as_array().ok_or("expected JSON array")?;
+            if arr.is_empty() {
+                println!("no scenarios registered");
+            } else {
+                for s in arr {
+                    println!("{}", render_scenario_brief(s));
+                }
+            }
+        }
+        _ => println!("{}", render_scenario_brief(&body)),
+    }
+    Ok(())
 }
 
 async fn cmd_place(
@@ -678,13 +773,15 @@ async fn main() {
         match cli.cmd {
             Cmd::Info => {
                 println!("tsctl v{}", env!("CARGO_PKG_VERSION"));
-                println!("endpoint: {}", cli.addr);
+                println!("gRPC endpoint: {}", cli.addr);
+                println!("UI   endpoint: {}", cli.ui_addr);
                 Ok(())
             }
+            Cmd::Scenarios { action } => cmd_scenarios(&cli.ui_addr, action).await,
             cmd => {
                 let mut client = connect(&cli.addr).await?;
                 match cmd {
-                    Cmd::Info => unreachable!(),
+                    Cmd::Info | Cmd::Scenarios { .. } => unreachable!(),
                     Cmd::Place {
                         pool,
                         side,

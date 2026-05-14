@@ -58,8 +58,12 @@ LIMIT orders only, 15-min delivery duration only.
 - `src/bin/tradingsim.rs` — loads `config.lisp` if present (registers
   MMs from it); falls back to a 4-hour hardcoded MM set otherwise;
   serves the gRPC API on the configured socket addr
-- `src/bin/tsctl.rs` — info / place / get / cancel / cancel-all /
-  orders [--live] / trades [--live] / public-trades
+- `src/bin/tsctl.rs` — info / place / get / modify / cancel /
+  cancel-all / orders [--live] / trades [--live] / public-trades /
+  public-book / scenarios (list / start / next / prev / jump / stop).
+  --start accepts "next", "+N", or RFC-3339. The scenarios
+  subcommands hit the HTTP UI server on --ui-addr (default 8811);
+  everything else uses the gRPC --addr (default [::1]:8810).
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
   service
 
