@@ -147,16 +147,26 @@ async fn forecast_noise_scales_with_horizon() {
     let near = temp_at(lf, 0);
     let far = temp_at(lf, 23);
 
-    // The underlying diurnal cycle is sinusoidal with ±8 K range;
-    // adjacent hours differ by ≤ ~2 K. After noise scaled to ±7.2 K
-    // at the 23-h horizon, far should diverge from its neighbour
-    // more than near does.
-    let near_step = (temp_at(lf, 1) - near).abs();
-    let far_step = (temp_at(lf, 22) - far).abs();
-    // Allow a wide margin — noise is stochastic but seeded.
+    let _ = (near, far);
+    // Aggregate absolute hour-to-hour swings over the near third
+    // vs the far third of the 24-hour forecast. Individual
+    // adjacent steps are noisy enough that a single comparison
+    // can land either way; summing seven steps averages over the
+    // seed and reliably shows the noise envelope growing with
+    // horizon. The underlying diurnal cycle's contribution to
+    // hour-to-hour change is roughly symmetric across the 24 h
+    // window, so the increase comes from σ scaling with horizon.
+    let mut near_total = 0.0;
+    for i in 0..7 {
+        near_total += (temp_at(lf, i + 1) - temp_at(lf, i)).abs();
+    }
+    let mut far_total = 0.0;
+    for i in 16..23 {
+        far_total += (temp_at(lf, i + 1) - temp_at(lf, i)).abs();
+    }
     assert!(
-        far_step > near_step,
-        "expected far-horizon step (got {far_step:.2}) > near-horizon step (got {near_step:.2})"
+        far_total > near_total,
+        "expected far-horizon total swing (got {far_total:.2}) > near-horizon total (got {near_total:.2})"
     );
 }
 

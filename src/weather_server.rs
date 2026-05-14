@@ -266,16 +266,21 @@ fn build_forecast(
 }
 
 /// Deterministic uniform-in-±sigma noise. Per-feature `sigma_per_h`
-/// values are calibrated so a 24-hour-out forecast carries a
-/// meaningful uncertainty without dominating the truth:
+/// values are calibrated against published 24-h-out forecast skill
+/// for European NWP models (ECMWF / DWD ICON):
 ///   solar  30  W/m² per hour, scaled by truth / 1361 so night
 ///          (truth = 0) gets zero noise. Peak summer-noon truth
 ///          ≈ 900 W/m² → effective σ ≈ 19.8 W/m² per horizon hour,
 ///          giving ~±475 W/m² at the 24 h horizon — substantial
 ///          uncertainty for sunny days, zero phantom irradiance
 ///          at 22:00.
-///   wind   0.5 m/s per hour  → ±12 m/s
-///   temp   0.3 K per hour    → ±7.2 K
+///   wind   0.15 m/s per hour → ±3.6 m/s at 24 h (std ≈ 2.1 m/s).
+///          Real 24-h 100 m wind RMSE for ECMWF runs about
+///          2 m/s; the previous 0.5 m/s/h gave ±12 m/s spreads
+///          that would tip an MM hedge into hurricane territory.
+///   temp   0.08 K per hour   → ±1.9 K at 24 h (std ≈ 1.1 K).
+///          Real 24-h 2 m temp RMSE is ~1.5–2 K; the previous
+///          0.3 K/h ±7.2 K was over-modeling by ~3×.
 /// Inputs feed an FNV-style seed so the same (create, valid,
 /// feature) tuple always yields the same noise — important so the
 /// same forecast appears identical to the history replay.
@@ -288,9 +293,9 @@ pub(crate) fn apply_noise(
 ) -> f64 {
     let sigma_per_h = match feature {
         ForecastFeature::SurfaceSolarRadiationDownwards => 30.0,
-        ForecastFeature::UWindComponent100Metre | ForecastFeature::VWindComponent100Metre => 0.5,
-        ForecastFeature::UWindComponent10Metre | ForecastFeature::VWindComponent10Metre => 0.5,
-        ForecastFeature::Temperature2Metre => 0.3,
+        ForecastFeature::UWindComponent100Metre | ForecastFeature::VWindComponent100Metre => 0.15,
+        ForecastFeature::UWindComponent10Metre | ForecastFeature::VWindComponent10Metre => 0.15,
+        ForecastFeature::Temperature2Metre => 0.08,
         _ => 0.0,
     };
     let sigma = sigma_per_h * horizon_h;
