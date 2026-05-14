@@ -241,13 +241,20 @@ td { padding: 2px 6px; }
 }
 .stage-list-row {
   display: grid;
-  grid-template-columns: 14px 14px 1fr 92px 86px;
+  grid-template-columns: 14px 14px minmax(0, 1fr) 92px 86px 90px;
   align-items: center;
   gap: 6px;
   padding: 2px 4px;
   border-radius: 3px;
   cursor: pointer;
 }
+.stage-list-row .stage-weather {
+  color: var(--muted);
+  font-size: var(--fs-mini);
+  text-align: right;
+  white-space: nowrap;
+}
+.stage-list-row.current .stage-weather { color: var(--bg); }
 .stage-list-row:hover { background: var(--panel-2); }
 .stage-list-row.current {
   background: var(--accent);
@@ -1095,12 +1102,18 @@ function renderScenarioActive(s, safe) {
     else if (i < cur) { cls += ' done'; state = '✓'; }
     const time = `${fmtStageHour(st.hour_from)}–${fmtStageHour(st.hour_to)}`;
     const bias = `${st.bias_from.toFixed(2)} → ${st.bias_to.toFixed(2)}`;
+    const weatherParts = [];
+    if (st.cloud_cover != null) weatherParts.push(`☁${st.cloud_cover.toFixed(2)}`);
+    if (st.mean_wind != null) weatherParts.push(`${st.mean_wind.toFixed(1)}m/s`);
+    if (st.temperature_base != null) weatherParts.push(`${Math.round(st.temperature_base - 273.15)}°C`);
+    const weather = weatherParts.join(' ');
     return `<div class="${cls}" onclick="scenarioJump('${safe}', ${i})" title="${escapeHtml(st.name)}">
       <span class="stage-num">${i + 1}</span>
       <span class="stage-state">${state}</span>
       <span class="stage-name">${escapeHtml(st.name)}</span>
       <span class="stage-time">${time}</span>
       <span class="stage-bias">${bias}</span>
+      <span class="stage-weather">${weather}</span>
     </div>`;
   }).join('');
 
@@ -1255,6 +1268,18 @@ function renderScenarioSwitcher(others) {
   </div>`;
 }
 
+// After firing a scenario action, blur whatever was focused
+// (typically the picker <select>) so loadScenarios's
+// focus-guard doesn't skip the immediate re-render. Without
+// this the user clicks an item, the select keeps focus, the
+// next poll is skipped, and the panel doesn't update until the
+// poll after that — visible as a ~2 s lag between picking and
+// the active panel showing up.
+function blurActive() {
+  const a = document.activeElement;
+  if (a && typeof a.blur === 'function') a.blur();
+}
+
 async function switchScenario(name) {
   // Stop whichever scenario is currently active (if any), then
   // start the picked one. Best-effort: errors are swallowed because
@@ -1268,11 +1293,13 @@ async function switchScenario(name) {
     }
   }
   await fetch(`/api/scenarios/${name}/start`, { method: 'POST' });
+  blurActive();
   loadScenarios();
 }
 
 async function scenarioAction(name, action) {
   await fetch(`/api/scenarios/${name}/${action}`, { method: 'POST' });
+  blurActive();
   loadScenarios();
 }
 

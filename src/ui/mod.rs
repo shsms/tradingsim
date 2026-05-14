@@ -264,6 +264,12 @@ struct StageJson {
     hour_to: f64,
     bias_from: f64,
     bias_to: f64,
+    /// Optional weather overrides — same shape as the Stage
+    /// struct's fields. None when the stage leaves the area's
+    /// baseline weather alone.
+    cloud_cover: Option<f64>,
+    mean_wind: Option<f64>,
+    temperature_base: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -296,6 +302,9 @@ fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
                 hour_to: s.hour_to,
                 bias_from: s.bias_from,
                 bias_to: s.bias_to,
+                cloud_cover: s.cloud_cover,
+                mean_wind: s.mean_wind,
+                temperature_base: s.temperature_base,
             })
             .collect(),
         current_stage: e.runtime.current_stage,
