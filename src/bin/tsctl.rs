@@ -54,7 +54,11 @@ enum Cmd {
         pool: u64,
         #[arg(long, value_enum)]
         side: SideArg,
-        #[arg(long)]
+        // Real intraday markets admit negative prices under supply
+        // gluts. clap rejects "--price -5" by default because the
+        // leading hyphen looks like a flag; allow_hyphen_values
+        // lets the matcher see the negative number as a value.
+        #[arg(long, allow_hyphen_values = true)]
         price: String,
         #[arg(long)]
         qty: String,
@@ -89,7 +93,7 @@ enum Cmd {
         #[arg(long)]
         pool: u64,
         order: u64,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         price: Option<String>,
         #[arg(long)]
         qty: Option<String>,
