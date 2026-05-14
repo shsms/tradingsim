@@ -81,9 +81,11 @@ fn de_lu() -> DeliveryArea {
 }
 
 fn hour_at_noon() -> DeliveryPeriod {
+    // Far-future timestamp so the gate stays open regardless of when
+    // the test binary runs: 2099-01-01T12:00:00Z = 4070908800.
     DeliveryPeriod {
         start: Some(prost_types::Timestamp {
-            seconds: 1778587200, // 2026-05-13T12:00:00Z
+            seconds: 4070908800,
             nanos: 0,
         }),
         duration: DeliveryDuration::DeliveryDuration15 as i32,

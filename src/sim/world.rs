@@ -906,11 +906,12 @@ impl World {
     }
 
     /// Walk every gridpool's order index and transition any
-    /// non-terminal order whose `valid_until` has lapsed to
-    /// `OrderState::Expired`. Returns the count of orders touched so
-    /// the caller can log expiry activity. The driver loop in the
-    /// binary calls this periodically; clients can also call it from
-    /// the lisp side via a future `(expire-lapsed-orders)` defun.
+    /// non-terminal order whose `valid_until` has lapsed (or whose
+    /// delivery gate has closed — period.start <= now) to
+    /// `OrderState::Expired`. Counterparty orders resting on the
+    /// book for gate-closed contracts are removed alongside, with
+    /// qty=0 events emitted on the public book stream. Returns the
+    /// count of orders touched so the caller can log activity.
     pub fn expire_lapsed_orders(&mut self, now: DateTime<Utc>) -> usize {
         let mut expirables: Vec<(GridpoolId, OrderId, ContractKey)> = Vec::new();
         for gp in self.gridpools.iter() {
@@ -918,17 +919,21 @@ impl World {
                 if d.state.state.is_terminal() {
                     continue;
                 }
-                if let Some(vu) = d.order.valid_until {
-                    if vu <= now {
-                        expirables.push((
-                            gp.id,
-                            d.id,
-                            ContractKey {
-                                area: d.order.area.clone(),
-                                period: d.order.period,
-                            },
-                        ));
-                    }
+                let valid_until_lapsed = d
+                    .order
+                    .valid_until
+                    .map(|vu| vu <= now)
+                    .unwrap_or(false);
+                let gate_closed = d.order.period.start <= now;
+                if valid_until_lapsed || gate_closed {
+                    expirables.push((
+                        gp.id,
+                        d.id,
+                        ContractKey {
+                            area: d.order.area.clone(),
+                            period: d.order.period,
+                        },
+                    ));
                 }
             }
         }
@@ -981,7 +986,44 @@ impl World {
                 );
             }
         }
-        count
+
+        // Counterparty orders aren't on any gridpool, so the loop
+        // above misses them. Sweep every book whose contract has
+        // gated out and cancel each resting order on it; emit
+        // qty=0 events so the public book stream tells subscribers
+        // those entries are gone.
+        let cp_targets: Vec<(ContractKey, Vec<(OrderId, Side, Decimal)>)> = self
+            .books
+            .iter()
+            .filter(|(k, _)| k.period.start <= now)
+            .map(|(k, b)| (k.clone(), b.iter_with_meta()))
+            .filter(|(_, entries)| !entries.is_empty())
+            .collect();
+        let mut cp_count = 0;
+        for (key, entries) in cp_targets {
+            for (order_id, side, price) in entries {
+                // owner_of None == counterparty; gridpool-owned rests
+                // were already handled above.
+                if self.owner_of(order_id).is_some() {
+                    continue;
+                }
+                if let Some(book) = self.books.get_mut(&key) {
+                    book.cancel_with_meta(order_id);
+                }
+                self.emit_book_event(
+                    order_id,
+                    side,
+                    key.area.clone(),
+                    key.period,
+                    price,
+                    Decimal::ZERO,
+                    Currency::Eur,
+                    now,
+                );
+                cp_count += 1;
+            }
+        }
+        count + cp_count
     }
 
     /// Modify a resting order's price / quantity / valid_until / tag.
@@ -1611,6 +1653,52 @@ mod tests {
         assert_eq!(post.state.state, OrderState::Expired);
         assert_eq!(post.state.actor, MarketActor::System);
         assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn expire_lapsed_orders_sweeps_gate_closed_rests() {
+        let (mut w, gp) = setup_world_with_pool();
+        let mut book_rx = w.subscribe_public_book();
+
+        // Gridpool rest + counterparty rest on the same contract.
+        let gp_rest = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let cp_rest = w
+            .submit_counterparty_order(sample_sell(dec!(0.5), dec!(86.0)), t0())
+            .unwrap();
+        // Drain the ADD events.
+        while book_rx.try_recv().is_ok() {}
+        assert_eq!(w.book(&de_lu_hour()).unwrap().len(), 2);
+
+        // Cross past the delivery start — gate is closed.
+        let after_gate = sample_buy(dec!(1.0), dec!(85.0)).period.start
+            + chrono::Duration::seconds(1);
+        let n = w.expire_lapsed_orders(after_gate);
+        assert_eq!(n, 2);
+
+        // Both rests gone; gridpool order flipped to Expired.
+        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+        let post = w.gridpools().get(gp).unwrap().get_order(gp_rest.id).unwrap();
+        assert_eq!(post.state.state, OrderState::Expired);
+        // Counterparty book sweep emits qty=0 — a subsequent
+        // explicit cancel is a no-op.
+        assert!(!w.cancel_counterparty_order(cp_rest));
+
+        // Two qty=0 events on the public-book stream (one per rest).
+        let mut zero_events = 0;
+        while let Ok(rec) = book_rx.try_recv() {
+            let qty = rec
+                .quantity
+                .as_ref()
+                .and_then(|q| q.mw.as_ref())
+                .map(|m| m.value.as_str())
+                .unwrap_or("");
+            if qty == "0" {
+                zero_events += 1;
+            }
+        }
+        assert_eq!(zero_events, 2);
     }
 
     #[test]

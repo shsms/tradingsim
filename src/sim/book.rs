@@ -86,6 +86,16 @@ impl OrderBook {
         Some((side, price))
     }
 
+    /// Snapshot of every resting entry as (id, side, price). For
+    /// callers that need to walk the whole book — e.g., the
+    /// gate-closure sweep that cancels counterparty rests.
+    pub fn iter_with_meta(&self) -> Vec<(OrderId, Side, Decimal)> {
+        self.by_id
+            .iter()
+            .map(|(id, (side, price))| (*id, *side, *price))
+            .collect()
+    }
+
     /// Highest resting buy price (best bid), if any.
     pub fn best_bid(&self) -> Option<Decimal> {
         self.bids.keys().next_back().copied()
