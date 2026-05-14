@@ -19,9 +19,9 @@ use crate::proto::trading::{
     self as proto_trading, CancelAllGridpoolOrdersRequest, CancelAllGridpoolOrdersResponse,
     CancelGridpoolOrderRequest, CancelGridpoolOrderResponse, CreateGridpoolOrderRequest,
     CreateGridpoolOrderResponse, DeliveryTimeFilter, GetGridpoolOrderRequest,
-    GetGridpoolOrderResponse, GridpoolOrderFilter, ListGridpoolOrdersRequest,
+    GetGridpoolOrderResponse, GridpoolOrderFilter, GridpoolTradeFilter, ListGridpoolOrdersRequest,
     ListGridpoolOrdersResponse, ListGridpoolTradesRequest, ListGridpoolTradesResponse,
-    ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolOrdersStreamResponse,
+    PublicTradeFilter, ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolOrdersStreamResponse,
     ReceiveGridpoolTradesStreamRequest, ReceiveGridpoolTradesStreamResponse,
     ReceivePublicOrderBookStreamRequest, ReceivePublicOrderBookStreamResponse,
     ReceivePublicTradesStreamRequest, ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest,
@@ -30,6 +30,7 @@ use crate::proto::trading::{
 use crate::proto_conv::{ConvError, timestamp_from_proto};
 use crate::sim::market::DeliveryPeriod;
 use crate::sim::order::{GridpoolId, Order, OrderDetail, OrderId};
+use crate::sim::trade::{PublicTrade, Trade};
 use crate::sim::world::{SubmitError, World};
 
 /// Cap and default for page sizes. Clients can ask for less, but
@@ -123,6 +124,68 @@ fn period_matches_dtf(period: DeliveryPeriod, dtf: &DeliveryTimeFilter) -> bool 
     if !dtf.duration_filters.is_empty() {
         let d_i32 = crate::proto::common::grid::DeliveryDuration::from(period.duration) as i32;
         if !dtf.duration_filters.contains(&d_i32) {
+            return false;
+        }
+    }
+    true
+}
+
+fn matches_gridpool_trade_filter(t: &Trade, f: &GridpoolTradeFilter) -> bool {
+    if !f.states.is_empty() {
+        let s = proto_trading::TradeState::from(t.state) as i32;
+        if !f.states.contains(&s) {
+            return false;
+        }
+    }
+    if !f.trade_ids.is_empty() && !f.trade_ids.contains(&t.id.0) {
+        return false;
+    }
+    if let Some(want) = f.side {
+        let s = proto_trading::MarketSide::from(t.side) as i32;
+        if s != want {
+            return false;
+        }
+    }
+    if let Some(dtf) = f.delivery_time_filter.as_ref() {
+        if !period_matches_dtf(t.period, dtf) {
+            return false;
+        }
+    }
+    if let Some(area) = f.delivery_area.as_ref() {
+        if area.code != t.area.code {
+            return false;
+        }
+    }
+    // `tag` filter requires an order lookup; deferred.
+    true
+}
+
+fn matches_public_trade_filter(t: &PublicTrade, f: &PublicTradeFilter) -> bool {
+    if !f.states.is_empty() {
+        let s = proto_trading::TradeState::from(t.state) as i32;
+        if !f.states.contains(&s) {
+            return false;
+        }
+    }
+    if let Some(want_period) = f.delivery_period.as_ref() {
+        let want_secs = want_period.start.as_ref().map(|ts| ts.seconds);
+        if want_secs != Some(t.period.start.timestamp()) {
+            return false;
+        }
+        let want_duration = want_period.duration;
+        let got =
+            crate::proto::common::grid::DeliveryDuration::from(t.period.duration) as i32;
+        if want_duration != got {
+            return false;
+        }
+    }
+    if let Some(area) = f.buy_delivery_area.as_ref() {
+        if area.code != t.buy_area.code {
+            return false;
+        }
+    }
+    if let Some(area) = f.sell_delivery_area.as_ref() {
+        if area.code != t.sell_area.code {
             return false;
         }
     }
@@ -336,31 +399,91 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
     async fn list_gridpool_trades(
         &self,
-        _request: Request<ListGridpoolTradesRequest>,
+        request: Request<ListGridpoolTradesRequest>,
     ) -> Result<Response<ListGridpoolTradesResponse>, Status> {
-        Err(Status::unimplemented("list_gridpool_trades: Phase 7"))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let (page_size, cursor) = parse_pagination(&req.pagination_params)?;
+        let filter = req.filter.unwrap_or_default();
+
+        let w = self.world.lock().await;
+        let gp = w
+            .gridpools()
+            .get(gridpool_id)
+            .ok_or_else(|| Status::not_found("unknown gridpool"))?;
+        let mut all: Vec<&Trade> = gp
+            .trades()
+            .iter()
+            .filter(|t| matches_gridpool_trade_filter(t, &filter))
+            .collect();
+        all.sort_by_key(|t| t.id);
+
+        let start = match cursor {
+            Some(c) => all.iter().position(|t| t.id.0 > c).unwrap_or(all.len()),
+            None => 0,
+        };
+        let end = (start + page_size as usize).min(all.len());
+        let page = &all[start..end];
+        let next = if end < all.len() {
+            page.last().map(|t| encode_page_token(page_size, t.id.0))
+        } else {
+            None
+        };
+        Ok(Response::new(ListGridpoolTradesResponse {
+            trades: page.iter().map(|t| (*t).into()).collect(),
+            pagination_info: Some(PaginationInfo {
+                total_items: all.len() as u32,
+                next_page_token: next,
+            }),
+        }))
     }
 
     type ReceiveGridpoolTradesStreamStream = BoxStream<ReceiveGridpoolTradesStreamResponse>;
 
     async fn receive_gridpool_trades_stream(
         &self,
-        _request: Request<ReceiveGridpoolTradesStreamRequest>,
+        request: Request<ReceiveGridpoolTradesStreamRequest>,
     ) -> Result<Response<Self::ReceiveGridpoolTradesStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "receive_gridpool_trades_stream: Phase 7",
-        ))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let filter = req.filter.unwrap_or_default();
+        let rx = {
+            let w = self.world.lock().await;
+            w.subscribe_gridpool_trades(gridpool_id)
+                .ok_or_else(|| Status::not_found("unknown gridpool"))?
+        };
+        let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+            Ok(t) if matches_gridpool_trade_filter(&t, &filter) => {
+                Some(Ok(ReceiveGridpoolTradesStreamResponse {
+                    trade: Some((&t).into()),
+                }))
+            }
+            _ => None,
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type ReceivePublicTradesStreamStream = BoxStream<ReceivePublicTradesStreamResponse>;
 
     async fn receive_public_trades_stream(
         &self,
-        _request: Request<ReceivePublicTradesStreamRequest>,
+        request: Request<ReceivePublicTradesStreamRequest>,
     ) -> Result<Response<Self::ReceivePublicTradesStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "receive_public_trades_stream: Phase 8",
-        ))
+        let req = request.into_inner();
+        let filter = req.filter.unwrap_or_default();
+        // start_time / end_time replay is deferred — we serve live
+        // from the subscription point on. The proto's stream lifetime
+        // contract allows that ("best-effort").
+        let rx = self.world.lock().await.subscribe_public_trades();
+        let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+            Ok(t) if matches_public_trade_filter(&t, &filter) => {
+                Some(Ok(ReceivePublicTradesStreamResponse {
+                    public_trade: Some((&t).into()),
+                }))
+            }
+            _ => None,
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type ReceivePublicOrderBookStreamStream = BoxStream<ReceivePublicOrderBookStreamResponse>;
