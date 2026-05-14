@@ -218,6 +218,52 @@ td { padding: 2px 6px; }
 .scenario-head .scenario-desc { color: var(--muted); font-size: var(--fs-small); }
 
 /* Idle (not-running) scenario: single-line picker. */
+/* Active-scenario stage list — one row per stage with state
+   marker, number, name, time window, bias trajectory. Active
+   row is highlighted; done rows get a check; upcoming rows are
+   muted. Scrolls inside its own height so long scenarios don't
+   blow out the panel. */
+.stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+.stage-list-row {
+  display: grid;
+  grid-template-columns: 14px 14px 1fr 92px 86px;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.stage-list-row:hover { background: var(--panel-2); }
+.stage-list-row.current {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+.stage-list-row.done .stage-num,
+.stage-list-row.done .stage-state { color: var(--buy); }
+.stage-list-row .stage-num { color: var(--muted); text-align: right; }
+.stage-list-row .stage-state { text-align: center; }
+.stage-list-row .stage-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-list-row .stage-time,
+.stage-list-row .stage-bias {
+  color: var(--muted);
+  font-size: var(--fs-mini);
+  text-align: right;
+}
+.stage-list-row.current .stage-num,
+.stage-list-row.current .stage-state,
+.stage-list-row.current .stage-time,
+.stage-list-row.current .stage-bias { color: var(--bg); }
+
 /* Active scenario: 24-hour timeline with wallclock marker + stage
    markers. Stage block widths are proportional to (hour_to -
    hour_from); the 'now' line is positioned at wallclock-hour. */
@@ -1006,15 +1052,22 @@ function wallclockNowHour() {
   return now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
 }
 
+function fmtStageHour(h) {
+  const hh = Math.floor(h);
+  const mm = Math.round((h - hh) * 60);
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
 function renderScenarioActive(s, safe) {
   const cur = s.current_stage;
   const last = s.stages.length - 1;
   const manualBadge = s.manual_override
     ? '<span class="badge-manual">manual</span>'
     : '';
-  const stage = s.stages[cur];
-  const stageBias = stage ? `bias ${stage.bias_from.toFixed(2)} → ${stage.bias_to.toFixed(2)}` : '';
 
+  // Timeline strip: blocks carry just the stage number now —
+  // names live in the list below where there's actually room
+  // for them. The full name + bias still surface on hover.
   const stageBlocks = s.stages.map((st, i) => {
     const left = (st.hour_from / 24) * 100;
     const width = ((st.hour_to - st.hour_from) / 24) * 100;
@@ -1023,9 +1076,27 @@ function renderScenarioActive(s, safe) {
     else if (i < cur) cls += ' done';
     return `<div class="${cls}" style="left:${left}%;width:${width}%"
                  onclick="scenarioJump('${safe}', ${i})"
-                 title="${escapeHtml(st.name)} — bias ${st.bias_from.toFixed(2)} → ${st.bias_to.toFixed(2)}">${escapeHtml(st.name)}</div>`;
+                 title="${escapeHtml(st.name)} — bias ${st.bias_from.toFixed(2)} → ${st.bias_to.toFixed(2)}">${i + 1}</div>`;
   }).join('');
   const nowPct = (wallclockNowHour() / 24) * 100;
+
+  // List of all stages with full detail — name, time window,
+  // bias trajectory. State markers: ✓ for done, ▶ for current.
+  const stageRows = s.stages.map((st, i) => {
+    let cls = 'stage-list-row';
+    let state = '';
+    if (i === cur) { cls += ' current'; state = '▶'; }
+    else if (i < cur) { cls += ' done'; state = '✓'; }
+    const time = `${fmtStageHour(st.hour_from)}–${fmtStageHour(st.hour_to)}`;
+    const bias = `${st.bias_from.toFixed(2)} → ${st.bias_to.toFixed(2)}`;
+    return `<div class="${cls}" onclick="scenarioJump('${safe}', ${i})" title="${escapeHtml(st.name)}">
+      <span class="stage-num">${i + 1}</span>
+      <span class="stage-state">${state}</span>
+      <span class="stage-name">${escapeHtml(st.name)}</span>
+      <span class="stage-time">${time}</span>
+      <span class="stage-bias">${bias}</span>
+    </div>`;
+  }).join('');
 
   const prevDis = cur <= 0 ? 'disabled' : '';
   const nextDis = cur >= last ? 'disabled' : '';
@@ -1034,19 +1105,19 @@ function renderScenarioActive(s, safe) {
     <div class="scenario active">
       <div class="scenario-head">
         <strong>${escapeHtml(s.name)}</strong>
-        <span class="scenario-desc">stage ${cur + 1}/${s.stages.length}: ${escapeHtml(stage?.name || '?')} · ${stageBias}</span>
         ${manualBadge}
+        <span class="scenario-controls" style="margin-left:auto">
+          <button onclick="scenarioAction('${safe}', 'prev')" ${prevDis}>Prev</button>
+          <button onclick="scenarioAction('${safe}', 'next')" ${nextDis}>Next</button>
+          <button onclick="scenarioAction('${safe}', 'stop')">Stop</button>
+        </span>
       </div>
       <div class="timeline">
         ${stageBlocks}
         <div class="timeline-now" style="left:${nowPct}%"></div>
       </div>
       <div class="timeline-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-      <div class="scenario-controls" style="margin-top:6px">
-        <button onclick="scenarioAction('${safe}', 'prev')" ${prevDis}>Prev</button>
-        <button onclick="scenarioAction('${safe}', 'next')" ${nextDis}>Next</button>
-        <button onclick="scenarioAction('${safe}', 'stop')">Stop</button>
-      </div>
+      <div class="stage-list">${stageRows}</div>
     </div>`;
 }
 
