@@ -250,10 +250,19 @@ async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
 // -----------------------------------------------------------------------------
 
 #[derive(Serialize)]
+struct StageJson {
+    name: String,
+    hour_from: f64,
+    hour_to: f64,
+    bias_from: f64,
+    bias_to: f64,
+}
+
+#[derive(Serialize)]
 struct ScenarioJson {
     name: String,
     description: String,
-    stages: Vec<String>,
+    stages: Vec<StageJson>,
     current_stage: Option<usize>,
     /// Stage that contains the current UTC wallclock hour, if any.
     /// Lets the UI mark "where auto-advance would land".
@@ -269,7 +278,18 @@ fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
     ScenarioJson {
         name: e.def.name.clone(),
         description: e.def.description.clone(),
-        stages: e.def.stages.iter().map(|s| s.name.clone()).collect(),
+        stages: e
+            .def
+            .stages
+            .iter()
+            .map(|s| StageJson {
+                name: s.name.clone(),
+                hour_from: s.hour_from,
+                hour_to: s.hour_to,
+                bias_from: s.bias_from,
+                bias_to: s.bias_to,
+            })
+            .collect(),
         current_stage: e.runtime.current_stage,
         wallclock_stage: wallclock_stage(&e.def, h),
         manual_override: e.runtime.manual_override,

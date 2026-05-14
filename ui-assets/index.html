@@ -141,15 +141,56 @@ td { padding: 2px 6px; }
 .status { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: var(--fs-small); background: var(--panel); }
 .status.live { color: var(--buy); }
 .status.offline { color: var(--sell); }
-.scenario { margin-bottom: 10px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
-.scenario-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+.scenario { margin-bottom: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 4px; }
+.scenario.idle { padding: 6px 8px; background: var(--panel-2); }
+.scenario.active { background: var(--panel-2); border-color: var(--accent); }
+.scenario-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; flex-wrap: wrap; }
 .scenario-head strong { color: var(--accent); }
-.stages { font-size: var(--fs-small); margin: 6px 0 8px; display: flex; flex-wrap: wrap; gap: 4px; }
-.stage { padding: 2px 6px; border-radius: 3px; background: var(--bg); color: var(--muted); cursor: pointer; }
-.stage:hover { background: var(--border); }
-.stage.current { background: var(--accent); color: var(--bg); }
-.stage.done { color: var(--buy); }
-.wc { color: var(--buy); font-size: 9px; }
+.scenario-head .scenario-desc { color: var(--muted); font-size: var(--fs-small); }
+
+/* Idle (not-running) scenario: single-line picker. */
+.scenario.idle .scenario-head { margin-bottom: 0; align-items: center; }
+.scenario.idle .scenario-controls { margin-left: auto; }
+
+/* Active scenario: 24-hour timeline with wallclock marker + stage
+   markers. Stage block widths are proportional to (hour_to -
+   hour_from); the 'now' line is positioned at wallclock-hour. */
+.timeline {
+  position: relative;
+  height: 24px;
+  background: var(--bg);
+  border-radius: 3px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+.timeline-stage {
+  position: absolute;
+  top: 0; bottom: 0;
+  border-right: 1px solid var(--border);
+  font-size: var(--fs-mini);
+  color: var(--muted);
+  padding: 2px 4px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.timeline-stage:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+.timeline-stage.done { color: var(--buy); }
+.timeline-stage.current { background: var(--accent); color: var(--bg); font-weight: 600; }
+.timeline-now {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 2px;
+  background: var(--alert);
+  pointer-events: none;
+}
+.timeline-axis {
+  display: flex; justify-content: space-between;
+  font-size: var(--fs-mini);
+  color: var(--muted);
+  margin-top: 2px;
+}
 .badge-manual {
   background: var(--alert);
   color: var(--bg);
@@ -696,42 +737,71 @@ function escapeHtml(s) {
 function renderScenario(s) {
   const cur = s.current_stage;
   const running = cur !== null && cur !== undefined;
-  const last = s.stages.length - 1;
-  const wcStage = s.wallclock_stage;
   const safe = encodeURIComponent(s.name);
+  if (!running) return renderScenarioIdle(s, safe);
+  return renderScenarioActive(s, safe);
+}
 
-  const stages = s.stages.map((name, i) => {
-    let cls = 'stage';
-    if (running && cur === i) cls += ' current';
-    else if (running && i < cur) cls += ' done';
-    const isWallclock = i === wcStage;
-    const marker = isWallclock ? '<span class="wc">•now</span> ' : '';
-    return `<span class="${cls}" data-idx="${i}"
-                  onclick="scenarioJump('${safe}', ${i})"
-                  title="click to jump">${marker}${i + 1}. ${escapeHtml(name)}</span>`;
-  }).join('');
-
-  const startDis = running ? 'disabled' : '';
-  const prevDis = (!running || cur <= 0) ? 'disabled' : '';
-  const nextDis = (!running || cur >= last) ? 'disabled' : '';
-  const stopDis = !running ? 'disabled' : '';
-  const manualBadge = (running && s.manual_override)
-    ? '<span class="badge-manual">manual</span>'
-    : '';
-
+function renderScenarioIdle(s, safe) {
+  // Short row with a Start button on the right. Description tooltips
+  // give the longer story on hover.
   return `
-    <div class="scenario">
+    <div class="scenario idle">
       <div class="scenario-head">
         <strong>${escapeHtml(s.name)}</strong>
-        <span class="muted">${escapeHtml(s.description)}</span>
+        <span class="scenario-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description)}</span>
+        <span class="scenario-controls">
+          <button onclick="scenarioAction('${safe}', 'start')">Start</button>
+        </span>
+      </div>
+    </div>`;
+}
+
+function wallclockNowHour() {
+  const now = new Date();
+  return now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+}
+
+function renderScenarioActive(s, safe) {
+  const cur = s.current_stage;
+  const last = s.stages.length - 1;
+  const manualBadge = s.manual_override
+    ? '<span class="badge-manual">manual</span>'
+    : '';
+  const stage = s.stages[cur];
+  const stageBias = stage ? `bias ${stage.bias_from.toFixed(2)} → ${stage.bias_to.toFixed(2)}` : '';
+
+  const stageBlocks = s.stages.map((st, i) => {
+    const left = (st.hour_from / 24) * 100;
+    const width = ((st.hour_to - st.hour_from) / 24) * 100;
+    let cls = 'timeline-stage';
+    if (i === cur) cls += ' current';
+    else if (i < cur) cls += ' done';
+    return `<div class="${cls}" style="left:${left}%;width:${width}%"
+                 onclick="scenarioJump('${safe}', ${i})"
+                 title="${escapeHtml(st.name)} — bias ${st.bias_from.toFixed(2)} → ${st.bias_to.toFixed(2)}">${escapeHtml(st.name)}</div>`;
+  }).join('');
+  const nowPct = (wallclockNowHour() / 24) * 100;
+
+  const prevDis = cur <= 0 ? 'disabled' : '';
+  const nextDis = cur >= last ? 'disabled' : '';
+
+  return `
+    <div class="scenario active">
+      <div class="scenario-head">
+        <strong>${escapeHtml(s.name)}</strong>
+        <span class="scenario-desc">stage ${cur + 1}/${s.stages.length}: ${escapeHtml(stage?.name || '?')} · ${stageBias}</span>
         ${manualBadge}
       </div>
-      <div class="stages">${stages}</div>
-      <div class="scenario-controls">
-        <button onclick="scenarioAction('${safe}', 'start')" ${startDis}>Start</button>
-        <button onclick="scenarioAction('${safe}', 'prev')"  ${prevDis}>Prev</button>
-        <button onclick="scenarioAction('${safe}', 'next')"  ${nextDis}>Next</button>
-        <button onclick="scenarioAction('${safe}', 'stop')"  ${stopDis}>Stop</button>
+      <div class="timeline">
+        ${stageBlocks}
+        <div class="timeline-now" style="left:${nowPct}%"></div>
+      </div>
+      <div class="timeline-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+      <div class="scenario-controls" style="margin-top:6px">
+        <button onclick="scenarioAction('${safe}', 'prev')" ${prevDis}>Prev</button>
+        <button onclick="scenarioAction('${safe}', 'next')" ${nextDis}>Next</button>
+        <button onclick="scenarioAction('${safe}', 'stop')">Stop</button>
       </div>
     </div>`;
 }
@@ -795,7 +865,8 @@ async function loadScenarios() {
   const active = list.find(s => s.current_stage !== null && s.current_stage !== undefined);
   const indicator = document.getElementById('scenario-indicator');
   if (active) {
-    const stageName = active.stages[active.current_stage] || '?';
+    const stage = active.stages[active.current_stage];
+    const stageName = (stage && stage.name) || '?';
     indicator.textContent = `${active.name} · ${stageName} (${active.current_stage + 1}/${active.stages.length})`;
     indicator.classList.remove('muted');
   } else {
