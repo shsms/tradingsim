@@ -64,48 +64,37 @@ h1 {
   letter-spacing: 0.02em;
 }
 .muted { color: var(--muted); font-size: var(--fs-small); }
+/* Layout — top-down tiers.
+   Tier A: chart  | scenarios     (chart 55%, scenarios 45%)
+   Tier B: filter bar             (full width)
+   Tier C: book   | gridpools     (book 70%, gridpools 30%)
+   Tier D: weather                (full width, below book)
+   Tier E: trade tape             (full width, bottom)
+   Stacks single-column below 900 px viewport. */
 .grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   margin-top: 12px;
-  grid-template-areas:
-    "trades  book"
-    "scenarios scenarios"
-    "gridpools gridpools"
-    "weather weather";
 }
-.panel-trades    { grid-area: trades; }
-.panel-book      { grid-area: book; }
-.panel-scenarios { grid-area: scenarios; }
-.panel-gridpools { grid-area: gridpools; }
-.panel-weather   { grid-area: weather; }
+.tier-row {
+  display: grid;
+  gap: 12px;
+}
+.tier-chart-scenarios { grid-template-columns: 11fr 9fr; }
+.tier-book-gridpools  { grid-template-columns: 7fr 3fr; }
+@media (max-width: 900px) {
+  .tier-row { grid-template-columns: 1fr; }
+}
 
-/* Wide-screen workspace: three columns. Trades become a tall left
-   rim (one tape, full height), book takes the wide middle (more
-   ladders per row), and the three operator panels stack on the
-   right. Trigger at 1600 px so half-screen 4K still uses the
-   narrow layout. */
-@media (min-width: 1600px) {
-  .grid {
-    grid-template-columns: 1.4fr 2fr 1fr;
-    grid-template-areas:
-      "trades book scenarios"
-      "trades book gridpools"
-      "trades book weather";
-  }
-  .panel-trades, .panel-book {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .panel-trades .scroll,
-  .panel-book .scroll {
-    max-height: none;
-    flex: 1;
-    min-height: 0;
-  }
-}
+/* Scenarios + chart panels share a stable min-height so the
+   panel doesn't jump between idle (picker only) and active
+   (timeline + controls) states. Sized to fit the 9-stage
+   summer scenario comfortably. */
+.panel-scenarios, .panel-chart { min-height: 280px; }
+.panel-scenarios { display: flex; flex-direction: column; }
+.panel-scenarios > #scenarios { flex: 1; display: flex; flex-direction: column; }
+.panel-scenarios > #scenarios > * { flex: 1; }
 
 .panel {
   background: var(--panel);
@@ -314,37 +303,22 @@ td { padding: 2px 6px; }
   border-radius: 1px;
 }
 
-/* Tier 2 — hero price chart. Full-width canvas-backed panel; one
-   line per DE area, last 30 min, no overlay framework. Distinct
-   hues per area so lines stay separable; chart palette is kept
-   apart from the buy/sell semantic colours used everywhere else. */
-.hero {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
-  margin-bottom: 12px;
-}
-.hero-head {
+/* Chart panel — canvas line chart for the currently focused
+   contract (auto-picked: next upcoming 15-min boundary;
+   pinned: whatever the user clicked into). Lives inside the
+   panel grid; no longer a separate hero strip. */
+.chart-head {
   display: flex; align-items: baseline; justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 6px; flex-wrap: wrap; gap: 8px;
 }
-.hero-head h2 {
-  margin: 0;
-  font-size: var(--fs-h2);
-  font-weight: 500;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.hero-controls {
+.chart-controls {
   display: flex;
   align-items: baseline;
   gap: 12px;
   font-size: var(--fs-small);
   color: var(--muted);
 }
-.hero-controls select {
+.chart-controls select {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border);
@@ -353,21 +327,22 @@ td { padding: 2px 6px; }
   font-family: inherit;
   font-size: var(--fs-small);
 }
-.hero-legend { display: flex; gap: 10px; font-size: var(--fs-small); }
-.hero-legend span {
+.chart-legend { display: flex; gap: 10px; font-size: var(--fs-small); }
+.chart-legend span {
   display: inline-flex; align-items: center; gap: 4px;
   color: var(--muted);
 }
-.hero-legend .dot {
+.chart-legend .dot {
   width: 10px; height: 2px; display: inline-block;
 }
 #price-chart { display: block; }
 
-/* Book ladder — vertical depth for one contract at a time. The
-   panel header carries area + delivery-period dropdowns the user
-   picks from; rendering 4 areas × 16 periods of ladders side-by-
-   side was unreadable noise. Clicking a trade row still pins the
-   period dropdown to that delivery start. */
+/* Book ladders — one mini-ladder per active area, all for the
+   same delivery period. DE TSO zones come first, international
+   areas after. Capped at 4 visible by default with a 'show N
+   more' toggle so a "+ neighbours" view doesn't blow out the
+   panel. Period picked by the global filter bar; clicking a
+   trade row sets the period and the book follows. */
 .book-controls {
   display: flex;
   gap: 12px;
@@ -384,6 +359,23 @@ td { padding: 2px 6px; }
   font-family: inherit;
   font-size: var(--fs-small);
 }
+.book-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+.book-row .ladder { min-width: 0; }
+.book-show-more {
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-mini);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  padding: 4px;
+  margin-top: 4px;
+}
+.book-show-more:hover { color: var(--text); }
 .ladder {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -551,39 +543,75 @@ td { padding: 2px 6px; }
   </div>
 </section>
 
-<section class="hero" aria-label="price tape">
-  <div class="hero-head">
-    <h2 id="chart-title">Price tape — delivery —</h2>
-    <div class="hero-controls">
-      <label>window
-        <select id="chart-window" onchange="setChartWindow(this.value)">
-          <option value="5">5 min</option>
-          <option value="10">10 min</option>
-          <option value="30" selected>30 min</option>
-          <option value="60">1 hour</option>
-          <option value="240">4 hours</option>
-        </select>
-      </label>
-      <div class="hero-legend" id="chart-legend"></div>
+<div class="grid">
+  <!-- Tier A: chart + scenarios -->
+  <div class="tier-row tier-chart-scenarios">
+    <div class="panel panel-chart" aria-label="price chart">
+      <div class="chart-head">
+        <h2 id="chart-title">Price tape — delivery —</h2>
+        <div class="chart-controls">
+          <label>window
+            <select id="chart-window" onchange="setChartWindow(this.value)">
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="30" selected>30 min</option>
+              <option value="60">1 hour</option>
+              <option value="240">4 hours</option>
+            </select>
+          </label>
+          <div class="chart-legend" id="chart-legend"></div>
+        </div>
+      </div>
+      <canvas id="price-chart"></canvas>
+    </div>
+
+    <div class="panel panel-scenarios">
+      <h2>Scenarios</h2>
+      <div id="scenarios" class="muted">loading…</div>
     </div>
   </div>
-  <canvas id="price-chart"></canvas>
-</section>
 
-<section class="filter-bar" id="contract-filter-bar" style="display:none" aria-label="active delivery">
-  <span>focused</span>
-  <span class="contract-pill" id="contract-pill" onclick="clearPeriodFilter()">
-    <span id="contract-pill-label">—</span>
-    <span>×</span>
-  </span>
-</section>
+  <!-- Tier B: filters -->
+  <section class="filter-bar" id="contract-filter-bar" style="display:none" aria-label="active delivery">
+    <span>focused</span>
+    <span class="contract-pill" id="contract-pill" onclick="clearPeriodFilter()">
+      <span id="contract-pill-label">—</span>
+      <span>×</span>
+    </span>
+  </section>
 
-<section class="filter-bar" id="area-filter-bar" aria-label="area filter">
-  <span>areas</span>
-  <span id="filter-chips"></span>
-</section>
+  <section class="filter-bar" id="area-filter-bar" aria-label="area filter">
+    <span>areas</span>
+    <span id="filter-chips"></span>
+    <span class="muted" style="margin-left:auto">delivery
+      <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
+    </span>
+  </section>
 
-<div class="grid">
+  <!-- Tier C: book + gridpools -->
+  <div class="tier-row tier-book-gridpools">
+    <div class="panel panel-book">
+      <h2>Order book — selected areas, one delivery</h2>
+      <div id="book"></div>
+    </div>
+
+    <div class="panel panel-gridpools">
+      <h2>Gridpools</h2>
+      <div id="gridpools" class="row-list muted">loading…</div>
+    </div>
+  </div>
+
+  <!-- Tier D: weather -->
+  <div class="panel panel-weather">
+    <h2>Weather (now)</h2>
+    <div class="muted" style="margin-bottom:6px">
+      Rows match the active area chips. Click a row for lat/lon
+      and wind direction.
+    </div>
+    <div id="weather" class="row-list">loading…</div>
+  </div>
+
+  <!-- Tier E: trade tape (full width, bottom) -->
   <div class="panel panel-trades">
     <h2>Public trades (last 50)</h2>
     <div class="scroll">
@@ -595,38 +623,6 @@ td { padding: 2px 6px; }
         <tbody id="trades"></tbody>
       </table>
     </div>
-  </div>
-
-  <div class="panel panel-book">
-    <h2>Order book</h2>
-    <div class="book-controls">
-      <label>area
-        <select id="book-area-select" onchange="selectBookArea(this.value)"></select>
-      </label>
-      <label>delivery
-        <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
-      </label>
-    </div>
-    <div id="book"></div>
-  </div>
-
-  <div class="panel panel-scenarios">
-    <h2>Scenarios</h2>
-    <div id="scenarios" class="muted">loading…</div>
-  </div>
-
-  <div class="panel panel-gridpools">
-    <h2>Gridpools</h2>
-    <div id="gridpools" class="row-list muted">loading…</div>
-  </div>
-
-  <div class="panel panel-weather">
-    <h2>Weather (now)</h2>
-    <div class="muted" style="margin-bottom:6px">
-      One row per registered location (0.1° lat/lon grid). Click a
-      row for lat/lon and wind direction.
-    </div>
-    <div id="weather" class="row-list">loading…</div>
   </div>
 </div>
 
@@ -994,13 +990,31 @@ async function loadWeather() {
     setPill('pill-weather', 'down', 'weather');
     return;
   }
+  weatherList = list;
+  rerenderWeather();
+}
+
+// Cache the most recent /api/weather response so chip toggles
+// can refilter without waiting for the next poll.
+let weatherList = [];
+
+function rerenderWeather() {
   const el = document.getElementById('weather');
-  if (!list.length) {
-    el.innerHTML = '<i>no weather locations registered</i>';
+  if (!el) return;
+  // Filter to locations whose area is in the active chips. The
+  // default (unlinked) location is hidden — every TSO zone has
+  // its own location in config.lisp. Order respects ALL_FILTER_AREAS
+  // so DE shows up before the international zones.
+  const order = new Map(ALL_FILTER_AREAS.map((a, i) => [a.code, i]));
+  const filtered = weatherList
+    .filter(l => l.area_code && activeAreas.has(l.area_code))
+    .sort((a, b) => (order.get(a.area_code) ?? 999) - (order.get(b.area_code) ?? 999));
+  if (!filtered.length) {
+    el.innerHTML = '<i>no weather for the active areas</i>';
     return;
   }
-  el.innerHTML = list.map(l => {
-    const tag = l.name.length <= 4 ? l.name.toUpperCase() : l.name.slice(0, 4).toUpperCase();
+  el.innerHTML = filtered.map(l => {
+    const tag = areaTag(l.area_code);
     return `<div class="row-item" onclick="toggleRow(event)">
       <div class="row-head">
         <span class="area-badge">${escapeHtml(tag)}</span>
@@ -1196,6 +1210,7 @@ function toggleArea(code) {
   renderFilterChips();
   rerenderBook();
   applyFilterToTrades();
+  rerenderWeather();
 }
 
 function toggleNeighbours() {
@@ -1208,6 +1223,7 @@ function toggleNeighbours() {
   renderFilterChips();
   rerenderBook();
   applyFilterToTrades();
+  rerenderWeather();
 }
 
 function renderFilterChips() {
@@ -1319,29 +1335,29 @@ function renderLadder(g) {
     </div>`;
 }
 
-/** Selected (area, period) for the single-contract book view.
- *  Initialised lazily on first render to the first contract with
- *  resting orders. Click-to-focus on a trade row syncs `period`
- *  to the focused delivery start. */
-const bookContract = { area: null, period: null };
-
-function selectBookArea(area) {
-  bookContract.area = area;
-  bookContract.period = null;
-  rerenderBook();
-}
+/** Delivery period the book panel is currently showing. Area
+ *  selection comes from the global `activeAreas` set (the
+ *  filter chips), so the book always reflects the user's
+ *  current scope. `period` is null until the first render
+ *  picks a default. */
+const bookContract = { period: null };
+const BOOK_VISIBLE_CAP = 4;
+let bookShowAll = false;
 
 function selectBookPeriod(period) {
   bookContract.period = period;
   rerenderBook();
 }
 
+function toggleBookShowAll() {
+  bookShowAll = !bookShowAll;
+  rerenderBook();
+}
+
 function rerenderBook() {
-  // Group rows by (area, period). Within each group, aggregate
-  // bids and asks separately by price level. Contracts whose gate
-  // has already closed are dropped — the server expires them too,
-  // but this is the belt-and-suspenders if a qty=0 event was
-  // missed (e.g. broadcast lag while the tab was backgrounded).
+  // Group rows by (area, period). Aggregate bids/asks per level.
+  // Closed-gate contracts (period.start in the past) get dropped
+  // belt-and-suspenders for missed qty=0 events.
   const groups = new Map();
   const cutoff = Date.now();
   for (const r of bookState.values()) {
@@ -1362,33 +1378,14 @@ function rerenderBook() {
     target.set(r.price, next);
   }
 
-  // Rebuild dropdown options from what's actually on the book, and
-  // re-pin the selection if the previous choice has gone away.
-  const areaSet = new Set();
-  const periodsByArea = new Map();
-  for (const g of groups.values()) {
-    areaSet.add(g.area);
-    if (!periodsByArea.has(g.area)) periodsByArea.set(g.area, new Set());
-    periodsByArea.get(g.area).add(g.period);
-  }
-  const areas = Array.from(areaSet).sort();
-  if (!bookContract.area || !areaSet.has(bookContract.area)) {
-    bookContract.area = areas[0] || null;
-  }
-  const periods = bookContract.area
-    ? Array.from(periodsByArea.get(bookContract.area) || []).sort()
-    : [];
+  // Available delivery periods across ALL areas — the period
+  // dropdown lets the user pick any contract anyone is quoting,
+  // independent of which areas they currently have selected.
+  const allPeriods = new Set();
+  for (const g of groups.values()) allPeriods.add(g.period);
+  const periods = Array.from(allPeriods).sort();
   if (!bookContract.period || !periods.includes(bookContract.period)) {
     bookContract.period = periods[0] || null;
-  }
-
-  const areaSel = document.getElementById('book-area-select');
-  if (areaSel) {
-    areaSel.innerHTML = areas
-      .map(
-        a => `<option value="${a}"${a === bookContract.area ? ' selected' : ''}>${areaTag(a)}</option>`
-      )
-      .join('');
   }
   const periodSel = document.getElementById('book-period-select');
   if (periodSel) {
@@ -1401,11 +1398,34 @@ function rerenderBook() {
 
   const container = document.getElementById('book');
   if (!container) return;
-  const key = `${bookContract.area}|${bookContract.period}`;
-  const g = groups.get(key);
-  container.innerHTML = g
-    ? renderLadder(g)
-    : '<div class="ladder-empty"><i>no resting orders for this contract</i></div>';
+  if (!bookContract.period) {
+    container.innerHTML = '<div class="ladder-empty"><i>no contracts have resting orders yet</i></div>';
+    return;
+  }
+
+  // One ladder per active area for the selected period. DE TSO
+  // zones come first (tn → bw), then international (fr → at), so
+  // the home market is always on the left.
+  const matches = ALL_FILTER_AREAS
+    .filter(a => activeAreas.has(a.code))
+    .map(a => groups.get(`${a.code}|${bookContract.period}`))
+    .filter(Boolean);
+
+  if (matches.length === 0) {
+    container.innerHTML = '<div class="ladder-empty"><i>no resting orders in active areas for this delivery</i></div>';
+    return;
+  }
+
+  const visible = bookShowAll ? matches : matches.slice(0, BOOK_VISIBLE_CAP);
+  const hidden = matches.length - visible.length;
+  const row = `<div class="book-row">${visible.map(renderLadder).join('')}</div>`;
+  let footer = '';
+  if (hidden > 0) {
+    footer = `<div class="book-show-more" onclick="toggleBookShowAll()">+ ${hidden} more area${hidden === 1 ? '' : 's'}</div>`;
+  } else if (bookShowAll && matches.length > BOOK_VISIBLE_CAP) {
+    footer = '<div class="book-show-more" onclick="toggleBookShowAll()">collapse</div>';
+  }
+  container.innerHTML = row + footer;
 }
 
 function openBookWs() {

@@ -309,6 +309,11 @@ fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
 #[derive(Serialize)]
 struct WeatherLocJson {
     name: String,
+    /// EIC area code this location is linked to via
+    /// `(%make-weather-location :area …)`, if any. None for the
+    /// fallback default location. Lets the UI filter weather rows
+    /// to match the active area chips.
+    area_code: Option<String>,
     lat: f64,
     lon: f64,
     cloud_cover: f64,
@@ -335,8 +340,10 @@ async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
     let out: Vec<WeatherLocJson> = reg
         .locations()
         .iter()
-        .map(|l| WeatherLocJson {
+        .enumerate()
+        .map(|(idx, l)| WeatherLocJson {
             name: l.name.clone(),
+            area_code: reg.area_for_location(idx).map(String::from),
             lat: l.lat,
             lon: l.lon,
             cloud_cover: l.cloud_cover,

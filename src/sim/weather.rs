@@ -208,6 +208,16 @@ impl WeatherRegistry {
         &mut self.locations
     }
 
+    /// Reverse lookup: which area (if any) is anchored to the
+    /// location at `idx`? Used by the UI's /api/weather endpoint
+    /// to filter rows by the active-areas chips.
+    pub fn area_for_location(&self, idx: usize) -> Option<&str> {
+        self.by_area
+            .iter()
+            .find(|(_, v)| **v == idx)
+            .map(|(k, _)| k.as_str())
+    }
+
     /// Mutable handle on the default location — what legacy
     /// `(set-weather-cloud-cover)` etc. setters update.
     pub fn default_mut(&mut self) -> &mut WeatherLocation {
