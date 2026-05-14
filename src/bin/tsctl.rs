@@ -4,7 +4,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
@@ -48,8 +48,11 @@ enum Cmd {
         price: String,
         #[arg(long)]
         qty: String,
-        /// Delivery period start, UTC ISO-8601 e.g. 2026-05-13T12:00:00Z.
-        #[arg(long)]
+        /// Delivery period start. Accepts:
+        ///   - "next"         : next 15-min boundary
+        ///   - "+N"           : N quarters from the next boundary
+        ///   - RFC-3339 UTC   : e.g. 2026-05-14T12:00:00Z
+        #[arg(long, default_value = "next")]
         start: String,
         /// Delivery duration in minutes. Only 15 is admitted today.
         #[arg(long, default_value_t = 15)]
@@ -57,8 +60,9 @@ enum Cmd {
         /// User-defined tag for grouping.
         #[arg(long)]
         tag: Option<String>,
-        /// Delivery area code (EIC). Defaults to DE-LU.
-        #[arg(long, default_value = "10Y1001A1001A82H")]
+        /// Delivery area code (EIC). Defaults to TenneT (the largest
+        /// of the four German TSO zones the sample config registers).
+        #[arg(long, default_value = "10YDE-EON------1")]
         area: String,
         /// Execution restriction (fok / ioc). Default: none (resting).
         #[arg(long, value_enum)]
@@ -198,13 +202,43 @@ fn decimal_proto(s: &str) -> Result<PrDecimal, String> {
 }
 
 fn timestamp_proto(s: &str) -> Result<prost_types::Timestamp, String> {
-    let dt = DateTime::parse_from_rfc3339(s)
-        .map_err(|e| format!("bad timestamp {s:?}: {e}"))?
-        .with_timezone(&Utc);
+    let dt = parse_period_start(s, Utc::now())?;
     Ok(prost_types::Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos() as i32,
     })
+}
+
+/// Parse the --start argument. Three shapes:
+///   - "next"      → next 15-min boundary
+///   - "+N"        → N quarters past the next boundary
+///   - RFC-3339    → as written
+fn parse_period_start(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+    let next_boundary = || {
+        let bucket = (now.timestamp() / 900 + 1) * 900;
+        DateTime::from_timestamp(bucket, 0).unwrap()
+    };
+    if s == "next" {
+        return Ok(next_boundary());
+    }
+    if let Some(rest) = s.strip_prefix('+') {
+        let n: i64 = rest
+            .parse()
+            .map_err(|e| format!("bad quarter offset {rest:?}: {e}"))?;
+        let base = next_boundary();
+        return Ok(base + chrono::Duration::minutes(15 * n));
+    }
+    DateTime::parse_from_rfc3339(s)
+        .map_err(|e| format!("bad timestamp {s:?}: {e}"))
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// Format a proto Timestamp as "HH:MM:SS" UTC for compact line output.
+fn fmt_short_time(ts: &Option<prost_types::Timestamp>) -> String {
+    ts.as_ref()
+        .and_then(|t| Utc.timestamp_opt(t.seconds, t.nanos as u32).single())
+        .map(|dt| dt.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "?".into())
 }
 
 fn render_trade_line(t: &tradingsim::proto::trading::Trade) -> String {
@@ -228,8 +262,9 @@ fn render_trade_line(t: &tradingsim::proto::trading::Trade) -> String {
         .and_then(|p| p.mw.as_ref())
         .map(|a| a.value.clone())
         .unwrap_or_else(|| "?".into());
+    let period = fmt_short_time(&t.delivery_period.as_ref().and_then(|p| p.start.clone()));
     format!(
-        "trade#{} order#{} {side} {qty} MW @ {price} EUR ({area})",
+        "trade#{} order#{} {side} {qty} MW @ {price} EUR (delivery {period}, {area})",
         t.id, t.order_id
     )
 }
@@ -262,7 +297,8 @@ fn render_public_trade_line(t: &tradingsim::proto::trading::PublicTrade) -> Stri
     } else {
         format!("{buy} -> {sell}")
     };
-    format!("public#{} {qty} MW @ {price} EUR ({cross})", t.id)
+    let period = fmt_short_time(&t.delivery_period.as_ref().and_then(|p| p.start.clone()));
+    format!("public#{} {qty} MW @ {price} EUR (delivery {period}, {cross})", t.id)
 }
 
 fn render_order_line(d: &tradingsim::proto::trading::OrderDetail) -> String {
@@ -299,7 +335,13 @@ fn render_order_line(d: &tradingsim::proto::trading::OrderDetail) -> String {
         .and_then(|p| p.mw.as_ref())
         .map(|a| a.value.clone())
         .unwrap_or_else(|| "?".into());
-    format!("#{id} {side} {qty} MW @ {price} EUR (open {open}) [{state}]")
+    let period = fmt_short_time(
+        &d.order
+            .as_ref()
+            .and_then(|o| o.delivery_period.as_ref())
+            .and_then(|p| p.start.clone()),
+    );
+    format!("#{id} {side} {qty} MW @ {price} EUR (open {open}, delivery {period}) [{state}]")
 }
 
 async fn connect(addr: &str) -> Result<ElectricityTradingServiceClient<Channel>, String> {
@@ -538,8 +580,11 @@ async fn cmd_public_book(
                 .and_then(|p| p.mw.as_ref())
                 .map(|a| a.value.clone())
                 .unwrap_or_else(|| "?".into());
+            let period = fmt_short_time(
+                &r.delivery_period.as_ref().and_then(|p| p.start.clone()),
+            );
             println!(
-                "book#{} {side} {qty} MW @ {price} EUR ({area})",
+                "book#{} {side} {qty} MW @ {price} EUR (delivery {period}, {area})",
                 r.id
             );
         }
