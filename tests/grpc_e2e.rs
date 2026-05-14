@@ -15,9 +15,11 @@ use tradingsim::proto::common::grid::{
 use tradingsim::proto::common::market::{Power, Price, price::Currency as PrCurrency};
 use tradingsim::proto::common::types::Decimal as PrDecimal;
 use tradingsim::proto::trading::{
-    CancelGridpoolOrderRequest, CreateGridpoolOrderRequest, GetGridpoolOrderRequest,
-    GridpoolOrderFilter, ListGridpoolOrdersRequest, MarketSide, Order, OrderExecutionOption,
-    OrderState, OrderType, ReceiveGridpoolOrdersStreamRequest, UpdateGridpoolOrderRequest,
+    CancelAllGridpoolOrdersRequest, CancelGridpoolOrderRequest, CreateGridpoolOrderRequest,
+    GetGridpoolOrderRequest, GridpoolOrderFilter, ListGridpoolOrdersRequest,
+    ListGridpoolTradesRequest, MarketSide, Order, OrderExecutionOption, OrderState, OrderType,
+    ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolTradesStreamRequest,
+    ReceivePublicTradesStreamRequest, UpdateGridpoolOrderRequest,
     electricity_trading_service_client::ElectricityTradingServiceClient,
     electricity_trading_service_server::ElectricityTradingServiceServer,
     update_gridpool_order_request::UpdateOrder,
@@ -380,6 +382,180 @@ async fn fok_insufficient_depth_cancels_no_fills() {
         .and_then(|p| p.mw.as_ref())
         .map(|d| d.value.clone());
     assert_eq!(filled.unwrap(), "0");
+}
+
+#[tokio::test]
+async fn cancel_all_terminates_every_active_order_for_the_pool() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
+    // Place three resting buys at non-crossing prices so they all
+    // sit on the book.
+    for price_str in ["80.00", "81.00", "82.00"] {
+        client
+            .create_gridpool_order(CreateGridpoolOrderRequest {
+                gridpool_id: 1,
+                order: Some(limit_order(MarketSide::Buy, price_str, "1.0")),
+            })
+            .await
+            .unwrap();
+    }
+    let resp = client
+        .cancel_all_gridpool_orders(CancelAllGridpoolOrdersRequest { gridpool_id: 1 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.gridpool_id, 1);
+    // Every order ends up in a terminal state — list with no filter
+    // should show 3 entries all Canceled.
+    let listed = client
+        .list_gridpool_orders(ListGridpoolOrdersRequest {
+            gridpool_id: 1,
+            filter: None,
+            pagination_params: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed.order_details.len(), 3);
+    for d in &listed.order_details {
+        assert_eq!(
+            d.state_detail.as_ref().unwrap().state,
+            OrderState::Canceled as i32
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancel_all_unknown_gridpool_returns_not_found() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
+    let err = client
+        .cancel_all_gridpool_orders(CancelAllGridpoolOrdersRequest { gridpool_id: 9999 })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn list_gridpool_trades_returns_completed_fills() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
+    // Cross two orders so a trade lands on the pool's trade index.
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Buy, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Sell, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+    let listed = client
+        .list_gridpool_trades(ListGridpoolTradesRequest {
+            gridpool_id: 1,
+            filter: None,
+            pagination_params: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    // Single self-cross yields one Trade row (buyer + seller are
+    // the same pool, but the trade is recorded once).
+    assert!(
+        !listed.trades.is_empty(),
+        "expected at least one trade after crossing fills"
+    );
+}
+
+#[tokio::test]
+async fn receive_public_trades_stream_emits_each_fill() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
+    let mut stream = client
+        .receive_public_trades_stream(ReceivePublicTradesStreamRequest {
+            filter: None,
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Generate one public trade.
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Buy, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Sell, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("public trade timeout")
+        .expect("stream end")
+        .expect("status");
+    let t = msg.public_trade.expect("public trade present");
+    // The price round-trips through rust_decimal which normalises
+    // trailing zeroes off — "85.00" comes back as "85".
+    assert_eq!(t.price.as_ref().unwrap().amount.as_ref().unwrap().value, "85");
+}
+
+#[tokio::test]
+async fn receive_gridpool_trades_stream_emits_local_fill() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
+    let mut stream = client
+        .receive_gridpool_trades_stream(ReceiveGridpoolTradesStreamRequest {
+            gridpool_id: 1,
+            filter: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Buy, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Sell, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("gridpool trade timeout")
+        .expect("stream end")
+        .expect("status");
+    assert!(msg.trade.is_some());
 }
 
 #[tokio::test]
