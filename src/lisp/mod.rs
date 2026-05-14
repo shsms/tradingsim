@@ -482,11 +482,12 @@ fn register_market_controls(
 }
 
 fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::SharedWeather) {
+    use crate::sim::weather::WeatherLocation;
     let w = weather.clone();
     ctx.defun(
         "set-weather-cloud-cover",
         move |value: f64| -> Result<f64, Error> {
-            w.write().cloud_cover = value.clamp(0.0, 1.0);
+            w.write().default_mut().cloud_cover = value.clamp(0.0, 1.0);
             Ok(value)
         },
     );
@@ -494,7 +495,7 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
     ctx.defun(
         "set-weather-mean-wind",
         move |value: f64| -> Result<f64, Error> {
-            w.write().mean_wind = value.max(0.0);
+            w.write().default_mut().mean_wind = value.max(0.0);
             Ok(value)
         },
     );
@@ -502,17 +503,57 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
     ctx.defun(
         "set-weather-direction",
         move |value: f64| -> Result<f64, Error> {
-            w.write().wind_direction = value.rem_euclid(360.0);
+            w.write().default_mut().wind_direction = value.rem_euclid(360.0);
             Ok(value)
         },
     );
+    let w = weather.clone();
     ctx.defun(
         "set-weather-temperature-base",
         move |value: f64| -> Result<f64, Error> {
-            weather.write().temperature_base = value;
+            w.write().default_mut().temperature_base = value;
             Ok(value)
         },
     );
+    // (%make-weather-location :name … :area … :lat … :lon …
+    //   :cloud-cover … :mean-wind … :wind-direction …
+    //   :temperature-base …)
+    ctx.defun(
+        "%make-weather-location",
+        move |args: Plist<MakeWeatherLocationArgs>| -> Result<bool, Error> {
+            let a = args.into_inner();
+            let loc = WeatherLocation {
+                name: a.name.unwrap_or_else(|| {
+                    format!("loc-{:.1}-{:.1}", a.lat.unwrap_or(0.0), a.lon.unwrap_or(0.0))
+                }),
+                lat: a.lat.unwrap_or(50.0),
+                lon: a.lon.unwrap_or(10.0),
+                cloud_cover: a.cloud_cover.unwrap_or(0.30).clamp(0.0, 1.0),
+                mean_wind: a.mean_wind.unwrap_or(6.0).max(0.0),
+                wind_direction: a.wind_direction.unwrap_or(270.0).rem_euclid(360.0),
+                temperature_base: a.temperature_base.unwrap_or(290.0),
+            };
+            let mut reg = weather.write();
+            let idx = reg.upsert(loc);
+            if let Some(area) = a.area {
+                reg.link_area(area, idx);
+            }
+            Ok(true)
+        },
+    );
+}
+
+AsPlist! {
+    pub struct MakeWeatherLocationArgs {
+        name<":name">: Option<String> {= None},
+        area<":area">: Option<String> {= None},
+        lat<":lat">: Option<f64> {= None},
+        lon<":lon">: Option<f64> {= None},
+        cloud_cover<":cloud-cover">: Option<f64> {= None},
+        mean_wind<":mean-wind">: Option<f64> {= None},
+        wind_direction<":wind-direction">: Option<f64> {= None},
+        temperature_base<":temperature-base">: Option<f64> {= None},
+    }
 }
 
 fn register_curve(ctx: &mut TulispContext, curve: crate::scenarios::SharedCurve) {

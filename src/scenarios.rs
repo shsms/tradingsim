@@ -25,7 +25,7 @@ use rust_decimal::Decimal;
 
 use crate::sim::counterparty::{SharedAggressorConfig, SharedConfig};
 use crate::sim::curve::ForwardCurve;
-use crate::sim::weather::{SharedWeather, WeatherState};
+use crate::sim::weather::{SharedWeather, WeatherLocation, WeatherRegistry};
 
 #[derive(Clone, Debug)]
 pub struct Stage {
@@ -276,7 +276,7 @@ fn apply_biases(
     scenario_bias: Option<f64>,
     bias_scale: f64,
     curve: &ForwardCurve,
-    weather: &WeatherState,
+    weather: &WeatherRegistry,
     now: DateTime<Utc>,
 ) {
     let base_boundary = next_quarter_boundary(now);
@@ -299,7 +299,12 @@ fn apply_biases(
         let bias = effective_for(view.quarter_offset);
         let imbalance = bias - 0.5;
         let shift = imbalance * bias_scale;
-        let new_ref = effective_ref(curve, weather, period_hour_for(view.quarter_offset));
+        // Look up the weather location for this MM's area (falls
+        // back to the registry's default when the area isn't
+        // explicitly linked).
+        let area_code = view.shared_config.read().area.code.clone();
+        let loc = weather.for_area(&area_code);
+        let new_ref = effective_ref(curve, loc, period_hour_for(view.quarter_offset));
         let mut cfg = view.shared_config.write();
         cfg.reference_price = new_ref;
         cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
@@ -307,12 +312,12 @@ fn apply_biases(
     }
 }
 
-/// Forward-curve base price for `hour`, adjusted by the weather
-/// state's solar irradiance (drops price), wind speed (drops price),
-/// and heating-degree-hours (raises price). Each adjustment uses the
-/// per-hour coefficient from the curve. Snapped to the 0.01-EUR
-/// tick so MM submissions built from it pass validate_common.
-pub fn effective_ref(curve: &ForwardCurve, weather: &WeatherState, hour: f64) -> Decimal {
+/// Forward-curve base price for `hour`, adjusted by the supplied
+/// weather location's solar irradiance (drops price), wind speed
+/// (drops price), and heating-degree-hours (raises price). Each
+/// adjustment uses the per-hour coefficient from the curve.
+/// Snapped to the 0.01-EUR tick.
+pub fn effective_ref(curve: &ForwardCurve, weather: &WeatherLocation, hour: f64) -> Decimal {
     let p = curve.point_at(hour);
     let solar_drop = p.solar_coef * (weather.solar_at(hour) - 200.0).max(0.0);
     let wind_drop = p.wind_coef * (weather.wind_at(hour) - 5.0).max(0.0);

@@ -1,13 +1,11 @@
 //! Frequenz Weather API service implementation.
 //!
-//! Surfaces the sim's internal `WeatherState` as a
+//! Surfaces the sim's internal `WeatherRegistry` as a
 //! `frequenz.api.weather.v1.WeatherForecastService`. The live stream
-//! emits a fresh `LocationForecast` every minute carrying 24 hourly
-//! forecast points; each emit is a "revision" with horizon-scaled
-//! noise on top of the underlying truth so successive emits look
-//! like the real-world forecast updates trading apps subscribe to.
-//! Past emissions are kept in a bounded ring buffer that the
-//! historical RPC replays from.
+//! emits, every minute, one `LocationForecast` per registered
+//! weather location (each carrying 24 hourly forecast points with
+//! horizon-scaled noise). Past emissions are kept in a bounded ring
+//! buffer that the historical RPC replays from.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -31,7 +29,7 @@ use crate::proto::weather::{
     location_forecast::{Forecasts, forecasts::FeatureForecast},
     weather_forecast_service_server::WeatherForecastService,
 };
-use crate::sim::weather::{SharedWeather, WeatherState};
+use crate::sim::weather::{SharedWeather, WeatherLocation, WeatherRegistry};
 
 /// Cap on past emissions kept in the ring. 24 h × 60 min = 1440 if
 /// we kept everything; 100 is plenty for typical client back-fills.
@@ -71,27 +69,48 @@ impl WeatherForecastService for WeatherForecastServer {
 
     async fn receive_live_weather_forecast(
         &self,
-        _request: Request<ReceiveLiveWeatherForecastRequest>,
+        request: Request<ReceiveLiveWeatherForecastRequest>,
     ) -> Result<Response<Self::ReceiveLiveWeatherForecastStream>, Status> {
+        let req = request.into_inner();
+        // Each requested Location's lat/lon snaps to the registry's
+        // 0.1° grid; if the client passes none, emit every
+        // registered location.
+        let requested: Vec<(f64, f64)> = req
+            .locations
+            .iter()
+            .filter_map(|loc| {
+                Some((loc.latitude as f64, loc.longitude as f64))
+            })
+            .collect();
         let (tx, rx) = mpsc::channel(8);
         let weather = self.weather.clone();
         let history = self.history.clone();
-        let push_and_emit = move |snap: &WeatherState, now: DateTime<Utc>| {
-            let lf = build_forecast(snap, now);
-            push_history(&history, lf.clone());
+        let push_and_emit = move |reg: &WeatherRegistry, now: DateTime<Utc>| {
+            let locs: Vec<&WeatherLocation> = if requested.is_empty() {
+                reg.locations().iter().collect()
+            } else {
+                requested
+                    .iter()
+                    .map(|(la, lo)| reg.at_latlon(*la, *lo))
+                    .collect()
+            };
+            let mut frames = Vec::with_capacity(locs.len());
+            for loc in locs {
+                let lf = build_forecast(loc, now);
+                push_history(&history, lf.clone());
+                frames.push(lf);
+            }
             ReceiveLiveWeatherForecastResponse {
-                location_forecasts: vec![lf],
+                location_forecasts: frames,
             }
         };
         tokio::spawn(async move {
-            // Emit the initial forecast immediately so a fresh
-            // subscriber doesn't sit silent for a minute.
             let initial = push_and_emit(&weather.read(), Utc::now());
             if tx.send(Ok(initial)).await.is_err() {
                 return;
             }
             let mut tick = tokio::time::interval(Duration::from_secs(60));
-            tick.tick().await; // consume the immediate firing
+            tick.tick().await;
             loop {
                 tick.tick().await;
                 let snap = weather.read().clone();
@@ -160,7 +179,7 @@ fn push_history(ring: &SharedWeatherHistory, lf: LocationForecast) {
 /// 100 m wind u/v components, and air temperature. Values get
 /// horizon-scaled noise on top so successive emits look like real
 /// forecast revisions.
-fn build_forecast(state: &WeatherState, now: DateTime<Utc>) -> LocationForecast {
+fn build_forecast(state: &WeatherLocation, now: DateTime<Utc>) -> LocationForecast {
     let next_hour_secs = (now.timestamp() / 3600 + 1) * 3600;
     let create_secs = now.timestamp();
     let mut forecasts = Vec::with_capacity(24);

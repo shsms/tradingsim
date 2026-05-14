@@ -1,5 +1,5 @@
 //! End-to-end test for the WeatherForecast gRPC service. Spawns
-//! the server on a random TCP port with a synthetic WeatherState
+//! the server on a random TCP port with a synthetic WeatherLocation
 //! and confirms the live stream emits a 24-hour forecast with all
 //! four features.
 
@@ -12,12 +12,18 @@ use tradingsim::proto::weather::{
     weather_forecast_service_client::WeatherForecastServiceClient,
     weather_forecast_service_server::WeatherForecastServiceServer,
 };
-use tradingsim::sim::weather::{WeatherState, new_state};
+use tradingsim::sim::weather::{WeatherLocation, WeatherRegistry, new_state};
 use tradingsim::weather_server::WeatherForecastServer;
 
-async fn spawn_server(state: WeatherState) -> String {
+async fn spawn_server(state: WeatherLocation) -> String {
     let weather = new_state();
-    *weather.write() = state;
+    // Replace the default-slot params so the registry still has
+    // exactly one location and the assertions on forecast count
+    // remain valid.
+    {
+        let mut reg: parking_lot::RwLockWriteGuard<'_, WeatherRegistry> = weather.write();
+        *reg.default_mut() = state;
+    }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -36,7 +42,7 @@ async fn spawn_server(state: WeatherState) -> String {
 
 #[tokio::test]
 async fn live_stream_emits_24_hour_forecast() {
-    let addr = spawn_server(WeatherState::default()).await;
+    let addr = spawn_server(WeatherLocation::de_lu_typical()).await;
     let mut client = WeatherForecastServiceClient::connect(addr).await.unwrap();
     let mut stream = client
         .receive_live_weather_forecast(ReceiveLiveWeatherForecastRequest {
@@ -66,7 +72,7 @@ async fn live_stream_emits_24_hour_forecast() {
 
 #[tokio::test]
 async fn historical_stream_replays_past_emissions() {
-    let addr = spawn_server(WeatherState::default()).await;
+    let addr = spawn_server(WeatherLocation::de_lu_typical()).await;
 
     // First subscriber triggers the initial emit which gets pushed
     // onto the server-side history ring.
@@ -97,9 +103,9 @@ async fn historical_stream_replays_past_emissions() {
 
 #[tokio::test]
 async fn forecast_noise_scales_with_horizon() {
-    let addr = spawn_server(WeatherState {
+    let addr = spawn_server(WeatherLocation { name: "test".to_string(), lat: 50.0, lon: 10.0,
         cloud_cover: 0.0,
-        ..WeatherState::default()
+        ..WeatherLocation::de_lu_typical()
     })
     .await;
     let mut client = WeatherForecastServiceClient::connect(addr).await.unwrap();
@@ -145,19 +151,19 @@ async fn forecast_noise_scales_with_horizon() {
 
 #[tokio::test]
 async fn cloud_cover_attenuates_solar_feature() {
-    let clear = WeatherState {
+    let clear = WeatherLocation { name: "test".to_string(), lat: 50.0, lon: 10.0,
         cloud_cover: 0.0,
-        ..WeatherState::default()
+        ..WeatherLocation::de_lu_typical()
     };
-    let overcast = WeatherState {
+    let overcast = WeatherLocation { name: "test".to_string(), lat: 50.0, lon: 10.0,
         cloud_cover: 0.9,
-        ..WeatherState::default()
+        ..WeatherLocation::de_lu_typical()
     };
 
     // Collect the first frame from each and compare solar at the
     // first daytime hour (the live stream emits 24 hourly forecasts
     // anchored at the next hour boundary).
-    async fn peak_solar(state: WeatherState) -> f32 {
+    async fn peak_solar(state: WeatherLocation) -> f32 {
         let addr = spawn_server(state).await;
         let mut client = WeatherForecastServiceClient::connect(addr).await.unwrap();
         let mut stream = client

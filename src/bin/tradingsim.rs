@@ -299,11 +299,15 @@ async fn main() {
             let curve = curve_handle.read();
             let weather = weather_handle.read();
             for view in &mm_views {
-                let period_start = view.shared_config.read().period.start;
+                let cfg_snap = view.shared_config.read();
+                let period_start = cfg_snap.period.start;
+                let area_code = cfg_snap.area.code.clone();
+                drop(cfg_snap);
                 let hour = period_start.hour() as f64
                     + period_start.minute() as f64 / 60.0;
+                let loc = weather.for_area(&area_code);
                 view.shared_config.write().reference_price =
-                    tradingsim::scenarios::effective_ref(&curve, &weather, hour);
+                    tradingsim::scenarios::effective_ref(&curve, loc, hour);
             }
         }
 
