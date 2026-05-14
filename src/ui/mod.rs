@@ -341,8 +341,13 @@ async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
         return Json(Vec::new());
     };
     let now = chrono::Utc::now();
-    let hour = wallclock_hour(now);
     let reg = handle.read();
+    // active_hour pins the panel to the active stage's midpoint
+    // (e.g. 14.5 for a 13:00–16:00 "deep belly"), so a user
+    // picking that stage at 2 AM still sees midday solar /
+    // temperature. With no scenario running, fall back to the
+    // wallclock hour.
+    let hour = reg.active_hour.unwrap_or_else(|| wallclock_hour(now));
     let day = reg
         .active_day_of_year
         .unwrap_or_else(|| chrono::Datelike::ordinal(&now.date_naive()));

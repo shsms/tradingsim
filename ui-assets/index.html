@@ -238,21 +238,34 @@ td { padding: 2px 6px; }
   overflow-y: auto;
   /* Always reserve scrollbar gutter so the header (sticky at the
      top of this same container) stays aligned with the rows
-     beneath whether scrolling kicks in or not. Without this, the
-     scrollbar covers the "C" of "14 °C" in the weather column. */
+     beneath whether scrolling kicks in or not. */
   scrollbar-gutter: stable;
+  /* Force the narrow Firefox scrollbar — at 4K with a default
+     wide bar, scrollbar-gutter's reserved slot was thinner than
+     the actual scrollbar and the bar covered "°C" in the weather
+     column. `thin` aligns the gutter with the rendered bar.
+     The webkit equivalent below covers Chromium / Safari. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
   font-size: var(--fs-small);
   font-variant-numeric: tabular-nums;
+}
+.stage-list::-webkit-scrollbar { width: 8px; }
+.stage-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
 }
 .stage-list-row,
 .stage-list-header {
   display: grid;
-  /* Time + bias widened to 100 px each so the comfortable-mode
-     font (up to ~13 px) doesn't wrap "00:00–05:00" / "0.50 →
-     0.50" inside its cell. Name kept at 120 px (stage names are
-     short post the "HH:MM " strip). Weather takes the remainder
-     with a clamp(0, 1fr) so it never forces overflow. */
-  grid-template-columns: 14px 14px 120px 115px 115px minmax(0, 1fr);
+  /* Name grows with the row; bias and time stay fixed at 115 px
+     each (their content tops out at ~108 px in comfortable mode).
+     Weather is the only fixed-width tail column at 240 px — that
+     is exactly the natural width of "☁ 0.10 · 3.0 m/s · 14 °C"
+     at the comfortable font size, so it sits flush against bias
+     with no dead gap. Without this, weather was 1fr and got the
+     whole row leftover, pushing it to the far edge. */
+  grid-template-columns: 14px 14px minmax(120px, 1fr) 115px 115px 240px;
   align-items: center;
   gap: 6px;
   padding: 2px 4px;

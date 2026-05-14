@@ -253,6 +253,15 @@ pub fn spawn_bias_tick(
             {
                 let mut w = weather.write();
                 w.active_day_of_year = Some(day_of_year);
+                w.active_hour = active.as_ref().map(|(s, _, _)| {
+                    // Midpoint of the stage's hour range. The
+                    // weather panel reads this for its "now"
+                    // snapshot so picking a midday stage shows
+                    // midday solar even at 2 AM wallclock. The
+                    // stage timeline keeps using wallclock — only
+                    // the displayed weather follows the stage.
+                    0.5 * (s.hour_from + s.hour_to)
+                });
                 for loc in w.locations_mut() {
                     loc.reset_to_baseline();
                 }
