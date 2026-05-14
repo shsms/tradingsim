@@ -73,11 +73,13 @@ no need to break that pattern.
 fills) in one place; two thin public entrypoints pick the
 "submitter context" (gridpool-owned vs counterparty).
 
-*** TODO Generic server filter helper
-=matches_order_filter=, =matches_gridpool_trade_filter=,
-=matches_public_book_filter=, =matches_public_trade_filter= all
-chain "if filter.field is non-empty/some, check
-membership/equality". One macro or generic.
+*** DONE Generic server filter helpers
+Four little =bool=-returning helpers — =enum_list_passes=,
+=optional_eq_passes=, =area_passes=, =exact_period_passes= — cover
+the repeated shapes across the four filter predicates. Each of
+=matches_gridpool_trade_filter=, =matches_public_book_filter=,
+=matches_public_trade_filter=, =matches_order_filter= collapses
+to a single short =&&= chain. Net -41 LOC, easier to read.
 
 *** TODO Split =src/lisp/mod.rs= into a directory
 1575 LOC monolith. Suggested split: =config.rs= (struct + boot),

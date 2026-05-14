@@ -110,6 +110,43 @@ fn encode_page_token(page_size: u32, last_id: u64) -> String {
     format!("{page_size}:{last_id}")
 }
 
+/// True iff `candidate` passes a "list of allowed enum values"
+/// filter. Empty list = no filtering (always passes); non-empty
+/// list = membership check. The proto stores enum-valued filter
+/// fields as `Vec<i32>` so this works generically.
+fn enum_list_passes(allowed: &[i32], candidate: i32) -> bool {
+    allowed.is_empty() || allowed.contains(&candidate)
+}
+
+/// True iff an optional-int filter passes the candidate. None = no
+/// filtering; Some(want) = equality. Used for `Option<i32>` side
+/// filters that the proto exposes on most filter messages.
+fn optional_eq_passes(want: Option<i32>, candidate: i32) -> bool {
+    want.is_none_or(|w| w == candidate)
+}
+
+/// True iff an optional-area filter passes. None = no filtering;
+/// Some(area) = the candidate area code must match.
+fn area_passes(want: Option<&crate::proto::common::grid::DeliveryArea>, candidate: &str) -> bool {
+    want.is_none_or(|a| a.code == candidate)
+}
+
+/// True iff an optional exact-period filter passes (start timestamp
+/// + duration both match). Used by the public-tape filters that
+/// pin to a single contract instead of an interval.
+fn exact_period_passes(
+    want: Option<&crate::proto::common::grid::DeliveryPeriod>,
+    candidate: DeliveryPeriod,
+) -> bool {
+    match want {
+        None => true,
+        Some(p) => {
+            p.start.as_ref().map(|ts| ts.seconds) == Some(candidate.start.timestamp())
+                && p.duration == candidate.duration as i32
+        }
+    }
+}
+
 /// True iff a DeliveryTimeFilter selects `period`. Half-open
 /// interval semantics on period.start; duration_filters is an
 /// allow-list (empty = any).
@@ -140,133 +177,55 @@ fn period_matches_dtf(period: DeliveryPeriod, dtf: &DeliveryTimeFilter) -> bool 
 }
 
 fn matches_gridpool_trade_filter(t: &Trade, f: &GridpoolTradeFilter) -> bool {
-    if !f.states.is_empty() {
-        let s = t.state as i32;
-        if !f.states.contains(&s) {
-            return false;
-        }
-    }
-    if !f.trade_ids.is_empty() && !f.trade_ids.contains(&t.id.0) {
-        return false;
-    }
-    if let Some(want) = f.side {
-        let s = t.side as i32;
-        if s != want {
-            return false;
-        }
-    }
-    if let Some(dtf) = f.delivery_time_filter.as_ref()
-        && !period_matches_dtf(t.period, dtf)
-    {
-        return false;
-    }
-    if let Some(area) = f.delivery_area.as_ref()
-        && area.code != t.area.code
-    {
-        return false;
-    }
     // `tag` filter requires an order lookup; deferred.
-    true
+    enum_list_passes(&f.states, t.state as i32)
+        && (f.trade_ids.is_empty() || f.trade_ids.contains(&t.id.0))
+        && optional_eq_passes(f.side, t.side as i32)
+        && f.delivery_time_filter
+            .as_ref()
+            .is_none_or(|dtf| period_matches_dtf(t.period, dtf))
+        && area_passes(f.delivery_area.as_ref(), &t.area.code)
 }
 
 fn matches_public_book_filter(r: &PublicOrderBookRecord, f: &PublicOrderBookFilter) -> bool {
-    if let Some(want_period) = f.delivery_period.as_ref() {
-        let want_secs = want_period.start.as_ref().map(|ts| ts.seconds);
+    let period_matches = f.delivery_period.as_ref().is_none_or(|want| {
+        let want_secs = want.start.as_ref().map(|ts| ts.seconds);
         let got_secs = r
             .delivery_period
             .as_ref()
             .and_then(|p| p.start.as_ref())
             .map(|ts| ts.seconds);
-        if want_secs != got_secs {
-            return false;
-        }
-        let want_duration = want_period.duration;
         let got_duration = r.delivery_period.as_ref().map(|p| p.duration).unwrap_or(0);
-        if want_duration != got_duration {
-            return false;
-        }
-    }
-    if let Some(area) = f.delivery_area.as_ref() {
-        let got = r
-            .delivery_area
-            .as_ref()
-            .map(|a| a.code.as_str())
-            .unwrap_or("");
-        if area.code != got {
-            return false;
-        }
-    }
-    if let Some(want_side) = f.side
-        && want_side != r.side
-    {
-        return false;
-    }
-    true
+        want_secs == got_secs && want.duration == got_duration
+    });
+    let area_got = r
+        .delivery_area
+        .as_ref()
+        .map(|a| a.code.as_str())
+        .unwrap_or("");
+    period_matches
+        && area_passes(f.delivery_area.as_ref(), area_got)
+        && optional_eq_passes(f.side, r.side)
 }
 
 fn matches_public_trade_filter(t: &PublicTrade, f: &PublicTradeFilter) -> bool {
-    if !f.states.is_empty() {
-        let s = t.state as i32;
-        if !f.states.contains(&s) {
-            return false;
-        }
-    }
-    if let Some(want_period) = f.delivery_period.as_ref() {
-        let want_secs = want_period.start.as_ref().map(|ts| ts.seconds);
-        if want_secs != Some(t.period.start.timestamp()) {
-            return false;
-        }
-        let want_duration = want_period.duration;
-        let got = t.period.duration as i32;
-        if want_duration != got {
-            return false;
-        }
-    }
-    if let Some(area) = f.buy_delivery_area.as_ref()
-        && area.code != t.buy_area.code
-    {
-        return false;
-    }
-    if let Some(area) = f.sell_delivery_area.as_ref()
-        && area.code != t.sell_area.code
-    {
-        return false;
-    }
-    true
+    enum_list_passes(&f.states, t.state as i32)
+        && exact_period_passes(f.delivery_period.as_ref(), t.period)
+        && area_passes(f.buy_delivery_area.as_ref(), &t.buy_area.code)
+        && area_passes(f.sell_delivery_area.as_ref(), &t.sell_area.code)
 }
 
 fn matches_order_filter(d: &OrderDetail, f: &GridpoolOrderFilter) -> bool {
-    if !f.states.is_empty() {
-        let s_i32 = d.state.state as i32;
-        if !f.states.contains(&s_i32) {
-            return false;
-        }
-    }
-    if let Some(want) = f.side {
-        let s_i32 = d.order.side as i32;
-        if s_i32 != want {
-            return false;
-        }
-    }
-    if let Some(dtf) = f.delivery_time_filter.as_ref()
-        && !period_matches_dtf(d.order.period, dtf)
-    {
-        return false;
-    }
-    if let Some(area) = f.delivery_area.as_ref()
-        && area.code != d.order.area.code
-    {
-        return false;
-    }
-    if let Some(want_tag) = f.tag.as_deref()
-        && d.order.tag.as_deref() != Some(want_tag)
-    {
-        return false;
-    }
-    if !f.order_ids.is_empty() && !f.order_ids.contains(&d.id.0) {
-        return false;
-    }
-    true
+    enum_list_passes(&f.states, d.state.state as i32)
+        && optional_eq_passes(f.side, d.order.side as i32)
+        && f.delivery_time_filter
+            .as_ref()
+            .is_none_or(|dtf| period_matches_dtf(d.order.period, dtf))
+        && area_passes(f.delivery_area.as_ref(), &d.order.area.code)
+        && f.tag
+            .as_deref()
+            .is_none_or(|want| d.order.tag.as_deref() == Some(want))
+        && (f.order_ids.is_empty() || f.order_ids.contains(&d.id.0))
 }
 
 #[tonic::async_trait]
