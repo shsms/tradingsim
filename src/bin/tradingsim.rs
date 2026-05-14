@@ -271,18 +271,22 @@ async fn main() {
     // drift, so visible price moves land within seconds rather than
     // minutes.
     if let Some(c) = lisp_config_arc.as_ref() {
-        // Seed each MM's reference from the curve at boot so the very
-        // first quote (within MM_REFRESH_INTERVAL) is already on-curve,
-        // ahead of the first bias tick a few seconds later.
+        // Seed each MM's reference from the curve+weather at boot so
+        // the very first quote (within MM_REFRESH_INTERVAL) is
+        // already on-curve, ahead of the first bias tick a few
+        // seconds later.
         {
             use chrono::Timelike;
-            let curve = c.curve();
-            let curve = curve.read();
+            let curve_handle = c.curve();
+            let weather_handle = c.weather();
+            let curve = curve_handle.read();
+            let weather = weather_handle.read();
             for view in &mm_views {
                 let period_start = view.shared_config.read().period.start;
                 let hour = period_start.hour() as f64
                     + period_start.minute() as f64 / 60.0;
-                view.shared_config.write().reference_price = curve.base_price_at(hour);
+                view.shared_config.write().reference_price =
+                    tradingsim::scenarios::effective_ref(&curve, &weather, hour);
             }
         }
 
@@ -293,6 +297,7 @@ async fn main() {
                 c.scenarios(),
                 c.bias_scale(),
                 c.curve(),
+                c.weather(),
                 Duration::from_secs(5),
             );
         }

@@ -25,6 +25,7 @@ use rust_decimal::Decimal;
 
 use crate::sim::counterparty::{SharedAggressorConfig, SharedConfig};
 use crate::sim::curve::ForwardCurve;
+use crate::sim::weather::{SharedWeather, WeatherState};
 
 #[derive(Clone, Debug)]
 pub struct Stage {
@@ -210,6 +211,7 @@ pub fn spawn_bias_tick(
     scenarios: SharedScenarios,
     bias_scale: SharedBiasScale,
     curve: SharedCurve,
+    weather: SharedWeather,
     cadence: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -220,7 +222,16 @@ pub fn spawn_bias_tick(
             let scenario_bias = pick_active_bias(&scenarios, now);
             let scale = *bias_scale.read();
             let curve_snap = curve.read().clone();
-            apply_biases(&aggressors, &mms, scenario_bias, scale, &curve_snap, now);
+            let weather_snap = weather.read().clone();
+            apply_biases(
+                &aggressors,
+                &mms,
+                scenario_bias,
+                scale,
+                &curve_snap,
+                &weather_snap,
+                now,
+            );
         }
     })
 }
@@ -265,6 +276,7 @@ fn apply_biases(
     scenario_bias: Option<f64>,
     bias_scale: f64,
     curve: &ForwardCurve,
+    weather: &WeatherState,
     now: DateTime<Utc>,
 ) {
     let base_boundary = next_quarter_boundary(now);
@@ -285,22 +297,29 @@ fn apply_biases(
     }
     for view in mms {
         let bias = effective_for(view.quarter_offset);
-        // Translate flow imbalance into MM tilts so the quotes shift
-        // even before trades have a chance to drag the reference. A
-        // bias > 0.5 (buy pressure) pushes both bid and ask up via
-        // positive demand + negative surplus; bias < 0.5 does the
-        // mirror image.
         let imbalance = bias - 0.5;
         let shift = imbalance * bias_scale;
-        // Reference price tracks the forward curve at the contract's
-        // delivery hour. Each tick overwrites it; the bid/ask shift
-        // away from this baseline lives entirely in demand+surplus.
-        let new_ref = curve.base_price_at(period_hour_for(view.quarter_offset));
+        let new_ref = effective_ref(curve, weather, period_hour_for(view.quarter_offset));
         let mut cfg = view.shared_config.write();
         cfg.reference_price = new_ref;
         cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
         cfg.surplus = Decimal::try_from(-shift).unwrap_or(Decimal::ZERO);
     }
+}
+
+/// Forward-curve base price for `hour`, adjusted by the weather
+/// state's solar irradiance (drops price), wind speed (drops price),
+/// and heating-degree-hours (raises price). Each adjustment uses the
+/// per-hour coefficient from the curve. Snapped to the 0.01-EUR
+/// tick so MM submissions built from it pass validate_common.
+pub fn effective_ref(curve: &ForwardCurve, weather: &WeatherState, hour: f64) -> Decimal {
+    let p = curve.point_at(hour);
+    let solar_drop = p.solar_coef * (weather.solar_at(hour) - 200.0).max(0.0);
+    let wind_drop = p.wind_coef * (weather.wind_at(hour) - 5.0).max(0.0);
+    let load_rise = p.load_coef * weather.heating_degree(hour);
+    let net = p.base_price - solar_drop - wind_drop + load_rise;
+    let cents = (net * 100.0).round() as i64;
+    Decimal::new(cents, 2)
 }
 
 fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {

@@ -115,6 +115,7 @@ pub struct Config {
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
+    weather: crate::sim::weather::SharedWeather,
     /// Extra paths registered via `(watch-file PATH)`; the notify
     /// watcher reloads on any of them changing in addition to the
     /// top-level config file.
@@ -145,6 +146,7 @@ impl Config {
         let scenarios = crate::scenarios::new_registry();
         let bias_scale = crate::scenarios::new_bias_scale();
         let curve = crate::scenarios::new_curve();
+        let weather = crate::sim::weather::new_state();
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
@@ -166,6 +168,7 @@ impl Config {
             scenarios.clone(),
             bias_scale.clone(),
             curve.clone(),
+            weather.clone(),
             extra_watches.clone(),
             load_dir.clone(),
             anchor,
@@ -197,6 +200,7 @@ impl Config {
             scenarios,
             bias_scale,
             curve,
+            weather,
             extra_watches,
             timer_handle,
             anchor,
@@ -365,6 +369,13 @@ impl Config {
         self.curve.clone()
     }
 
+    /// Shared weather-state handle. Lisp tunes the parameters via
+    /// `(set-weather-cloud-cover)` / `-mean-wind` / `-direction` /
+    /// `-temperature-base`. Bias tick + future gRPC service read it.
+    pub fn weather(&self) -> crate::sim::weather::SharedWeather {
+        self.weather.clone()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -390,6 +401,7 @@ fn register_runtime(
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
+    weather: crate::sim::weather::SharedWeather,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
     anchor: DateTime<Utc>,
@@ -405,7 +417,42 @@ fn register_runtime(
     register_scenarios(ctx, scenarios);
     register_bias_scale(ctx, bias_scale);
     register_curve(ctx, curve);
+    register_weather(ctx, weather);
     register_watches(ctx, extra_watches, load_dir);
+}
+
+fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::SharedWeather) {
+    let w = weather.clone();
+    ctx.defun(
+        "set-weather-cloud-cover",
+        move |value: f64| -> Result<f64, Error> {
+            w.write().cloud_cover = value.clamp(0.0, 1.0);
+            Ok(value)
+        },
+    );
+    let w = weather.clone();
+    ctx.defun(
+        "set-weather-mean-wind",
+        move |value: f64| -> Result<f64, Error> {
+            w.write().mean_wind = value.max(0.0);
+            Ok(value)
+        },
+    );
+    let w = weather.clone();
+    ctx.defun(
+        "set-weather-direction",
+        move |value: f64| -> Result<f64, Error> {
+            w.write().wind_direction = value.rem_euclid(360.0);
+            Ok(value)
+        },
+    );
+    ctx.defun(
+        "set-weather-temperature-base",
+        move |value: f64| -> Result<f64, Error> {
+            weather.write().temperature_base = value;
+            Ok(value)
+        },
+    );
 }
 
 fn register_curve(ctx: &mut TulispContext, curve: crate::scenarios::SharedCurve) {
