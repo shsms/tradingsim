@@ -1530,7 +1530,7 @@ function rerenderTrades() {
     const periods = new Set();
     for (const t of tradesBuffer) periods.add(t.period);
     const sorted = Array.from(periods).sort();
-    const opts = ['<option value="all">all deliveries</option>']
+    const opts = ['<option value="all">All delivery periods</option>']
       .concat(sorted.map(p => {
         const sel = p === tradesPeriodFilter ? ' selected' : '';
         return `<option value="${p}"${sel}>${shortTime(p)}</option>`;
@@ -1613,7 +1613,7 @@ function renderLadder(g) {
   return `
     <div class="ladder">
       <div class="ladder-head">
-        <span><span class="area-badge">${areaTag(g.area)}</span> ${shortTime(g.period)}</span>
+        <span><span class="area-badge">${areaTag(g.area)}</span></span>
         <span class="midprice">mid ${mid}</span>
       </div>
       ${askMore}
@@ -1698,14 +1698,23 @@ function rerenderBook() {
 
   // One ladder per active area for the selected period. DE TSO
   // zones come first (tn → bw), then international (fr → at), so
-  // the home market is always on the left.
+  // the home market is always on the left. Empty groups are kept
+  // (and rendered with "no asks / no bids" placeholders) so the
+  // card itself doesn't flicker every couple of seconds when the
+  // MM rotates quotes — the cancel arrives a hair before the
+  // repost, leaving a brief no-orders window the renderer used to
+  // collapse into "no resting orders in active areas".
   const matches = ALL_FILTER_AREAS
     .filter(a => activeAreas.has(a.code))
-    .map(a => groups.get(`${a.code}|${bookContract.period}`))
-    .filter(Boolean);
+    .map(a => groups.get(`${a.code}|${bookContract.period}`) ?? {
+      area: a.code,
+      period: bookContract.period,
+      bids: new Map(),
+      asks: new Map(),
+    });
 
   if (matches.length === 0) {
-    container.innerHTML = '<div class="ladder-empty"><i>no resting orders in active areas for this delivery</i></div>';
+    container.innerHTML = '<div class="ladder-empty"><i>no areas selected</i></div>';
     return;
   }
 
