@@ -363,6 +363,28 @@ td { padding: 2px 6px; }
   font-family: inherit;
   font-size: var(--fs-small);
 }
+/* Panel header row with the delivery picker pinned right next
+   to the panel title — keeps the control near the data it
+   scopes. */
+.book-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: var(--fs-small);
+}
+.book-head h2 { margin: 0; }
+.book-head select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: var(--fs-small);
+}
+
 /* Fixed-size ladders so the order book stays predictable as
    areas come and go. Wraps to additional rows on narrow panels. */
 .book-row {
@@ -638,15 +660,17 @@ td { padding: 2px 6px; }
   <section class="filter-bar" id="area-filter-bar" aria-label="area filter">
     <span>areas</span>
     <span id="filter-chips"></span>
-    <span class="muted" style="margin-left:auto">delivery
-      <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
-    </span>
   </section>
 
   <!-- Tier C: book + gridpools -->
   <div class="tier-row tier-book-gridpools">
     <div class="panel panel-book">
-      <h2>Order book — selected areas, one delivery</h2>
+      <div class="book-head">
+        <h2>Order book — selected areas, one delivery</h2>
+        <span class="muted">delivery
+          <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
+        </span>
+      </div>
       <div id="book"></div>
     </div>
 
@@ -1096,6 +1120,11 @@ async function loadScenarios() {
   if (!r.ok) return;
   const list = await r.json();
   const el = document.getElementById('scenarios');
+  // If the user is mid-interaction with a control inside this
+  // panel — typically the open <select> picker — skip the
+  // innerHTML rewrite that would destroy the dropdown and snap
+  // it shut. Next poll picks up where we left off.
+  if (el && el.contains(document.activeElement)) return;
   const active = list.find(s => s.current_stage !== null && s.current_stage !== undefined);
 
   if (!list.length) {
@@ -1443,7 +1472,10 @@ function rerenderBook() {
     bookContract.period = periods[0] || null;
   }
   const periodSel = document.getElementById('book-period-select');
-  if (periodSel) {
+  // Skip rewriting the <select> while the user is interacting
+  // with it — replacing innerHTML on every 200 ms tick would
+  // close the open dropdown before they can pick.
+  if (periodSel && document.activeElement !== periodSel) {
     periodSel.innerHTML = periods
       .map(
         p => `<option value="${p}"${p === bookContract.period ? ' selected' : ''}>${shortTime(p)}</option>`
