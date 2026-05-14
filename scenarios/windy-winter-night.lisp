@@ -6,12 +6,21 @@
  :name "windy-winter-night"
  :description "Wind surplus overnight; modest daytime swings. Bias 0.42 → 0.62."
  :stages
- '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.42 :bias-to 0.42)
-   (:name "05:00 dawn ramp"     :hour-from 5.0  :hour-to 8.0  :bias-from 0.42 :bias-to 0.55)
-   (:name "08:00 morning peak"  :hour-from 8.0  :hour-to 10.0 :bias-from 0.55 :bias-to 0.50)
-   (:name "10:00 plateau"       :hour-from 10.0 :hour-to 13.0 :bias-from 0.50 :bias-to 0.45)
-   (:name "13:00 plateau"       :hour-from 13.0 :hour-to 16.0 :bias-from 0.45 :bias-to 0.45)
-   (:name "16:00 evening ramp"  :hour-from 16.0 :hour-to 18.0 :bias-from 0.45 :bias-to 0.55)
-   (:name "18:00 evening peak"  :hour-from 18.0 :hour-to 21.0 :bias-from 0.55 :bias-to 0.62)
-   (:name "21:00 wind-down"     :hour-from 21.0 :hour-to 23.0 :bias-from 0.62 :bias-to 0.48)
-   (:name "23:00 late night"    :hour-from 23.0 :hour-to 24.0 :bias-from 0.48 :bias-to 0.42)))
+ '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.42 :bias-to 0.42
+    :cloud-cover 0.55 :mean-wind 13.0 :temperature-base 273.0)
+   (:name "05:00 dawn ramp"     :hour-from 5.0  :hour-to 8.0  :bias-from 0.42 :bias-to 0.55
+    :cloud-cover 0.55 :mean-wind 12.0 :temperature-base 273.0)
+   (:name "08:00 morning peak"  :hour-from 8.0  :hour-to 10.0 :bias-from 0.55 :bias-to 0.50
+    :cloud-cover 0.50 :mean-wind 10.0 :temperature-base 274.0)
+   (:name "10:00 plateau"       :hour-from 10.0 :hour-to 13.0 :bias-from 0.50 :bias-to 0.45
+    :cloud-cover 0.50 :mean-wind 8.0 :temperature-base 276.0)
+   (:name "13:00 plateau"       :hour-from 13.0 :hour-to 16.0 :bias-from 0.45 :bias-to 0.45
+    :cloud-cover 0.50 :mean-wind 7.0 :temperature-base 277.0)
+   (:name "16:00 evening ramp"  :hour-from 16.0 :hour-to 18.0 :bias-from 0.45 :bias-to 0.55
+    :cloud-cover 0.55 :mean-wind 8.0 :temperature-base 275.0)
+   (:name "18:00 evening peak"  :hour-from 18.0 :hour-to 21.0 :bias-from 0.55 :bias-to 0.62
+    :cloud-cover 0.55 :mean-wind 10.0 :temperature-base 273.0)
+   (:name "21:00 wind-down"     :hour-from 21.0 :hour-to 23.0 :bias-from 0.62 :bias-to 0.48
+    :cloud-cover 0.55 :mean-wind 12.0 :temperature-base 272.0)
+   (:name "23:00 late night"    :hour-from 23.0 :hour-to 24.0 :bias-from 0.48 :bias-to 0.42
+    :cloud-cover 0.55 :mean-wind 13.0 :temperature-base 271.0)))

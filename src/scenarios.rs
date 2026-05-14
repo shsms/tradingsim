@@ -39,6 +39,15 @@ pub struct Stage {
     /// advances through [hour_from, hour_to).
     pub bias_from: f64,
     pub bias_to: f64,
+    /// Optional weather overrides for this stage. `None` leaves the
+    /// area's existing value alone; `Some(v)` replaces it on the
+    /// default weather location while the stage is current. Drives
+    /// the realism of canned scenarios: a "rainy summer" stage can
+    /// push cloud cover up so solar drops and the MM reference
+    /// shifts the same way a real overcast hour would.
+    pub cloud_cover: Option<f64>,
+    pub mean_wind: Option<f64>,
+    pub temperature_base: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -215,10 +224,37 @@ pub fn spawn_bias_tick(
         loop {
             tick.tick().await;
             let now = Utc::now();
-            let scenario_bias = pick_active_bias(&scenarios, now);
+            let active = pick_active_stage(&scenarios, now);
             let scale = *bias_scale.read();
             let curve_snap = curve.read().clone();
+
+            // Reset every registered location to its baseline and
+            // apply the active stage's weather overrides on top.
+            // Doing this under the same lock both writers
+            // (the gRPC weather service + MM tick) read from means
+            // a stage transition shows up atomically downstream.
+            {
+                let mut w = weather.write();
+                for loc in w.locations_mut() {
+                    loc.reset_to_baseline();
+                }
+                if let Some((stage, _)) = &active {
+                    for loc in w.locations_mut() {
+                        if let Some(v) = stage.cloud_cover {
+                            loc.cloud_cover = v;
+                        }
+                        if let Some(v) = stage.mean_wind {
+                            loc.mean_wind = v;
+                        }
+                        if let Some(v) = stage.temperature_base {
+                            loc.temperature_base = v;
+                        }
+                    }
+                }
+            }
+
             let weather_snap = weather.read().clone();
+            let scenario_bias = active.as_ref().map(|(s, rt)| stage_bias_now(s, rt, now));
             apply_biases(
                 &aggressors,
                 &mms,
@@ -232,14 +268,16 @@ pub fn spawn_bias_tick(
     })
 }
 
-/// Look at the registry, auto-advance any running scenario that's
-/// still in auto mode, and return the current scenario-stage bias
-/// (if any). Today's contract is "one scenario active at a time"; if
-/// multiple are running, the first by HashMap iteration wins.
-fn pick_active_bias(scenarios: &SharedScenarios, now: DateTime<Utc>) -> Option<f64> {
+/// Auto-advance any running scenario whose wallclock has moved into
+/// a different stage, then return a clone of the currently active
+/// stage plus its runtime. Multiple running scenarios collapse to
+/// the first one HashMap iteration yields.
+fn pick_active_stage(
+    scenarios: &SharedScenarios,
+    now: DateTime<Utc>,
+) -> Option<(Stage, ScenarioRuntime)> {
     let mut guard = scenarios.lock();
     let wallclock_h = wallclock_hour(now);
-    let mut active: Option<f64> = None;
     for entry in guard.values_mut() {
         if entry.runtime.current_stage.is_none() {
             continue;
@@ -251,14 +289,13 @@ fn pick_active_bias(scenarios: &SharedScenarios, now: DateTime<Utc>) -> Option<f
             entry.runtime.current_stage = Some(idx);
             entry.runtime.stage_entered_at = Some(today_at(entry.def.stages[idx].hour_from, now));
         }
-        if active.is_none()
-            && let Some(idx) = entry.runtime.current_stage
+        if let Some(idx) = entry.runtime.current_stage
             && let Some(stage) = entry.def.stages.get(idx)
         {
-            active = Some(stage_bias_now(stage, &entry.runtime, now));
+            return Some((stage.clone(), entry.runtime.clone()));
         }
     }
-    active
+    None
 }
 
 fn apply_biases(
@@ -322,4 +359,78 @@ fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
     let secs = now.timestamp();
     let bucket = (secs / 900 + 1) * 900;
     DateTime::from_timestamp(bucket, 0).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::weather::{WeatherLocation, new_state};
+
+    fn stage(name: &str, h_from: f64, h_to: f64, cloud: Option<f64>) -> Stage {
+        Stage {
+            name: name.into(),
+            hour_from: h_from,
+            hour_to: h_to,
+            bias_from: 0.5,
+            bias_to: 0.5,
+            cloud_cover: cloud,
+            mean_wind: None,
+            temperature_base: None,
+        }
+    }
+
+    #[test]
+    fn stage_weather_overrides_apply_then_restore() {
+        // Mirror the production registry shape: one default + one
+        // per-area location with distinct baselines.
+        let weather = new_state();
+        {
+            let mut reg = weather.write();
+            *reg.default_mut() = WeatherLocation::de_lu_typical();
+            let idx = reg.upsert(WeatherLocation {
+                name: "tn".into(),
+                lat: 50.4,
+                lon: 11.6,
+                cloud_cover: 0.35,
+                mean_wind: 5.0,
+                wind_direction: 270.0,
+                temperature_base: 290.0,
+                baseline_cloud_cover: 0.35,
+                baseline_mean_wind: 5.0,
+                baseline_temperature_base: 290.0,
+            });
+            reg.link_area("10YDE-EON------1", idx);
+        }
+
+        // Apply a stage with cloud_cover override directly (the
+        // bias tick does this under a write lock).
+        let s = stage("test", 0.0, 24.0, Some(0.95));
+        {
+            let mut reg = weather.write();
+            for loc in reg.locations_mut() {
+                loc.reset_to_baseline();
+            }
+            for loc in reg.locations_mut() {
+                if let Some(v) = s.cloud_cover {
+                    loc.cloud_cover = v;
+                }
+            }
+            // Both default and TN now reflect the override.
+            assert_eq!(reg.default_location().cloud_cover, 0.95);
+            assert_eq!(reg.for_area("10YDE-EON------1").cloud_cover, 0.95);
+            // Baselines untouched.
+            assert_eq!(reg.default_location().baseline_cloud_cover, 0.30);
+            assert_eq!(reg.for_area("10YDE-EON------1").baseline_cloud_cover, 0.35);
+        }
+
+        // Next tick with no active stage: only the reset runs.
+        {
+            let mut reg = weather.write();
+            for loc in reg.locations_mut() {
+                loc.reset_to_baseline();
+            }
+            assert_eq!(reg.default_location().cloud_cover, 0.30);
+            assert_eq!(reg.for_area("10YDE-EON------1").cloud_cover, 0.35);
+        }
+    }
 }

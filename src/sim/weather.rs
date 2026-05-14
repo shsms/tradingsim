@@ -40,6 +40,12 @@ impl LocationKey {
 
 /// Per-location atmospheric parameters + the derived feature
 /// curves the bias tick + gRPC service consume.
+///
+/// Each tunable field carries a paired `baseline_*` value that
+/// scenarios don't touch. The bias tick resets the live fields to
+/// their baseline at the start of every cycle and then applies any
+/// active scenario-stage overrides on top, so stopping a scenario
+/// restores the configured weather without explicit cleanup.
 #[derive(Clone, Debug)]
 pub struct WeatherLocation {
     /// Display label (e.g. "tn" for TenneT's anchor point).
@@ -56,6 +62,11 @@ pub struct WeatherLocation {
     pub wind_direction: f64,
     /// Diurnal-cycle midpoint temperature in Kelvin.
     pub temperature_base: f64,
+    /// Config-set baselines. Restored by the bias tick each cycle
+    /// before scenario overrides apply.
+    pub baseline_cloud_cover: f64,
+    pub baseline_mean_wind: f64,
+    pub baseline_temperature_base: f64,
 }
 
 impl WeatherLocation {
@@ -70,7 +81,19 @@ impl WeatherLocation {
             mean_wind: 6.0,
             wind_direction: 270.0,
             temperature_base: 290.0,
+            baseline_cloud_cover: 0.30,
+            baseline_mean_wind: 6.0,
+            baseline_temperature_base: 290.0,
         }
+    }
+
+    /// Reset live tunable fields to their baselines. Called by the
+    /// bias tick at the start of each cycle so scenario overrides
+    /// never compound across stages.
+    pub fn reset_to_baseline(&mut self) {
+        self.cloud_cover = self.baseline_cloud_cover;
+        self.mean_wind = self.baseline_mean_wind;
+        self.temperature_base = self.baseline_temperature_base;
     }
 
     /// Surface solar irradiance in W/m² at the given fractional
@@ -152,6 +175,10 @@ impl WeatherRegistry {
 
     pub fn locations(&self) -> &[WeatherLocation] {
         &self.locations
+    }
+
+    pub fn locations_mut(&mut self) -> &mut [WeatherLocation] {
+        &mut self.locations
     }
 
     /// Mutable handle on the default location — what legacy

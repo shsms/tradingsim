@@ -488,7 +488,11 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
     ctx.defun(
         "set-weather-cloud-cover",
         move |value: f64| -> Result<f64, Error> {
-            w.write().default_mut().cloud_cover = value.clamp(0.0, 1.0);
+            let mut g = w.write();
+            let v = value.clamp(0.0, 1.0);
+            let d = g.default_mut();
+            d.cloud_cover = v;
+            d.baseline_cloud_cover = v;
             Ok(value)
         },
     );
@@ -496,7 +500,11 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
     ctx.defun(
         "set-weather-mean-wind",
         move |value: f64| -> Result<f64, Error> {
-            w.write().default_mut().mean_wind = value.max(0.0);
+            let mut g = w.write();
+            let v = value.max(0.0);
+            let d = g.default_mut();
+            d.mean_wind = v;
+            d.baseline_mean_wind = v;
             Ok(value)
         },
     );
@@ -512,7 +520,10 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
     ctx.defun(
         "set-weather-temperature-base",
         move |value: f64| -> Result<f64, Error> {
-            w.write().default_mut().temperature_base = value;
+            let mut g = w.write();
+            let d = g.default_mut();
+            d.temperature_base = value;
+            d.baseline_temperature_base = value;
             Ok(value)
         },
     );
@@ -523,6 +534,9 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
         "%make-weather-location",
         move |args: Plist<MakeWeatherLocationArgs>| -> Result<bool, Error> {
             let a = args.into_inner();
+            let cloud = a.cloud_cover.unwrap_or(0.30).clamp(0.0, 1.0);
+            let wind = a.mean_wind.unwrap_or(6.0).max(0.0);
+            let temp = a.temperature_base.unwrap_or(290.0);
             let loc = WeatherLocation {
                 name: a.name.unwrap_or_else(|| {
                     format!(
@@ -533,10 +547,13 @@ fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::Share
                 }),
                 lat: a.lat.unwrap_or(50.0),
                 lon: a.lon.unwrap_or(10.0),
-                cloud_cover: a.cloud_cover.unwrap_or(0.30).clamp(0.0, 1.0),
-                mean_wind: a.mean_wind.unwrap_or(6.0).max(0.0),
+                cloud_cover: cloud,
+                mean_wind: wind,
                 wind_direction: a.wind_direction.unwrap_or(270.0).rem_euclid(360.0),
-                temperature_base: a.temperature_base.unwrap_or(290.0),
+                temperature_base: temp,
+                baseline_cloud_cover: cloud,
+                baseline_mean_wind: wind,
+                baseline_temperature_base: temp,
             };
             let mut reg = weather.write();
             let idx = reg.upsert(loc);
@@ -619,6 +636,15 @@ AsPlist! {
         hour_to<":hour-to">: f64,
         bias_from<":bias-from">: f64,
         bias_to<":bias-to">: f64,
+        /// Optional absolute overrides applied to every registered
+        /// weather location while this stage is current. Omit to
+        /// leave the configured baseline alone; supply a value to
+        /// stamp the desired sky / wind / temperature for the stage
+        /// (cloud_cover clamped to [0, 1], mean_wind ≥ 0,
+        /// temperature_base in Kelvin).
+        cloud_cover<":cloud-cover">: Option<f64> {= None},
+        mean_wind<":mean-wind">: Option<f64> {= None},
+        temperature_base<":temperature-base">: Option<f64> {= None},
     }
 }
 
@@ -639,6 +665,9 @@ fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::Shar
                     hour_to: s.hour_to,
                     bias_from: s.bias_from,
                     bias_to: s.bias_to,
+                    cloud_cover: s.cloud_cover.map(|v| v.clamp(0.0, 1.0)),
+                    mean_wind: s.mean_wind.map(|v| v.max(0.0)),
+                    temperature_base: s.temperature_base,
                 });
             }
             let def = ScenarioDef {
