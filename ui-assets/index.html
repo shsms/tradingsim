@@ -335,6 +335,41 @@ td { padding: 2px 6px; }
 .ladder-head:hover { color: var(--accent); }
 #trades tr { cursor: pointer; }
 #trades tr:hover td { background: var(--panel-2); }
+
+/* Compact rows for the gridpools + weather panels. One line per
+   item with an expand caret; click to reveal a small detail
+   block below. Keeps the default page short. */
+.row-list { display: flex; flex-direction: column; gap: 4px; }
+.row-item {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.row-item:hover { border-color: var(--muted); }
+.row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+.row-head .row-sep { color: var(--border); }
+.row-caret { margin-left: auto; color: var(--muted); font-size: var(--fs-mini); }
+.row-detail {
+  display: none;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-mini);
+  color: var(--muted);
+  display: none;
+}
+.row-item.open .row-detail { display: block; }
+.row-item.open .row-caret::before { content: "▾"; }
+.row-item:not(.open) .row-caret::before { content: "▸"; }
 </style>
 </head>
 <body>
@@ -408,7 +443,7 @@ td { padding: 2px 6px; }
 
   <div class="panel" style="grid-column: span 2">
     <h2>Gridpools</h2>
-    <div id="gridpools" class="muted">loading…</div>
+    <div id="gridpools" class="row-list muted">loading…</div>
   </div>
 
   <div class="panel" style="grid-column: span 2">
@@ -419,24 +454,10 @@ td { padding: 2px 6px; }
   <div class="panel" style="grid-column: span 2">
     <h2>Weather (now)</h2>
     <div class="muted" style="margin-bottom:6px">
-      One row per registered location (0.1° lat/lon grid). Solar /
-      wind / temperature are the current-hour truth that the bias
-      tick reads to push MM demand and surplus.
+      One row per registered location (0.1° lat/lon grid). Click a
+      row for lat/lon and wind direction.
     </div>
-    <div class="scroll">
-      <table>
-        <thead><tr>
-          <th>name</th><th>lat</th><th>lon</th>
-          <th title="Cloud cover (0=clear, 1=overcast)">cloud</th>
-          <th title="Mean wind speed at 100 m, m/s">wind̄</th>
-          <th title="Wind direction, degrees from north">dir°</th>
-          <th title="Solar irradiance, W/m²">solar↓</th>
-          <th title="Wind speed at the current hour, m/s">wind</th>
-          <th title="Air temperature at 2 m, °C">temp</th>
-        </tr></thead>
-        <tbody id="weather"></tbody>
-      </table>
-    </div>
+    <div id="weather" class="row-list">loading…</div>
   </div>
 </div>
 
@@ -634,15 +655,36 @@ function drawChart() {
   }
 }
 
+function toggleRow(ev) {
+  ev.currentTarget.classList.toggle('open');
+}
+
 async function loadGridpools() {
   const r = await fetch('/api/gridpools');
   if (!r.ok) return;
   const j = await r.json();
-  const lines = j.map(g =>
-    `· pool ${g.id} "${g.name}" — areas: ${g.areas.join(', ')} — orders: ${g.orders}, trades: ${g.trades}`
-  );
-  document.getElementById('gridpools').innerHTML = lines.length
-    ? lines.join('<br>') : '<i>no gridpools registered</i>';
+  const el = document.getElementById('gridpools');
+  if (!j.length) {
+    el.innerHTML = '<i>no gridpools registered</i>';
+    return;
+  }
+  el.innerHTML = j.map(g => {
+    const badges = g.areas.map(a => `<span class="area-badge">${areaTag(a)}</span>`).join(' ');
+    return `<div class="row-item" onclick="toggleRow(event)">
+      <div class="row-head">
+        <span class="area-badge">${g.id}</span>
+        <span>${escapeHtml(g.name)}</span>
+        <span class="muted row-sep">·</span>
+        <span class="muted">${g.areas.length} areas</span>
+        <span class="muted row-sep">·</span>
+        <span class="muted">${g.orders} orders</span>
+        <span class="muted row-sep">·</span>
+        <span class="muted">${g.trades} trades</span>
+        <span class="row-caret"></span>
+      </div>
+      <div class="row-detail">${badges}</div>
+    </div>`;
+  }).join('');
 }
 
 function escapeHtml(s) {
@@ -713,23 +755,32 @@ async function loadWeather() {
     setPill('pill-weather', 'down', 'weather');
     return;
   }
-  const tbody = document.getElementById('weather');
+  const el = document.getElementById('weather');
   if (!list.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="muted"><i>no weather locations registered</i></td></tr>';
+    el.innerHTML = '<i>no weather locations registered</i>';
     return;
   }
-  tbody.innerHTML = list.map(l => `
-    <tr>
-      <td>${escapeHtml(l.name)}</td>
-      <td class="muted">${l.lat.toFixed(1)}</td>
-      <td class="muted">${l.lon.toFixed(1)}</td>
-      <td>${l.cloud_cover.toFixed(2)}</td>
-      <td>${l.mean_wind.toFixed(1)}</td>
-      <td class="muted">${Math.round(l.wind_direction)}</td>
-      <td>${Math.round(l.solar_now)}</td>
-      <td>${l.wind_now.toFixed(1)}</td>
-      <td>${l.temp_c_now.toFixed(1)}</td>
-    </tr>`).join('');
+  el.innerHTML = list.map(l => {
+    const tag = l.name.length <= 4 ? l.name.toUpperCase() : l.name.slice(0, 4).toUpperCase();
+    return `<div class="row-item" onclick="toggleRow(event)">
+      <div class="row-head">
+        <span class="area-badge">${escapeHtml(tag)}</span>
+        <span class="muted">☁ ${l.cloud_cover.toFixed(2)}</span>
+        <span class="muted row-sep">·</span>
+        <span>solar ${Math.round(l.solar_now)} W/m²</span>
+        <span class="muted row-sep">·</span>
+        <span>wind ${l.wind_now.toFixed(1)} m/s</span>
+        <span class="muted row-sep">·</span>
+        <span>${l.temp_c_now.toFixed(1)} °C</span>
+        <span class="row-caret"></span>
+      </div>
+      <div class="row-detail">
+        lat ${l.lat.toFixed(1)} · lon ${l.lon.toFixed(1)}
+        · wind direction ${Math.round(l.wind_direction)}°
+        · mean wind ${l.mean_wind.toFixed(1)} m/s
+      </div>
+    </div>`;
+  }).join('');
 }
 
 async function loadScenarios() {
