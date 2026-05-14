@@ -450,6 +450,17 @@ td { padding: 2px 6px; }
 .row-item.open .row-detail { display: block; }
 .row-item.open .row-caret::before { content: "▾"; }
 .row-item:not(.open) .row-caret::before { content: "▸"; }
+
+/* On tall windows there's no point hiding the detail block —
+   space isn't the limit. Show every row's detail by default and
+   drop the toggle affordance entirely; cursor reverts to default
+   so rows don't pretend to be interactive. */
+@media (min-height: 1200px) {
+  .row-item .row-detail { display: block; }
+  .row-item { cursor: default; }
+  .row-item:hover { border-color: var(--border); }
+  .row-caret { display: none; }
+}
 </style>
 </head>
 <body>
