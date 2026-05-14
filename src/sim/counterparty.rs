@@ -575,4 +575,118 @@ mod tests {
             assert!(b.is_empty());
         }
     }
+
+    #[test]
+    fn gate_close_scale_known_horizons() {
+        let gate = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        // ≥ 2 h to gate → base 1×
+        assert!((gate_close_scale(gate, gate - chrono::Duration::hours(2)) - 1.0).abs() < 1e-9);
+        assert!((gate_close_scale(gate, gate - chrono::Duration::hours(4)) - 1.0).abs() < 1e-9);
+        // 1 h to gate → halfway → 2×
+        assert!((gate_close_scale(gate, gate - chrono::Duration::hours(1)) - 2.0).abs() < 1e-9);
+        // 30 min → 2.5×
+        assert!((gate_close_scale(gate, gate - chrono::Duration::minutes(30)) - 2.5).abs() < 1e-9);
+        // At gate → 3×
+        assert!((gate_close_scale(gate, gate) - 3.0).abs() < 1e-9);
+        // Past gate (negative horizon) clamps to 3×; the
+        // aggressor / MM shouldn't be running but be defensive.
+        assert!((gate_close_scale(gate, gate + chrono::Duration::hours(1)) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mm_step_reference_mean_reverts_toward_baseline() {
+        let (mut world, mut cfg) = setup_world();
+        cfg.price_noise = dec!(0); // disable the walk
+        cfg.follow_last_trade = dec!(0); // disable follow
+        cfg.reference_baseline = dec!(90.00); // target 5 EUR above price
+        cfg.reference_price = dec!(85.00);
+        let mut mm = MarketMaker::new(cfg, 0);
+        mm.refresh(&mut world, t0());
+        // MEAN_REVERT_RATE = 0.02. 85 + 0.02 * 5 = 85.10
+        let r1 = mm.shared_config().read().reference_price;
+        assert_eq!(r1, dec!(85.10));
+        mm.refresh(&mut world, t0());
+        // 85.10 + 0.02 * (90 - 85.10) = 85.198
+        let r2 = mm.shared_config().read().reference_price;
+        assert_eq!(r2, dec!(85.198));
+    }
+
+    #[test]
+    fn mm_step_reference_baseline_equal_to_price_is_a_no_op() {
+        let (mut world, mut cfg) = setup_world();
+        cfg.price_noise = dec!(0);
+        cfg.follow_last_trade = dec!(0);
+        cfg.reference_baseline = dec!(85.00);
+        cfg.reference_price = dec!(85.00);
+        let mut mm = MarketMaker::new(cfg, 0);
+        mm.refresh(&mut world, t0());
+        assert_eq!(mm.shared_config().read().reference_price, dec!(85.00));
+    }
+
+    /// Helper for the aggressor tests: post a resting MM bid at
+    /// `bid_price` so a sell-side aggressor has someone to cross.
+    /// Returns (world, mm_cfg) for further setup.
+    fn world_with_resting_bid(now: chrono::DateTime<Utc>, bid_price: Decimal) -> World {
+        let mut markets = MarketRegistry::new();
+        markets.insert(MarketRules::de_lu());
+        let mut world = World::new(markets);
+        // Spawn a chubby MM whose bid sits where we want it. Push
+        // reference well above bid_price so the ask is also far
+        // above — guarantees the aggressor's sell crosses the bid.
+        let mm_cfg = MarketMakerConfig {
+            reference_baseline: bid_price + dec!(0.40),
+            reference_price: bid_price + dec!(0.40),
+            spread: dec!(0.40),
+            size: dec!(50.0), // huge so it absorbs many fires
+            price_noise: dec!(0),
+            ..MarketMakerConfig::de_lu_default(
+                Area::eic("10Y1001A1001A82H"),
+                DeliveryPeriod {
+                    start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
+                    duration: DeliveryDuration::DeliveryDuration15,
+                },
+            )
+        };
+        let mut mm = MarketMaker::new(mm_cfg, 99);
+        mm.refresh(&mut world, now);
+        world
+    }
+
+    #[test]
+    fn aggressor_fire_size_ramps_at_gate() {
+        let gate = Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap();
+        let bid_price = dec!(80.00);
+
+        // Fire 2 h from gate — size should land at base (no ramp).
+        let mut world_far = world_with_resting_bid(gate - chrono::Duration::hours(2), bid_price);
+        let ag_cfg = AggressorConfig {
+            side_bias: 0.0, // always sell — crosses the resting bid
+            size: dec!(0.5),
+            ..AggressorConfig::de_lu_default(
+                Area::eic("10Y1001A1001A82H"),
+                DeliveryPeriod {
+                    start: gate,
+                    duration: DeliveryDuration::DeliveryDuration15,
+                },
+            )
+        };
+        let mut ag_far = Aggressor::new(ag_cfg.clone(), 0);
+        ag_far.fire(&mut world_far, gate - chrono::Duration::hours(2));
+        let trade_far = world_far.public_trade_history().last().cloned().unwrap();
+
+        // Fire 1 min before gate — submit_order rejects at/after
+        // delivery start, so step right up to the edge instead of
+        // landing on it. The scale at 1 min out is ~2.99 → size
+        // mult ≈ 1.99 → snaps to 1.0 on the 0.1 grid.
+        let just_before_gate = gate - chrono::Duration::minutes(1);
+        let mut world_close = world_with_resting_bid(just_before_gate, bid_price);
+        let mut ag_close = Aggressor::new(ag_cfg, 0);
+        ag_close.fire(&mut world_close, just_before_gate);
+        let trade_close = world_close.public_trade_history().last().cloned().unwrap();
+
+        // Base 0.5 × 1.0 = 0.5 (snapped to 0.5 on 0.1 grid).
+        // Gate  0.5 × 1.99 ≈ 1.0 (snap-up).
+        assert_eq!(trade_far.quantity, dec!(0.5));
+        assert_eq!(trade_close.quantity, dec!(1.0));
+    }
 }
