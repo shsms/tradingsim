@@ -250,42 +250,8 @@ impl World {
             return Err(SubmitError::AreaNotAllowedForGridpool);
         }
 
-        // 2. Market exists for the area.
-        let rules = self
-            .markets
-            .get(&order.area)
-            .ok_or(SubmitError::UnknownArea)?;
-
-        // 3. Type / execution-option gating (Phase 4 = LIMIT only).
-        if order.order_type != OrderType::Limit {
-            return Err(SubmitError::UnsupportedOrderType(order.order_type));
-        }
-        if let Some(e) = order.execution_option {
-            return Err(SubmitError::UnsupportedExecutionOption(e));
-        }
-
-        // 4. Currency / duration / alignment / grid checks.
-        if order.currency != rules.currency {
-            return Err(SubmitError::CurrencyMismatch);
-        }
-        if !rules.allows(order.period.duration) {
-            return Err(SubmitError::UnsupportedDurationForMarket);
-        }
-        if !order.period.is_aligned() {
-            return Err(SubmitError::UnalignedDeliveryPeriod);
-        }
-        if order.price <= Decimal::ZERO {
-            return Err(SubmitError::NonPositivePrice);
-        }
-        if !is_multiple_of(order.price, rules.price_tick) {
-            return Err(SubmitError::PriceOffGrid);
-        }
-        if order.quantity <= Decimal::ZERO {
-            return Err(SubmitError::NonPositiveQuantity);
-        }
-        if !is_multiple_of(order.quantity, rules.qty_step) {
-            return Err(SubmitError::QuantityOffGrid);
-        }
+        // 2-4. Shared validation: market, type, exec-option, grid.
+        self.validate_common(&order)?;
 
         // 5. Admit. Mint id; build the contract key.
         let taker_id = self.next_id();
@@ -309,95 +275,21 @@ impl World {
             },
         );
 
-        // 7. Record trades on both sides + update maker order state.
-        // Each statement scopes its &mut gridpools borrow tightly so
-        // self.publish_* calls (which take & self) can interleave.
+        // 7. Record trades + update maker state. The taker is always
+        // a gridpool order; the maker may be a gridpool order or an
+        // unbound counterparty order — owner_of returns None for the
+        // latter, and we skip the gridpool-side bookkeeping then.
         for fill in &outcome.fills {
-            let trade_id = self.next_trade_id();
-            let maker_id = fill.maker_id;
-            let maker_gridpool = self
-                .owner_of(maker_id)
-                .expect("resting order had no gridpool binding");
-
-            let taker_trade = Trade {
-                id: trade_id,
-                order_id: taker_id,
-                side: taker_side,
-                area: order.area.clone(),
-                period: order.period,
-                execution_time: now,
-                price: fill.price,
-                currency: taker_currency,
-                quantity: fill.quantity,
-                state: TradeState::Active,
-            };
-            self.gridpools
-                .get_mut(gridpool_id)
-                .expect("gridpool existed at start of submit")
-                .record_trade(taker_trade.clone());
-            self.publish_gridpool_trade(gridpool_id, taker_trade);
-
-            let maker_trade = Trade {
-                id: trade_id,
-                order_id: maker_id,
-                side: taker_side.opposite(),
-                area: order.area.clone(),
-                period: order.period,
-                execution_time: now,
-                price: fill.price,
-                currency: taker_currency,
-                quantity: fill.quantity,
-                state: TradeState::Active,
-            };
-            self.gridpools
-                .get_mut(maker_gridpool)
-                .expect("bound gridpool exists")
-                .record_trade(maker_trade.clone());
-            self.publish_gridpool_trade(maker_gridpool, maker_trade);
-
-            // Public tape: one event per fill. Both areas equal in the
-            // single-area case Phase 4 supports; cross-area SIDC
-            // matches in Phase 7 will fork them.
-            self.publish_public_trade(PublicTrade {
-                id: trade_id,
-                buy_area: order.area.clone(),
-                sell_area: order.area.clone(),
-                period: order.period,
-                execution_time: now,
-                price: fill.price,
-                currency: taker_currency,
-                quantity: fill.quantity,
-                state: TradeState::Active,
-            });
-
-            let mut maker_fully_filled = false;
-            self.gridpools
-                .get_mut(maker_gridpool)
-                .expect("bound gridpool exists")
-                .update_order(maker_id, |d| {
-                    d.filled_quantity += fill.quantity;
-                    d.open_quantity -= fill.quantity;
-                    d.modification_time = now;
-                    d.state.actor = MarketActor::System;
-                    if d.open_quantity.is_zero() {
-                        d.state.state = OrderState::Filled;
-                        d.state.reason = StateReason::FullExecution;
-                        maker_fully_filled = true;
-                    } else {
-                        d.state.reason = StateReason::PartialExecution;
-                    }
-                });
-            if maker_fully_filled {
-                self.unbind_resting_order(maker_id);
-            }
-            let maker_detail = self
-                .gridpools
-                .get(maker_gridpool)
-                .and_then(|g| g.get_order(maker_id))
-                .cloned();
-            if let Some(d) = maker_detail {
-                self.publish_order_update(maker_gridpool, d);
-            }
+            self.record_fill(
+                fill,
+                taker_id,
+                taker_side,
+                taker_currency,
+                Some(gridpool_id),
+                order.area.clone(),
+                order.period,
+                now,
+            );
         }
 
         // 8. Build the taker's OrderDetail.
@@ -433,6 +325,222 @@ impl World {
         self.publish_order_update(gridpool_id, detail.clone());
 
         Ok(detail)
+    }
+
+    /// Run the validation rules (gridpool / area-allow checks
+    /// excluded) for an Order; used by both submit_order and
+    /// submit_counterparty_order. Returns the matched MarketRules
+    /// so the caller can hand them to the matcher without a second
+    /// lookup.
+    fn validate_common(&self, order: &Order) -> Result<(), SubmitError> {
+        let rules = self
+            .markets
+            .get(&order.area)
+            .ok_or(SubmitError::UnknownArea)?;
+        if order.order_type != OrderType::Limit {
+            return Err(SubmitError::UnsupportedOrderType(order.order_type));
+        }
+        if let Some(e) = order.execution_option {
+            return Err(SubmitError::UnsupportedExecutionOption(e));
+        }
+        if order.currency != rules.currency {
+            return Err(SubmitError::CurrencyMismatch);
+        }
+        if !rules.allows(order.period.duration) {
+            return Err(SubmitError::UnsupportedDurationForMarket);
+        }
+        if !order.period.is_aligned() {
+            return Err(SubmitError::UnalignedDeliveryPeriod);
+        }
+        if order.price <= Decimal::ZERO {
+            return Err(SubmitError::NonPositivePrice);
+        }
+        if !is_multiple_of(order.price, rules.price_tick) {
+            return Err(SubmitError::PriceOffGrid);
+        }
+        if order.quantity <= Decimal::ZERO {
+            return Err(SubmitError::NonPositiveQuantity);
+        }
+        if !is_multiple_of(order.quantity, rules.qty_step) {
+            return Err(SubmitError::QuantityOffGrid);
+        }
+        Ok(())
+    }
+
+    /// Apply one fill: build + record trades, update maker state if
+    /// any, emit the public-tape event. `taker_gridpool` is None for
+    /// counterparty takers (no gridpool-side bookkeeping then).
+    #[allow(clippy::too_many_arguments)]
+    fn record_fill(
+        &mut self,
+        fill: &crate::sim::matching::Fill,
+        taker_id: OrderId,
+        taker_side: crate::sim::order::Side,
+        taker_currency: crate::sim::market::Currency,
+        taker_gridpool: Option<GridpoolId>,
+        area: Area,
+        period: DeliveryPeriod,
+        now: DateTime<Utc>,
+    ) {
+        let trade_id = self.next_trade_id();
+        let maker_id = fill.maker_id;
+        let maker_gridpool = self.owner_of(maker_id);
+
+        // Taker side: only credit to a gridpool if the taker is one.
+        if let Some(gp) = taker_gridpool {
+            let trade = Trade {
+                id: trade_id,
+                order_id: taker_id,
+                side: taker_side,
+                area: area.clone(),
+                period,
+                execution_time: now,
+                price: fill.price,
+                currency: taker_currency,
+                quantity: fill.quantity,
+                state: TradeState::Active,
+            };
+            self.gridpools
+                .get_mut(gp)
+                .expect("taker gridpool exists")
+                .record_trade(trade.clone());
+            self.publish_gridpool_trade(gp, trade);
+        }
+
+        // Maker side: same, only if the maker belongs to a gridpool.
+        if let Some(mgp) = maker_gridpool {
+            let trade = Trade {
+                id: trade_id,
+                order_id: maker_id,
+                side: taker_side.opposite(),
+                area: area.clone(),
+                period,
+                execution_time: now,
+                price: fill.price,
+                currency: taker_currency,
+                quantity: fill.quantity,
+                state: TradeState::Active,
+            };
+            self.gridpools
+                .get_mut(mgp)
+                .expect("maker gridpool exists")
+                .record_trade(trade.clone());
+            self.publish_gridpool_trade(mgp, trade);
+        }
+
+        // Public tape: one event per fill, always.
+        self.publish_public_trade(PublicTrade {
+            id: trade_id,
+            buy_area: area.clone(),
+            sell_area: area.clone(),
+            period,
+            execution_time: now,
+            price: fill.price,
+            currency: taker_currency,
+            quantity: fill.quantity,
+            state: TradeState::Active,
+        });
+
+        // Maker order state update + fan-out (if maker is gridpool-owned).
+        if let Some(mgp) = maker_gridpool {
+            let mut fully_filled = false;
+            self.gridpools
+                .get_mut(mgp)
+                .expect("maker gridpool exists")
+                .update_order(maker_id, |d| {
+                    d.filled_quantity += fill.quantity;
+                    d.open_quantity -= fill.quantity;
+                    d.modification_time = now;
+                    d.state.actor = MarketActor::System;
+                    if d.open_quantity.is_zero() {
+                        d.state.state = OrderState::Filled;
+                        d.state.reason = StateReason::FullExecution;
+                        fully_filled = true;
+                    } else {
+                        d.state.reason = StateReason::PartialExecution;
+                    }
+                });
+            if fully_filled {
+                self.unbind_resting_order(maker_id);
+            }
+            if let Some(d) = self
+                .gridpools
+                .get(mgp)
+                .and_then(|g| g.get_order(maker_id))
+                .cloned()
+            {
+                self.publish_order_update(mgp, d);
+            }
+        } else {
+            // Counterparty maker: no order to update, but if the
+            // matcher fully consumed it, the book already popped it
+            // — nothing else to clean up.
+        }
+    }
+
+    /// Admit a counterparty (non-gridpool) order. Same validation as
+    /// submit_order minus the gridpool / area-allow gates. Returns
+    /// the OrderId of the admitted order; the caller uses it for
+    /// subsequent cancel_counterparty_order calls. Fills emit
+    /// public-tape events and maker-side gridpool trades as usual.
+    pub fn submit_counterparty_order(
+        &mut self,
+        order: Order,
+        now: DateTime<Utc>,
+    ) -> Result<OrderId, SubmitError> {
+        self.validate_common(&order)?;
+
+        let taker_id = self.next_id();
+        let key = ContractKey {
+            area: order.area.clone(),
+            period: order.period,
+        };
+        let taker_side = order.side;
+        let taker_currency = order.currency;
+
+        let outcome = self.match_limit_in(
+            key,
+            IncomingLimit {
+                id: taker_id,
+                side: taker_side,
+                price: order.price,
+                quantity: order.quantity,
+            },
+        );
+        for fill in &outcome.fills {
+            self.record_fill(
+                fill,
+                taker_id,
+                taker_side,
+                taker_currency,
+                None,
+                order.area.clone(),
+                order.period,
+                now,
+            );
+        }
+        // Counterparty leftovers rest on the book without a binding —
+        // owner_of stays None, and cancel_counterparty_order is the
+        // only way they leave.
+        Ok(taker_id)
+    }
+
+    /// Remove a resting counterparty order from the book. No state
+    /// flip (counterparty orders don't have an OrderDetail). Returns
+    /// true if the id was on the book, false otherwise.
+    pub fn cancel_counterparty_order(&mut self, order_id: OrderId) -> bool {
+        let mut found = false;
+        for book in self.books.values_mut() {
+            if book.contains(order_id) {
+                book.cancel(order_id);
+                found = true;
+                break;
+            }
+        }
+        // Belt-and-suspenders: an accidental binding (shouldn't
+        // happen, but cheap) gets cleared.
+        self.unbind_resting_order(order_id);
+        found
     }
 
     /// Cancel a non-terminal order. Returns the cancelled detail
@@ -729,6 +837,80 @@ mod tests {
         let t2 = gridpool_rx.try_recv().unwrap();
         assert_eq!(t1.id, t2.id);
         assert_ne!(t1.side, t2.side);
+    }
+
+    #[test]
+    fn counterparty_order_rests_then_fills_gridpool_taker() {
+        let (mut w, gp) = setup_world_with_pool();
+        let mut public_rx = w.subscribe_public_trades();
+        let mut gridpool_rx = w.subscribe_gridpool_trades(gp).unwrap();
+
+        // Counterparty posts a sell at 85.0.
+        let cp_id = w
+            .submit_counterparty_order(sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        // Counterparty resting orders have no gridpool binding.
+        assert!(w.owner_of(cp_id).is_none());
+        // No fills yet.
+        assert!(public_rx.try_recv().is_err());
+        assert!(gridpool_rx.try_recv().is_err());
+
+        // Gridpool takes against it.
+        let taker = w
+            .submit_order(gp, sample_buy(dec!(0.5), dec!(85.0)), t0())
+            .unwrap();
+        assert_eq!(taker.state.state, OrderState::Filled);
+        assert_eq!(taker.filled_quantity, dec!(0.5));
+
+        // Public tape: one event for the fill.
+        let pt = public_rx.try_recv().unwrap();
+        assert_eq!(pt.quantity, dec!(0.5));
+        // Gridpool tape: one event (taker side only — no maker
+        // gridpool to credit).
+        let gt = gridpool_rx.try_recv().unwrap();
+        assert_eq!(gt.order_id, taker.id);
+        assert!(gridpool_rx.try_recv().is_err());
+
+        // Counterparty's resting half-MW is still on the book.
+        let mut counterparty_cancel = w.cancel_counterparty_order(cp_id);
+        assert!(counterparty_cancel);
+        // Double-cancel returns false (idempotent).
+        counterparty_cancel = w.cancel_counterparty_order(cp_id);
+        assert!(!counterparty_cancel);
+    }
+
+    #[test]
+    fn counterparty_taker_against_resting_gridpool_maker() {
+        let (mut w, gp) = setup_world_with_pool();
+        let mut public_rx = w.subscribe_public_trades();
+        let mut gridpool_rx = w.subscribe_gridpool_trades(gp).unwrap();
+
+        // Gridpool posts a resting buy.
+        let maker = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        // discard the order-update publication
+        let mut order_rx = w.subscribe_orders(gp).unwrap();
+        // (subscribed after the place, so no events backed up).
+        let _ = order_rx.try_recv();
+
+        // Counterparty crosses with a sell.
+        let _cp_id = w
+            .submit_counterparty_order(sample_sell(dec!(0.4), dec!(85.0)), t0())
+            .unwrap();
+
+        // Public tape gets the fill.
+        let pt = public_rx.try_recv().unwrap();
+        assert_eq!(pt.quantity, dec!(0.4));
+        // Gridpool tape gets exactly one event (maker side).
+        let gt = gridpool_rx.try_recv().unwrap();
+        assert_eq!(gt.order_id, maker.id);
+        assert!(gridpool_rx.try_recv().is_err());
+        // Order update fan-out for the maker.
+        let upd = order_rx.try_recv().unwrap();
+        assert_eq!(upd.id, maker.id);
+        assert_eq!(upd.filled_quantity, dec!(0.4));
+        assert_eq!(upd.state.state, OrderState::Active);
     }
 
     #[test]
