@@ -5,6 +5,7 @@
 (define-scenario
  :name "windy-winter-night"
  :description "Wind surplus overnight; modest daytime swings. Bias 0.42 → 0.62."
+ :date "2026-02-10"  ;; late winter Atlantic storm — wind, no sun
  :stages
  '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.42 :bias-to 0.42
     :cloud-cover 0.55 :mean-wind 13.0 :temperature-base 273.0)

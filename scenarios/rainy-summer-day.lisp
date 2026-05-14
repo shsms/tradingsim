@@ -6,6 +6,7 @@
 (define-scenario
  :name "rainy-summer-day"
  :description "Cloudy summer; shallow belly, modest peaks. Bias swings 0.45 → 0.70."
+ :date "2026-07-15"  ;; mid-summer; the clouds, not the season, kill solar
  :stages
  '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.50 :bias-to 0.50
     :cloud-cover 0.85 :mean-wind 6.0 :temperature-base 287.0)

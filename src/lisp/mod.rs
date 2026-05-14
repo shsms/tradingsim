@@ -625,6 +625,13 @@ AsPlist! {
     pub struct DefineScenarioArgs {
         name: String,
         description: Option<String> {= None},
+        /// Calendar date the solar-elevation model treats this
+        /// scenario as taking place on, in ISO `YYYY-MM-DD`.
+        /// Optional — if omitted, the bias tick uses wallclock-
+        /// today. Setting "2026-06-21" on sunny-summer-day pins
+        /// the day-of-year to summer solstice so peak irradiance
+        /// matches the scenario name year-round.
+        date: Option<String> {= None},
         stages: Vec<RawStage>,
     }
 }
@@ -670,9 +677,20 @@ fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::Shar
                     temperature_base: s.temperature_base,
                 });
             }
+            let date = match a.date.as_deref() {
+                None => None,
+                Some(s) => Some(chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(
+                    |e| {
+                        Error::os_error(format!(
+                            "define-scenario: :date must be YYYY-MM-DD; got {s:?} ({e})"
+                        ))
+                    },
+                )?),
+            };
             let def = ScenarioDef {
                 name: a.name.clone(),
                 description: a.description.unwrap_or_default(),
+                date,
                 stages,
             };
             scenarios.lock().insert(

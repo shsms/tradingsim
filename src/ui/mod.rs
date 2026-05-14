@@ -321,6 +321,9 @@ async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
     let now = chrono::Utc::now();
     let hour = wallclock_hour(now);
     let reg = handle.read();
+    let day = reg
+        .active_day_of_year
+        .unwrap_or_else(|| chrono::Datelike::ordinal(&now.date_naive()));
     let out: Vec<WeatherLocJson> = reg
         .locations()
         .iter()
@@ -331,7 +334,7 @@ async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
             cloud_cover: l.cloud_cover,
             mean_wind: l.mean_wind,
             wind_direction: l.wind_direction,
-            solar_now: l.solar_at(hour),
+            solar_now: l.solar_at(hour, day),
             wind_now: l.wind_at(hour),
             temp_c_now: l.temperature_at(hour) - 273.15,
         })

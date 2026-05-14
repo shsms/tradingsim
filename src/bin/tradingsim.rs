@@ -298,7 +298,7 @@ async fn main() {
         // already on-curve, ahead of the first bias tick a few
         // seconds later.
         {
-            use chrono::Timelike;
+            use chrono::{Datelike, Timelike};
             let curve_handle = c.curve();
             let weather_handle = c.weather();
             let curve = curve_handle.read();
@@ -309,9 +309,10 @@ async fn main() {
                 let area_code = cfg_snap.area.code.clone();
                 drop(cfg_snap);
                 let hour = period_start.hour() as f64 + period_start.minute() as f64 / 60.0;
+                let day = period_start.ordinal();
                 let loc = weather.for_area(&area_code);
                 view.shared_config.write().reference_price =
-                    tradingsim::scenarios::effective_ref(&curve, loc, hour);
+                    tradingsim::scenarios::effective_ref(&curve, loc, hour, day);
             }
         }
 

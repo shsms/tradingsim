@@ -6,6 +6,7 @@
 (define-scenario
  :name "sunny-summer-day"
  :description "Strong solar belly, sharp evening peak. Bias swings 0.20 → 0.78."
+ :date "2026-06-21"  ;; summer solstice — high sun, long daylight
  :stages
  '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.50 :bias-to 0.50
     :cloud-cover 0.10 :mean-wind 3.0 :temperature-base 287.0)

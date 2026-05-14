@@ -5,6 +5,7 @@
 (define-scenario
  :name "winter-weekday"
  :description "Heating-driven double peak, weak solar. Bias hovers 0.55 → 0.82."
+ :date "2026-01-15"  ;; deep January — short days, low sun
  :stages
  '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.52 :bias-to 0.52
     :cloud-cover 0.70 :mean-wind 5.0 :temperature-base 270.0)

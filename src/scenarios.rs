@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
@@ -54,6 +54,12 @@ pub struct Stage {
 pub struct ScenarioDef {
     pub name: String,
     pub description: String,
+    /// Optional calendar date the solar-elevation model treats this
+    /// scenario as taking place on. None falls back to wallclock-
+    /// today. Setting :date "2026-06-21" on a sunny-summer scenario
+    /// pins the day-of-year to summer solstice so peak irradiance
+    /// matches the scenario name no matter when it's run.
+    pub date: Option<NaiveDate>,
     pub stages: Vec<Stage>,
 }
 
@@ -228,6 +234,17 @@ pub fn spawn_bias_tick(
             let scale = *bias_scale.read();
             let curve_snap = curve.read().clone();
 
+            // Calendar context for the solar-elevation model. If
+            // the active scenario carries a :date, that day-of-
+            // year drives both MM pricing here and the gRPC
+            // weather forecast — keeping the simulated atmosphere
+            // consistent with what a trading app's subscribed
+            // weather stream is being told.
+            let scenario_date = active.as_ref().and_then(|(_, _, d)| *d);
+            let day_of_year = scenario_date
+                .unwrap_or_else(|| now.date_naive())
+                .ordinal();
+
             // Reset every registered location to its baseline and
             // apply the active stage's weather overrides on top.
             // Doing this under the same lock both writers
@@ -235,10 +252,11 @@ pub fn spawn_bias_tick(
             // a stage transition shows up atomically downstream.
             {
                 let mut w = weather.write();
+                w.active_day_of_year = Some(day_of_year);
                 for loc in w.locations_mut() {
                     loc.reset_to_baseline();
                 }
-                if let Some((stage, _)) = &active {
+                if let Some((stage, _, _)) = &active {
                     for loc in w.locations_mut() {
                         if let Some(v) = stage.cloud_cover {
                             loc.cloud_cover = v;
@@ -254,7 +272,7 @@ pub fn spawn_bias_tick(
             }
 
             let weather_snap = weather.read().clone();
-            let scenario_bias = active.as_ref().map(|(s, rt)| stage_bias_now(s, rt, now));
+            let scenario_bias = active.as_ref().map(|(s, rt, _)| stage_bias_now(s, rt, now));
             apply_biases(
                 &aggressors,
                 &mms,
@@ -262,6 +280,7 @@ pub fn spawn_bias_tick(
                 scale,
                 &curve_snap,
                 &weather_snap,
+                day_of_year,
                 now,
             );
         }
@@ -270,12 +289,13 @@ pub fn spawn_bias_tick(
 
 /// Auto-advance any running scenario whose wallclock has moved into
 /// a different stage, then return a clone of the currently active
-/// stage plus its runtime. Multiple running scenarios collapse to
-/// the first one HashMap iteration yields.
+/// stage plus its runtime + the parent scenario's optional :date.
+/// Multiple running scenarios collapse to the first one HashMap
+/// iteration yields.
 fn pick_active_stage(
     scenarios: &SharedScenarios,
     now: DateTime<Utc>,
-) -> Option<(Stage, ScenarioRuntime)> {
+) -> Option<(Stage, ScenarioRuntime, Option<NaiveDate>)> {
     let mut guard = scenarios.lock();
     let wallclock_h = wallclock_hour(now);
     for entry in guard.values_mut() {
@@ -292,7 +312,7 @@ fn pick_active_stage(
         if let Some(idx) = entry.runtime.current_stage
             && let Some(stage) = entry.def.stages.get(idx)
         {
-            return Some((stage.clone(), entry.runtime.clone()));
+            return Some((stage.clone(), entry.runtime.clone(), entry.def.date));
         }
     }
     None
@@ -305,6 +325,7 @@ fn apply_biases(
     bias_scale: f64,
     curve: &ForwardCurve,
     weather: &WeatherRegistry,
+    day_of_year: u32,
     now: DateTime<Utc>,
 ) {
     let base_boundary = next_quarter_boundary(now);
@@ -332,7 +353,12 @@ fn apply_biases(
         // explicitly linked).
         let area_code = view.shared_config.read().area.code.clone();
         let loc = weather.for_area(&area_code);
-        let new_ref = effective_ref(curve, loc, period_hour_for(view.quarter_offset));
+        let new_ref = effective_ref(
+            curve,
+            loc,
+            period_hour_for(view.quarter_offset),
+            day_of_year,
+        );
         let mut cfg = view.shared_config.write();
         cfg.reference_price = new_ref;
         cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
@@ -340,14 +366,19 @@ fn apply_biases(
     }
 }
 
-/// Forward-curve base price for `hour`, adjusted by the supplied
-/// weather location's solar irradiance (drops price), wind speed
-/// (drops price), and heating-degree-hours (raises price). Each
-/// adjustment uses the per-hour coefficient from the curve.
-/// Snapped to the 0.01-EUR tick.
-pub fn effective_ref(curve: &ForwardCurve, weather: &WeatherLocation, hour: f64) -> Decimal {
+/// Forward-curve base price for `hour` on `day_of_year` (1-366),
+/// adjusted by the supplied weather location's solar irradiance
+/// (drops price), wind speed (drops price), and heating-degree-
+/// hours (raises price). Each adjustment uses the per-hour
+/// coefficient from the curve. Snapped to the 0.01-EUR tick.
+pub fn effective_ref(
+    curve: &ForwardCurve,
+    weather: &WeatherLocation,
+    hour: f64,
+    day_of_year: u32,
+) -> Decimal {
     let p = curve.point_at(hour);
-    let solar_drop = p.solar_coef * (weather.solar_at(hour) - 200.0).max(0.0);
+    let solar_drop = p.solar_coef * (weather.solar_at(hour, day_of_year) - 200.0).max(0.0);
     let wind_drop = p.wind_coef * (weather.wind_at(hour) - 5.0).max(0.0);
     let load_rise = p.load_coef * weather.heating_degree(hour);
     let net = p.base_price - solar_drop - wind_drop + load_rise;

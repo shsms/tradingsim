@@ -90,9 +90,10 @@ impl WeatherForecastService for WeatherForecastServer {
                     .map(|(la, lo)| reg.at_latlon(*la, *lo))
                     .collect()
             };
+            let day_override = reg.active_day_of_year;
             let mut frames = Vec::with_capacity(locs.len());
             for loc in locs {
-                let lf = build_forecast(loc, now);
+                let lf = build_forecast(loc, now, day_override);
                 push_history(&history, lf.clone());
                 frames.push(lf);
             }
@@ -175,7 +176,18 @@ fn push_history(ring: &SharedWeatherHistory, lf: LocationForecast) {
 /// 100 m wind u/v components, and air temperature. Values get
 /// horizon-scaled noise on top so successive emits look like real
 /// forecast revisions.
-fn build_forecast(state: &WeatherLocation, now: DateTime<Utc>) -> LocationForecast {
+///
+/// `day_override` pins the solar-elevation model's day-of-year for
+/// every entry in the frame. The bias tick writes this from the
+/// active scenario's :date so a "summer day" scenario shows summer
+/// solar peaks even when run on a December afternoon. When None,
+/// each entry derives day-of-year from its own valid_time.
+fn build_forecast(
+    state: &WeatherLocation,
+    now: DateTime<Utc>,
+    day_override: Option<u32>,
+) -> LocationForecast {
+    use chrono::Datelike;
     let next_hour_secs = (now.timestamp() / 3600 + 1) * 3600;
     let create_secs = now.timestamp();
     let mut forecasts = Vec::with_capacity(24);
@@ -184,11 +196,12 @@ fn build_forecast(state: &WeatherLocation, now: DateTime<Utc>) -> LocationForeca
         let valid_time_secs = next_hour_secs + h * 3600;
         let valid_time = DateTime::from_timestamp(valid_time_secs, 0).unwrap_or(now);
         let hour_of_day = valid_time.hour() as f64;
+        let day = day_override.unwrap_or_else(|| valid_time.ordinal());
         let horizon_h = ((valid_time_secs - create_secs) as f64 / 3600.0).max(0.0);
         let wind_speed = state.wind_at(hour_of_day);
         let u = wind_speed * wind_dir_rad.cos();
         let v = wind_speed * wind_dir_rad.sin();
-        let solar = state.solar_at(hour_of_day);
+        let solar = state.solar_at(hour_of_day, day);
         let temp = state.temperature_at(hour_of_day);
         let nv = |truth: f64, feature: ForecastFeature| -> f32 {
             apply_noise(truth, horizon_h, feature, create_secs, valid_time_secs) as f32

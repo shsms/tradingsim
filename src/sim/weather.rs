@@ -96,17 +96,37 @@ impl WeatherLocation {
         self.temperature_base = self.baseline_temperature_base;
     }
 
-    /// Surface solar irradiance in W/m² at the given fractional
-    /// hour. Sinusoidal peak at 12:00 reaching ~1000 W/m² under
-    /// clear skies; zero outside the 06:00–18:00 daylight window.
-    pub fn solar_at(&self, hour: f64) -> f64 {
-        let h = hour.rem_euclid(24.0);
-        if !(6.0..=18.0).contains(&h) {
+    /// Surface solar irradiance in W/m² at fractional UTC `hour`
+    /// on `day_of_year` (1..=366), at this location's latitude.
+    ///
+    /// Uses the standard solar-elevation formula —
+    ///   sin α = sin φ · sin δ + cos φ · cos δ · cos H
+    /// — with declination δ derived from day-of-year and hour-angle
+    /// H from UTC hour. Below the horizon, returns zero. Above it,
+    /// applies a simple ASHRAE-style atmospheric transmittance
+    /// τ^(1/sin α), τ=0.7, so low-elevation sun attenuates steeply
+    /// through the longer air-mass path: at 10° elevation only
+    /// ~30 W/m² makes it down even under perfectly clear skies.
+    ///
+    /// Caller resolves day-of-year from the active scenario's
+    /// :date (if set) or today's wallclock; we don't store it on
+    /// the location so the same lat/lon can be reused across
+    /// dates without re-instantiating.
+    pub fn solar_at(&self, hour: f64, day_of_year: u32) -> f64 {
+        const SOLAR_CONSTANT: f64 = 1361.0;
+        const TAU: f64 = 0.7;
+        let lat = self.lat.to_radians();
+        let decl_amplitude = 23.45_f64.to_radians();
+        let decl = decl_amplitude
+            * (2.0 * std::f64::consts::PI * (284.0 + day_of_year as f64) / 365.0).sin();
+        let hour_angle = 15.0_f64.to_radians() * (hour - 12.0);
+        let sin_a = lat.sin() * decl.sin() + lat.cos() * decl.cos() * hour_angle.cos();
+        if sin_a <= 0.0 {
             return 0.0;
         }
-        let t = (h - 6.0) / 12.0;
-        let clear_sky = 1000.0 * (std::f64::consts::PI * t).sin();
-        clear_sky * (1.0 - self.cloud_cover).clamp(0.0, 1.0)
+        let air_mass = 1.0 / sin_a;
+        let clear = SOLAR_CONSTANT * sin_a * TAU.powf(air_mass);
+        clear * (1.0 - self.cloud_cover).clamp(0.0, 1.0)
     }
 
     pub fn wind_at(&self, _hour: f64) -> f64 {
@@ -135,6 +155,12 @@ pub struct WeatherRegistry {
     /// Area EIC → slot. Lets the bias tick look up the weather a
     /// given delivery area is "anchored" to.
     by_area: HashMap<String, usize>,
+    /// Day-of-year (1-366) the solar-elevation model uses. The
+    /// bias tick writes this each cycle: scenario :date if set,
+    /// today's UTC date otherwise. Stored here so the gRPC
+    /// weather service reads the same value the MM pricing
+    /// pipeline does without an extra shared handle.
+    pub active_day_of_year: Option<u32>,
 }
 
 impl Default for WeatherRegistry {
@@ -147,6 +173,7 @@ impl Default for WeatherRegistry {
             locations: vec![default_loc],
             by_key,
             by_area: HashMap::new(),
+            active_day_of_year: None,
         }
     }
 }
@@ -299,20 +326,52 @@ mod tests {
         assert_eq!(r.at_latlon(60.0, 25.0).cloud_cover, 0.30);
     }
 
+    // Summer + winter solstices for the solar-elevation tests.
+    const SUMMER_SOLSTICE_DOY: u32 = 172; // ~21 June
+    const WINTER_SOLSTICE_DOY: u32 = 355; // ~21 December
+
     #[test]
     fn solar_zero_overnight() {
         let l = default_loc();
-        assert_eq!(l.solar_at(0.0), 0.0);
-        assert_eq!(l.solar_at(22.0), 0.0);
+        // 0:00 UTC and 22:00 UTC at Frankfurt are both below the
+        // horizon on the summer solstice; outside daylight on
+        // winter solstice too.
+        assert_eq!(l.solar_at(0.0, SUMMER_SOLSTICE_DOY), 0.0);
+        assert_eq!(l.solar_at(22.0, SUMMER_SOLSTICE_DOY), 0.0);
+        assert_eq!(l.solar_at(0.0, WINTER_SOLSTICE_DOY), 0.0);
     }
 
     #[test]
     fn solar_peaks_at_noon() {
+        // Frankfurt at summer solstice noon, clear sky: elevation
+        // ~63°, air mass ~1.12, clear-sky peak ~810 W/m². Wide
+        // tolerance — physics-level sanity, not a calibration.
         let l = WeatherLocation {
             cloud_cover: 0.0,
             ..default_loc()
         };
-        assert!((l.solar_at(12.0) - 1000.0).abs() < 1e-9);
+        let peak = l.solar_at(12.0, SUMMER_SOLSTICE_DOY);
+        assert!(
+            (700.0..900.0).contains(&peak),
+            "noon peak {peak:.1} should be ~810 W/m²"
+        );
+    }
+
+    #[test]
+    fn solar_winter_lower_than_summer() {
+        // Same location + hour, opposite season: winter elevation
+        // is ~16° (vs ~63° in summer) so the air-mass path
+        // dominates and the surface irradiance is much smaller.
+        let l = WeatherLocation {
+            cloud_cover: 0.0,
+            ..default_loc()
+        };
+        let summer = l.solar_at(12.0, SUMMER_SOLSTICE_DOY);
+        let winter = l.solar_at(12.0, WINTER_SOLSTICE_DOY);
+        assert!(
+            winter < 0.3 * summer,
+            "winter {winter:.1} should be < 30% of summer {summer:.1}"
+        );
     }
 
     #[test]
@@ -334,7 +393,10 @@ mod tests {
             cloud_cover: 0.8,
             ..default_loc()
         };
-        assert!((clear.solar_at(12.0) - 1000.0).abs() < 1e-9);
-        assert!((overcast.solar_at(12.0) - 200.0).abs() < 1e-9);
+        // Linear (1 - cloud) scaling, so overcast should be 20%
+        // of clear at any hour / latitude / date.
+        let c = clear.solar_at(12.0, SUMMER_SOLSTICE_DOY);
+        let o = overcast.solar_at(12.0, SUMMER_SOLSTICE_DOY);
+        assert!((o - 0.2 * c).abs() < 1e-6);
     }
 }

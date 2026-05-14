@@ -5,6 +5,7 @@
 (define-scenario
  :name "sunny-summer-holiday"
  :description "PV at full pour, demand suppressed. Bias swings 0.18 → 0.58."
+ :date "2026-08-15"  ;; August Assumption holiday — sun still high, plants idle
  :stages
  '((:name "00:00 overnight"     :hour-from 0.0  :hour-to 5.0  :bias-from 0.48 :bias-to 0.48
     :cloud-cover 0.05 :mean-wind 2.5 :temperature-base 289.0)
