@@ -53,6 +53,15 @@ pub struct MarketMakerSpec {
     pub seed: u64,
 }
 
+/// One gridpool from `(make-gridpool …)`. Same shape the binary will
+/// pass to `World::register_gridpool`.
+#[derive(Clone, Debug)]
+pub struct GridpoolSpec {
+    pub id: u64,
+    pub name: String,
+    pub area_codes: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct Config {
     #[allow(dead_code)]
@@ -61,6 +70,7 @@ pub struct Config {
     pub(crate) ctx: SharedMut<TulispContext>,
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
+    gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     /// Anchor time for relative period offsets. Set at Config::new
     /// so that `(make-market-maker :hour-offset N …)` always builds
     /// the same absolute period within one config-load.
@@ -75,6 +85,7 @@ impl Config {
         let mut ctx = TulispContext::new();
         let metadata = Arc::new(RwLock::new(Metadata::default()));
         let market_makers = Arc::new(Mutex::new(HashMap::new()));
+        let gridpools = Arc::new(Mutex::new(Vec::new()));
         let anchor = Utc::now();
 
         let load_dir: PathBuf = match Path::new(filename).parent() {
@@ -84,7 +95,13 @@ impl Config {
         ctx.set_load_path(Some(&load_dir))
             .map_err(|e| format!("set_load_path({}): {e}", load_dir.display()))?;
 
-        register_runtime(&mut ctx, metadata.clone(), market_makers.clone(), anchor);
+        register_runtime(
+            &mut ctx,
+            metadata.clone(),
+            market_makers.clone(),
+            gridpools.clone(),
+            anchor,
+        );
 
         if let Err(e) = ctx.eval_file(filename) {
             return Err(e.format(&ctx));
@@ -95,6 +112,7 @@ impl Config {
             ctx: SharedMut::new(ctx),
             metadata,
             market_makers,
+            gridpools,
             anchor,
         })
     }
@@ -114,6 +132,10 @@ impl Config {
         self.market_makers.lock().values().cloned().collect()
     }
 
+    pub fn gridpools(&self) -> Vec<GridpoolSpec> {
+        self.gridpools.lock().clone()
+    }
+
     pub fn anchor(&self) -> DateTime<Utc> {
         self.anchor
     }
@@ -123,11 +145,46 @@ fn register_runtime(
     ctx: &mut TulispContext,
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
+    gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     anchor: DateTime<Utc>,
 ) {
     add_log_functions(ctx);
     register_metadata(ctx, metadata);
+    register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
+}
+
+AsPlist! {
+    pub struct MakeGridpoolArgs {
+        id: i64,
+        name: Option<String> {= None},
+        areas<":areas">: Vec<String>,
+    }
+}
+
+fn register_gridpools(
+    ctx: &mut TulispContext,
+    gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
+) {
+    ctx.defun(
+        "%make-gridpool",
+        move |args: Plist<MakeGridpoolArgs>| -> Result<i64, Error> {
+            let a = args.into_inner();
+            if a.areas.is_empty() {
+                return Err(Error::os_error(
+                    "make-gridpool: :areas must list at least one area code",
+                ));
+            }
+            let spec = GridpoolSpec {
+                id: a.id as u64,
+                name: a.name.unwrap_or_else(|| format!("gridpool-{}", a.id)),
+                area_codes: a.areas,
+            };
+            let id = spec.id;
+            gridpools.lock().push(spec);
+            Ok(id as i64)
+        },
+    );
 }
 
 AsPlist! {
@@ -361,6 +418,35 @@ mod tests {
         match Config::new(&path) {
             Ok(_) => panic!("expected error"),
             Err(e) => assert!(e.contains("nonexistent"), "got: {e}"),
+        }
+    }
+
+    #[test]
+    fn make_gridpool_registers_spec() {
+        let f = write_tmp(
+            r#"
+            (%make-gridpool :id 1 :name "default" :areas '("10Y1001A1001A82H"))
+            (%make-gridpool :id 2 :areas '("10YFR-RTE------C" "10YBE----------2"))
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let gps = cfg.gridpools();
+        assert_eq!(gps.len(), 2);
+        assert_eq!(gps[0].id, 1);
+        assert_eq!(gps[0].name, "default");
+        assert_eq!(gps[0].area_codes, vec!["10Y1001A1001A82H"]);
+        assert_eq!(gps[1].id, 2);
+        assert_eq!(gps[1].name, "gridpool-2");
+        assert_eq!(gps[1].area_codes.len(), 2);
+    }
+
+    #[test]
+    fn make_gridpool_rejects_empty_areas() {
+        let f = write_tmp(r#"(%make-gridpool :id 1 :areas '())"#);
+        let path = f.path().to_str().unwrap().to_string();
+        match Config::new(&path) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(e.contains("at least one area code"), "got: {e}"),
         }
     }
 

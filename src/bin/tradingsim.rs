@@ -87,12 +87,26 @@ async fn main() {
     markets.insert(MarketRules::de_lu());
     let area = Area::eic("10Y1001A1001A82H");
     let mut world = World::new(markets);
-    world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
-    log::info!(
-        "Registered gridpool {} (DE-LU) with {} market(s)",
-        1,
-        world.markets().len()
-    );
+
+    let gridpool_specs = lisp_config
+        .as_ref()
+        .map(|c| c.gridpools())
+        .unwrap_or_default();
+    if !gridpool_specs.is_empty() {
+        for gp in gridpool_specs {
+            let areas = gp.area_codes.iter().map(|c| Area::eic(c)).collect();
+            log::info!(
+                "Registered gridpool {} \"{}\" ({} area(s))",
+                gp.id,
+                gp.name,
+                gp.area_codes.len()
+            );
+            world.register_gridpool(Gridpool::new(GridpoolId(gp.id), gp.name, areas));
+        }
+    } else {
+        log::info!("No gridpools in lisp config — registering hardcoded gridpool 1 (DE-LU)");
+        world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
+    }
 
     let socket_addr = lisp_config
         .as_ref()

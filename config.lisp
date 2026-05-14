@@ -7,6 +7,12 @@
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
 
+;; One gridpool trading in DE-LU.
+(%make-gridpool
+ :id 1
+ :name "default"
+ :areas '("10Y1001A1001A82H"))
+
 ;; Four hour-contracts of synthetic liquidity in DE-LU, starting at
 ;; the next hour boundary. Each MM holds a SharedConfig the
 ;; (set-mm-* …) defuns mutate in place.
