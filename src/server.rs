@@ -67,6 +67,7 @@ fn submit_err_to_status(e: SubmitError) -> Status {
         OrderNotFound => Status::not_found("order not found"),
         OrderAlreadyTerminal => Status::failed_precondition("order already terminal"),
         SuspendedMarket => Status::failed_precondition("market is suspended"),
+        SelfTradeRejected => Status::failed_precondition("self-trade rejected"),
         e => Status::invalid_argument(format!("validation: {e:?}")),
     }
 }

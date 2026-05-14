@@ -185,7 +185,10 @@ async fn main() {
                 gp.name,
                 gp.area_codes.len()
             );
-            world.register_gridpool(Gridpool::new(GridpoolId(gp.id), gp.name, areas));
+            world.register_gridpool(
+                Gridpool::new(GridpoolId(gp.id), gp.name, areas)
+                    .with_self_trade_policy(gp.self_trade_policy),
+            );
         }
     } else {
         log::info!("No gridpools in lisp config — registering hardcoded gridpool 1 (DE-LU)");

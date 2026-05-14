@@ -178,6 +178,44 @@ impl OrderBook {
         total
     }
 
+    /// Same traversal as `marketable_depth`, but yields each individual
+    /// resting entry (id, price, open_qty) instead of a single total.
+    /// Order is the same price-time priority the matcher would walk:
+    /// best price first, FIFO within a level. Used by the self-trade
+    /// pre-flight check that needs to see whether a same-gridpool
+    /// order sits in the path the taker would consume.
+    pub fn marketable_orders(
+        &self,
+        taker: Side,
+        taker_price: Decimal,
+    ) -> Vec<(OrderId, Decimal, Decimal)> {
+        let mut out = Vec::new();
+        match taker {
+            Side::Buy => {
+                for (price, queue) in self.asks.iter() {
+                    if *price > taker_price {
+                        break;
+                    }
+                    for r in queue {
+                        out.push((r.id, *price, r.open_qty));
+                    }
+                }
+            }
+            Side::Sell => {
+                for (price, queue) in self.bids.iter().rev() {
+                    if *price < taker_price {
+                        break;
+                    }
+                    for r in queue {
+                        out.push((r.id, *price, r.open_qty));
+                    }
+                }
+            }
+            Side::Unspecified => {}
+        }
+        out
+    }
+
     /// Sum of open_qty across every resting entry on both sides.
     /// Used by tests for the conservation invariant and by the UI
     /// for "open book volume" headline numbers.

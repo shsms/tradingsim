@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 use crate::sim::book::OrderBook;
 use crate::sim::decimal::is_multiple_of;
-use crate::sim::gridpool::{Gridpool, GridpoolRegistry};
+use crate::sim::gridpool::{Gridpool, GridpoolRegistry, SelfTradePolicy};
 use crate::sim::market::{Area, Currency, DeliveryPeriod, MarketRegistry};
 use crate::sim::matching::{ExecMode, IncomingLimit, LimitMatchOutcome, match_limit};
 use crate::sim::order::{
@@ -160,6 +160,11 @@ pub enum SubmitError {
     OrderAlreadyTerminal,
     /// Modify: the new quantity is below the already-filled amount.
     ModifyQuantityBelowFilled,
+    /// Self-trade prevention: the gridpool's
+    /// `SelfTradePolicy::Reject` is in effect and at least one of
+    /// the resting orders that the incoming order would consume
+    /// belongs to the same gridpool.
+    SelfTradeRejected,
 }
 
 /// Field-set the Update RPC can write. None = "leave alone".
@@ -692,6 +697,66 @@ impl World {
         self.books.keys()
     }
 
+    /// Simulate the matcher's marketable walk against the candidate
+    /// books (taker's area + currently-open coupled areas) without
+    /// mutating any state. Returns `true` if any resting order the
+    /// matcher would consume to fill `quantity` belongs to
+    /// `gridpool_id`. Conservative: if the same-pool resting sits
+    /// deeper than the marketable quantity will reach, this returns
+    /// `false`.
+    fn would_self_trade(
+        &self,
+        taker_key: &ContractKey,
+        side: Side,
+        taker_price: Decimal,
+        mut remaining: Decimal,
+        gridpool_id: GridpoolId,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
+        for (other, coupling) in self.coupled_areas(&taker_key.area) {
+            if coupling.gate_offset > std::time::Duration::ZERO {
+                let cutoff = taker_key.period.start
+                    - chrono::Duration::from_std(coupling.gate_offset).unwrap_or_default();
+                if now >= cutoff {
+                    continue;
+                }
+            }
+            if let Some(rem) =
+                self.remaining_capacity(&taker_key.area, &other, taker_key.period)
+            {
+                if rem <= Decimal::ZERO {
+                    continue;
+                }
+            }
+            keys.push(ContractKey {
+                area: other,
+                period: taker_key.period,
+            });
+        }
+        let mut walk: Vec<(OrderId, Decimal, Decimal)> = Vec::new();
+        for key in &keys {
+            if let Some(b) = self.books.get(key) {
+                walk.extend(b.marketable_orders(side, taker_price));
+            }
+        }
+        walk.sort_by(|a, b| match side {
+            Side::Buy => a.1.cmp(&b.1),
+            Side::Sell => b.1.cmp(&a.1),
+            Side::Unspecified => std::cmp::Ordering::Equal,
+        });
+        for (id, _price, qty) in walk {
+            if remaining <= Decimal::ZERO {
+                return false;
+            }
+            if self.owner_of(id) == Some(gridpool_id) {
+                return true;
+            }
+            remaining -= qty;
+        }
+        false
+    }
+
     fn next_trade_id(&mut self) -> TradeId {
         let id = TradeId(self.next_trade_id);
         self.next_trade_id += 1;
@@ -731,6 +796,25 @@ impl World {
             return Err(SubmitError::UnsupportedExecutionOption(
                 order.execution_option.unwrap(),
             ));
+        }
+
+        // 4b. Self-trade prevention. Only if the pool opted in;
+        // default is Allow so existing configs keep their behaviour.
+        if matches!(gp.self_trade_policy, SelfTradePolicy::Reject) {
+            let probe_key = ContractKey {
+                area: order.area.clone(),
+                period: order.period,
+            };
+            if self.would_self_trade(
+                &probe_key,
+                order.side,
+                order.price,
+                order.quantity,
+                gridpool_id,
+                now,
+            ) {
+                return Err(SubmitError::SelfTradeRejected);
+            }
         }
 
         // 5. Admit. Mint id; build the contract key.
@@ -2238,5 +2322,79 @@ mod tests {
         assert_eq!(out.fills[0].maker_id, id1);
         assert_eq!(out.fills[0].taker_id, id2);
         assert!(w.book(&k).unwrap().is_empty());
+    }
+
+    fn setup_world_with_reject_pool() -> (World, GridpoolId) {
+        let mut markets = MarketRegistry::new();
+        markets.insert(MarketRules::de_lu());
+        let mut w = World::new(markets);
+        let area = Area::eic("10Y1001A1001A82H");
+        w.register_gridpool(
+            Gridpool::new(GridpoolId(1), "reject-pool", vec![area])
+                .with_self_trade_policy(SelfTradePolicy::Reject),
+        );
+        (w, GridpoolId(1))
+    }
+
+    #[test]
+    fn self_trade_rejected_when_policy_says_so() {
+        let (mut w, gp) = setup_world_with_reject_pool();
+        // Rest a sell from the pool first.
+        w.submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        // Same pool tries to buy through it — must reject.
+        let err = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(86.0)), t0())
+            .unwrap_err();
+        assert_eq!(err, SubmitError::SelfTradeRejected);
+        // Resting sell still on the book; no trades recorded.
+        assert_eq!(
+            w.book(&de_lu_hour()).unwrap().best_ask(),
+            Some(dec!(85.0))
+        );
+        assert!(w.gridpools().get(gp).unwrap().trades().is_empty());
+    }
+
+    #[test]
+    fn allow_policy_still_self_trades() {
+        // The default Allow policy keeps prior behaviour: a pool can
+        // cross its own order. This is what setup_world_with_pool
+        // builds; the test mirrors submit_cross_match_fills_both_sides
+        // but is explicit about the policy.
+        let (mut w, gp) = setup_world_with_pool();
+        w.submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let buy = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        assert_eq!(buy.state.state, OrderState::Filled);
+    }
+
+    #[test]
+    fn reject_only_fires_when_same_pool_is_in_the_marketable_path() {
+        // Pool A is the reject pool; pool B is an unrelated pool
+        // also tradeable in the same area. A's deep ask at 88 sits
+        // behind B's tighter ask at 85 — A's 1 MW buy at 86 should
+        // consume only B's level, never touch A's, and therefore
+        // not trigger the self-trade reject.
+        let (mut w, _gp_a) = setup_world_with_reject_pool();
+        let area = Area::eic("10Y1001A1001A82H");
+        w.register_gridpool(Gridpool::new(GridpoolId(2), "other", vec![area]));
+        let gp_a = GridpoolId(1);
+        let gp_b = GridpoolId(2);
+
+        // B's tight ask: at 85, 1 MW.
+        w.submit_order(gp_b, sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        // A's deeper ask: at 88, 1 MW. Above A's prospective bid
+        // (86), so not marketable to A's buyer.
+        w.submit_order(gp_a, sample_sell(dec!(1.0), dec!(88.0)), t0())
+            .unwrap();
+
+        let buy = w
+            .submit_order(gp_a, sample_buy(dec!(1.0), dec!(86.0)), t0())
+            .unwrap();
+        assert_eq!(buy.state.state, OrderState::Filled);
+        assert_eq!(buy.filled_quantity, dec!(1.0));
     }
 }

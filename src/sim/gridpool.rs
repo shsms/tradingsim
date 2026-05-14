@@ -16,11 +16,29 @@ use crate::sim::market::Area;
 use crate::sim::order::{GridpoolId, OrderDetail, OrderId};
 use crate::sim::trade::Trade;
 
+/// What the matcher does when an incoming aggressive order would
+/// cross a resting order owned by the same gridpool.
+///
+/// - `Allow` (default): the order matches normally. Same as
+///   pre-policy behaviour, kept as the default so existing
+///   tests / configs don't need updating.
+/// - `Reject`: pre-trade check rejects the incoming order before
+///   any state mutates; the gRPC layer maps this to
+///   `FailedPrecondition`. This mirrors the simplest STPF
+///   variant: any prospective self-trade kills the new order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelfTradePolicy {
+    #[default]
+    Allow,
+    Reject,
+}
+
 #[derive(Clone, Debug)]
 pub struct Gridpool {
     pub id: GridpoolId,
     pub name: String,
     pub areas: Vec<Area>,
+    pub self_trade_policy: SelfTradePolicy,
     orders: HashMap<OrderId, OrderDetail>,
     trades: Vec<Trade>,
 }
@@ -31,9 +49,15 @@ impl Gridpool {
             id,
             name: name.into(),
             areas,
+            self_trade_policy: SelfTradePolicy::Allow,
             orders: HashMap::new(),
             trades: Vec::new(),
         }
+    }
+
+    pub fn with_self_trade_policy(mut self, policy: SelfTradePolicy) -> Self {
+        self.self_trade_policy = policy;
+        self
     }
 
     /// True iff `area` is one of the gridpool's allowed delivery

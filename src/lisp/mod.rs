@@ -64,11 +64,17 @@ pub struct MarketMakerSpec {
 
 /// One gridpool from `(make-gridpool …)`. Same shape the binary will
 /// pass to `World::register_gridpool`.
+///
+/// `self_trade_policy` accepts the strings "allow" (default) or
+/// "reject". The plan's longer-term shape uses an unquoted symbol
+/// (`'reject`); for now strings keep the AsPlist plumbing simple
+/// and parsing local to one place.
 #[derive(Clone, Debug)]
 pub struct GridpoolSpec {
     pub id: u64,
     pub name: String,
     pub area_codes: Vec<String>,
+    pub self_trade_policy: crate::sim::gridpool::SelfTradePolicy,
 }
 
 /// One market from `(%make-market …)`. The binary builds a
@@ -840,6 +846,7 @@ AsPlist! {
         id: i64,
         name: Option<String> {= None},
         areas<":areas">: Vec<String>,
+        self_trade_policy<":self-trade-policy">: Option<String> {= None},
     }
 }
 
@@ -847,6 +854,7 @@ fn register_gridpools(
     ctx: &mut TulispContext,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
 ) {
+    use crate::sim::gridpool::SelfTradePolicy;
     ctx.defun(
         "%make-gridpool",
         move |args: Plist<MakeGridpoolArgs>| -> Result<i64, Error> {
@@ -856,10 +864,20 @@ fn register_gridpools(
                     "make-gridpool: :areas must list at least one area code",
                 ));
             }
+            let policy = match a.self_trade_policy.as_deref() {
+                None | Some("allow") => SelfTradePolicy::Allow,
+                Some("reject") => SelfTradePolicy::Reject,
+                Some(other) => {
+                    return Err(Error::os_error(format!(
+                        "make-gridpool: :self-trade-policy must be \"allow\" or \"reject\"; got {other:?}"
+                    )));
+                }
+            };
             let spec = GridpoolSpec {
                 id: a.id as u64,
                 name: a.name.unwrap_or_else(|| format!("gridpool-{}", a.id)),
                 area_codes: a.areas,
+                self_trade_policy: policy,
             };
             let id = spec.id;
             gridpools.lock().push(spec);
@@ -1148,6 +1166,35 @@ mod tests {
         assert_eq!(gps[1].id, 2);
         assert_eq!(gps[1].name, "gridpool-2");
         assert_eq!(gps[1].area_codes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn make_gridpool_parses_self_trade_policy() {
+        use crate::sim::gridpool::SelfTradePolicy;
+        let f = write_tmp(
+            r#"
+            (%make-gridpool :id 1 :areas '("10Y1001A1001A82H"))
+            (%make-gridpool :id 2 :areas '("10Y1001A1001A82H")
+                            :self-trade-policy "reject")
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let gps = cfg.gridpools();
+        assert_eq!(gps[0].self_trade_policy, SelfTradePolicy::Allow);
+        assert_eq!(gps[1].self_trade_policy, SelfTradePolicy::Reject);
+    }
+
+    #[tokio::test]
+    async fn make_gridpool_rejects_unknown_self_trade_policy() {
+        let f = write_tmp(
+            r#"(%make-gridpool :id 1 :areas '("10Y1001A1001A82H")
+                                :self-trade-policy "nope")"#,
+        );
+        let path = f.path().to_str().unwrap().to_string();
+        match Config::new(&path) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert!(e.contains("self-trade-policy"), "got: {e}"),
+        }
     }
 
     #[tokio::test]
