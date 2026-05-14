@@ -294,6 +294,23 @@ td { padding: 2px 6px; }
   letter-spacing: 0.04em;
 }
 .ladder-more:hover { color: var(--text); }
+
+/* Filter bar — area chips that scope trades, book, and chart. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: var(--fs-small);
+  color: var(--muted);
+}
+.filter-bar > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: var(--fs-small);
+}
+.filter-bar .chip { padding: 1px 8px; font-size: var(--fs-mini); }
 </style>
 </head>
 <body>
@@ -324,6 +341,11 @@ td { padding: 2px 6px; }
     <div class="hero-legend" id="chart-legend"></div>
   </div>
   <canvas id="price-chart"></canvas>
+</section>
+
+<section class="filter-bar" aria-label="area filter">
+  <span>areas</span>
+  <span id="filter-chips"></span>
 </section>
 
 <div class="grid">
@@ -552,6 +574,7 @@ function drawChart() {
   ctx.lineWidth = 1.5;
   ctx.lineJoin = 'round';
   for (const a of CHART_AREAS) {
+    if (!activeAreas.has(a.code)) continue;
     const arr = priceSeries.get(a.code) || [];
     if (arr.length < 2) continue;
     ctx.strokeStyle = a.color;
@@ -700,13 +723,16 @@ function openTradesWs() {
     recordTradePrice(t);
     const tbody = document.getElementById('trades');
     const row = document.createElement('tr');
+    row.dataset.buyArea = t.buy_area;
+    row.dataset.sellArea = t.sell_area;
     const area = t.buy_area === t.sell_area
-      ? t.buy_area
-      : t.buy_area + ' → ' + t.sell_area;
+      ? `<span class="area-badge">${areaTag(t.buy_area)}</span>`
+      : `<span class="area-badge">${areaTag(t.buy_area)}</span><span class="area-cross">→</span><span class="area-badge">${areaTag(t.sell_area)}</span>`;
     row.innerHTML = `<td>#${t.id}</td><td>${t.quantity}</td><td>${t.price}</td>` +
-      `<td class="muted">${area.slice(0, 12)}</td>` +
+      `<td>${area}</td>` +
       `<td class="muted">${shortTime(t.period)}</td>` +
       `<td class="muted">${shortTime(t.execution_time)}</td>`;
+    if (!tradePassesFilter(t)) row.style.display = 'none';
     tbody.insertBefore(row, tbody.firstChild);
     while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
   };
@@ -722,18 +748,68 @@ function openTradesWs() {
 const bookState = new Map();
 let bookDirty = false;
 
-const AREA_TAGS = {
-  '10YDE-EON------1': 'TN',
-  '10YDE-RWENET---I': 'AM',
-  '10YDE-VE-------2': 'HZ',
-  '10YDE-ENBW-----N': 'BW',
-  '10YFR-RTE------C': 'FR',
-  '10YNL----------L': 'NL',
-  '10YBE----------2': 'BE',
-  '10YAT-APG------L': 'AT',
-};
+const ALL_FILTER_AREAS = [
+  { code: '10YDE-EON------1', tag: 'TN', group: 'de' },
+  { code: '10YDE-RWENET---I', tag: 'AM', group: 'de' },
+  { code: '10YDE-VE-------2', tag: 'HZ', group: 'de' },
+  { code: '10YDE-ENBW-----N', tag: 'BW', group: 'de' },
+  { code: '10YFR-RTE------C', tag: 'FR', group: 'intl' },
+  { code: '10YNL----------L', tag: 'NL', group: 'intl' },
+  { code: '10YBE----------2', tag: 'BE', group: 'intl' },
+  { code: '10YAT-APG------L', tag: 'AT', group: 'intl' },
+];
+const AREA_TAGS = Object.fromEntries(ALL_FILTER_AREAS.map(a => [a.code, a.tag]));
 function areaTag(code) {
   return AREA_TAGS[code] || code.slice(0, 4);
+}
+
+const activeAreas = new Set(ALL_FILTER_AREAS.filter(a => a.group === 'de').map(a => a.code));
+let showNeighbours = false;
+
+function toggleArea(code) {
+  if (activeAreas.has(code)) activeAreas.delete(code);
+  else activeAreas.add(code);
+  renderFilterChips();
+  rerenderBook();
+  applyFilterToTrades();
+}
+
+function toggleNeighbours() {
+  showNeighbours = !showNeighbours;
+  for (const a of ALL_FILTER_AREAS) {
+    if (a.group !== 'intl') continue;
+    if (showNeighbours) activeAreas.add(a.code);
+    else activeAreas.delete(a.code);
+  }
+  renderFilterChips();
+  rerenderBook();
+  applyFilterToTrades();
+}
+
+function renderFilterChips() {
+  const el = document.getElementById('filter-chips');
+  if (!el) return;
+  const visible = ALL_FILTER_AREAS.filter(a => a.group === 'de' || showNeighbours);
+  const chips = visible
+    .map(a => `<span class="chip${activeAreas.has(a.code) ? ' active' : ''}" onclick="toggleArea('${a.code}')">${a.tag}</span>`)
+    .join('');
+  const nb = `<span class="chip${showNeighbours ? ' active' : ''}" onclick="toggleNeighbours()">${showNeighbours ? '−' : '+'} neighbours</span>`;
+  el.innerHTML = chips + nb;
+}
+
+function tradePassesFilter(t) {
+  return activeAreas.has(t.buy_area) || activeAreas.has(t.sell_area);
+}
+
+function applyFilterToTrades() {
+  const tbody = document.getElementById('trades');
+  if (!tbody) return;
+  for (const tr of tbody.children) {
+    const buy = tr.dataset.buyArea;
+    const sell = tr.dataset.sellArea;
+    const visible = activeAreas.has(buy) || activeAreas.has(sell);
+    tr.style.display = visible ? '' : 'none';
+  }
 }
 
 const TOP_LEVELS = 3;
@@ -842,12 +918,14 @@ function rerenderBook() {
 
   const container = document.getElementById('book');
   if (!container) return;
-  const sorted = Array.from(groups.values()).sort((a, b) =>
-    a.period < b.period ? -1 : a.period > b.period ? 1 : a.area.localeCompare(b.area)
-  );
+  const sorted = Array.from(groups.values())
+    .filter(g => activeAreas.has(g.area))
+    .sort((a, b) =>
+      a.period < b.period ? -1 : a.period > b.period ? 1 : a.area.localeCompare(b.area)
+    );
   container.innerHTML = sorted.length
     ? sorted.map(renderLadder).join('')
-    : '<div class="ladder-empty"><i>no resting orders</i></div>';
+    : '<div class="ladder-empty"><i>no resting orders match the filter</i></div>';
 }
 
 function openBookWs() {
@@ -889,6 +967,7 @@ setInterval(() => {
   tickClock();
   renderSparkbars();
   renderChartLegend();
+  renderFilterChips();
   drawChart();
   setPill('pill-trades', 'down', 'trades');
   setPill('pill-book', 'down', 'book');
