@@ -391,11 +391,11 @@ td { padding: 2px 6px; }
   font-size: var(--fs-small);
 }
 .filter-bar .chip { padding: 1px 8px; font-size: var(--fs-mini); }
-.filter-bar.subordinate { opacity: 0.45; }
 
-/* Active-contract pill — appears above the area chips when the
-   user has clicked into a single (area, period) contract; clears
-   on click. */
+/* Active-delivery pill — appears above the area chips when the
+   user has clicked into a single delivery start across all areas;
+   clears on click. Area chips remain orthogonal so users can
+   compose 'delivery 18:30 in TN only' if needed. */
 .contract-pill {
   display: inline-flex;
   align-items: center;
@@ -482,9 +482,9 @@ td { padding: 2px 6px; }
   <canvas id="price-chart"></canvas>
 </section>
 
-<section class="filter-bar" id="contract-filter-bar" style="display:none" aria-label="active contract">
+<section class="filter-bar" id="contract-filter-bar" style="display:none" aria-label="active delivery">
   <span>focused</span>
-  <span class="contract-pill" id="contract-pill" onclick="clearContractFilter()">
+  <span class="contract-pill" id="contract-pill" onclick="clearPeriodFilter()">
     <span id="contract-pill-label">—</span>
     <span>×</span>
   </span>
@@ -664,13 +664,9 @@ function drawChart() {
 
   let ymin = Infinity, ymax = -Infinity;
   for (const [code, arr] of priceSeries) {
-    if (contractFilter) {
-      if (code !== contractFilter.area) continue;
-    } else if (!activeAreas.has(code)) {
-      continue;
-    }
+    if (!activeAreas.has(code)) continue;
     for (const p of arr) {
-      if (contractFilter && p.period !== contractFilter.period) continue;
+      if (periodFilter && p.period !== periodFilter) continue;
       if (p.price < ymin) ymin = p.price;
       if (p.price > ymax) ymax = p.price;
     }
@@ -716,14 +712,10 @@ function drawChart() {
   ctx.lineWidth = 1.5;
   ctx.lineJoin = 'round';
   for (const a of CHART_AREAS) {
-    if (contractFilter) {
-      if (a.code !== contractFilter.area) continue;
-    } else if (!activeAreas.has(a.code)) {
-      continue;
-    }
+    if (!activeAreas.has(a.code)) continue;
     const raw = priceSeries.get(a.code) || [];
-    const arr = contractFilter
-      ? raw.filter(p => p.period === contractFilter.period)
+    const arr = periodFilter
+      ? raw.filter(p => p.period === periodFilter)
       : raw;
     if (arr.length < 2) continue;
     ctx.strokeStyle = a.color;
@@ -935,7 +927,7 @@ function openTradesWs() {
     row.dataset.buyArea = t.buy_area;
     row.dataset.sellArea = t.sell_area;
     row.dataset.period = t.period;
-    row.onclick = () => setContractFilter(t.buy_area, t.period);
+    row.onclick = () => setPeriodFilter(t.period);
     const area = t.buy_area === t.sell_area
       ? `<span class="area-badge">${areaTag(t.buy_area)}</span>`
       : `<span class="area-badge">${areaTag(t.buy_area)}</span><span class="area-cross">→</span><span class="area-badge">${areaTag(t.sell_area)}</span>`;
@@ -976,36 +968,35 @@ function areaTag(code) {
 
 const activeAreas = new Set(ALL_FILTER_AREAS.filter(a => a.group === 'de').map(a => a.code));
 let showNeighbours = false;
-/** {area, period} when the user has drilled into a single contract; null otherwise. */
-let contractFilter = null;
+/** Delivery-start string (RFC-3339) when the user has drilled into one
+ *  contract period across all areas; null otherwise. Area filtering
+ *  via chips remains orthogonal — both compose. */
+let periodFilter = null;
 
-function setContractFilter(area, period) {
-  if (!area || !period) return;
-  contractFilter = { area, period };
-  renderContractPill();
+function setPeriodFilter(period) {
+  if (!period) return;
+  periodFilter = period;
+  renderPeriodPill();
   rerenderBook();
   applyFilterToTrades();
 }
 
-function clearContractFilter() {
-  contractFilter = null;
-  renderContractPill();
+function clearPeriodFilter() {
+  periodFilter = null;
+  renderPeriodPill();
   rerenderBook();
   applyFilterToTrades();
 }
 
-function renderContractPill() {
+function renderPeriodPill() {
   const bar = document.getElementById('contract-filter-bar');
   const label = document.getElementById('contract-pill-label');
-  const areaBar = document.getElementById('area-filter-bar');
   if (!bar || !label) return;
-  if (contractFilter) {
+  if (periodFilter) {
     bar.style.display = '';
-    label.textContent = `${areaTag(contractFilter.area)} ${shortTime(contractFilter.period)}`;
-    if (areaBar) areaBar.classList.add('subordinate');
+    label.textContent = `delivery ${shortTime(periodFilter)}`;
   } else {
     bar.style.display = 'none';
-    if (areaBar) areaBar.classList.remove('subordinate');
   }
 }
 
@@ -1041,18 +1032,12 @@ function renderFilterChips() {
 }
 
 function tradePassesFilter(t) {
-  if (contractFilter) {
-    return t.period === contractFilter.period &&
-      (t.buy_area === contractFilter.area || t.sell_area === contractFilter.area);
-  }
+  if (periodFilter && t.period !== periodFilter) return false;
   return activeAreas.has(t.buy_area) || activeAreas.has(t.sell_area);
 }
 
 function rowPassesFilter(buy, sell, period) {
-  if (contractFilter) {
-    return period === contractFilter.period &&
-      (buy === contractFilter.area || sell === contractFilter.area);
-  }
+  if (periodFilter && period !== periodFilter) return false;
   return activeAreas.has(buy) || activeAreas.has(sell);
 }
 
@@ -1131,7 +1116,7 @@ function renderLadder(g) {
   const periodAttr = String(g.period).replace(/'/g, '%27');
   return `
     <div class="ladder">
-      <div class="ladder-head" onclick="setContractFilter('${g.area}', '${periodAttr}')" title="focus this contract">
+      <div class="ladder-head" onclick="setPeriodFilter('${periodAttr}')" title="focus this delivery start across all areas">
         <span><span class="area-badge">${areaTag(g.area)}</span> ${shortTime(g.period)}</span>
         <span class="midprice">mid ${mid}</span>
       </div>
@@ -1174,8 +1159,9 @@ function rerenderBook() {
   if (!container) return;
   const sorted = Array.from(groups.values())
     .filter(g => {
-      if (contractFilter) return g.area === contractFilter.area && g.period === contractFilter.period;
-      return activeAreas.has(g.area);
+      if (!activeAreas.has(g.area)) return false;
+      if (periodFilter && g.period !== periodFilter) return false;
+      return true;
     })
     .sort((a, b) =>
       a.period < b.period ? -1 : a.period > b.period ? 1 : a.area.localeCompare(b.area)
