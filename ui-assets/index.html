@@ -95,11 +95,11 @@ h1 {
 
 /* Scenarios + chart panels share a stable min-height so the
    panel doesn't jump between idle (picker only) and active
-   (timeline + controls) states. Sized to fit the 9-stage
-   summer scenario comfortably; idle picker content sits at the
-   top of the box. */
-.panel-scenarios, .panel-chart { min-height: 280px; }
-
+   (timeline + stage list) states. Sized to fit the 9-stage
+   summer scenario's active layout — head + timeline + axis +
+   list (capped at 160 px scrollable) — with breathing room.
+   Idle picker content sits at the top; chart canvas height
+   bumps to match so the chart fills its panel too. */
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -107,6 +107,12 @@ h1 {
   padding: 10px;
   min-height: 200px;
 }
+/* Override .panel's 200 px floor for the two panels that share a
+   row — both grow to fit the scenarios' active layout so neither
+   resizes when a scenario starts. Specificity is identical to
+   .panel; this rule wins by source order, so keep it after
+   .panel. */
+.panel-scenarios, .panel-chart { min-height: 340px; }
 .panel h2 {
   margin: 0 0 8px 0;
   font-size: var(--fs-h2);
@@ -925,7 +931,7 @@ function drawChart() {
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.parentElement.clientWidth - 20;
-  const cssH = 220;
+  const cssH = 280;
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
   canvas.width = Math.max(1, Math.floor(cssW * dpr));
