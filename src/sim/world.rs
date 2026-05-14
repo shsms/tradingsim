@@ -4,6 +4,7 @@
 //! tick loop; the World stays the integration point for those.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -101,6 +102,11 @@ pub struct World {
     /// produces one PublicTrade and two private Trades — all three
     /// share this id (one trade event, two views).
     next_trade_id: u64,
+    /// Flips to true when `(suspend-market)` fires; validate_common
+    /// rejects everything until `(resume-market)` flips it back.
+    /// Held in an Arc<RwLock<bool>> so the lisp layer and World
+    /// share the same flag without going through World every time.
+    market_suspended: Arc<parking_lot::RwLock<bool>>,
 }
 
 /// Why submit_order can reject. Maps onto the proto's
@@ -116,6 +122,9 @@ pub enum SubmitError {
     /// closed. Trading on a contract ends exactly at its delivery
     /// start time (no pre-delivery buffer).
     GateClosed,
+    /// Market is suspended (TSO emergency or scheduled outage). All
+    /// submissions reject until `(resume-market)` flips the flag.
+    SuspendedMarket,
     PriceOffGrid,
     NonPositivePrice,
     QuantityOffGrid,
@@ -166,7 +175,29 @@ impl World {
             order_to_gridpool: HashMap::new(),
             next_order_id: 1,
             next_trade_id: 1,
+            market_suspended: Arc::new(parking_lot::RwLock::new(false)),
         }
+    }
+
+    /// Shared "market suspended" flag. The lisp layer holds a clone
+    /// via Config::market_suspended() and flips it from
+    /// `(suspend-market)` / `(resume-market)`.
+    pub fn market_suspended_handle(&self) -> Arc<parking_lot::RwLock<bool>> {
+        self.market_suspended.clone()
+    }
+
+    /// Replace the suspended-flag handle so the World shares state
+    /// with the lisp Config. Called once at boot in the bin; before
+    /// that, each World holds its own (locally-true) flag.
+    pub fn set_market_suspended_handle(
+        &mut self,
+        handle: Arc<parking_lot::RwLock<bool>>,
+    ) {
+        self.market_suspended = handle;
+    }
+
+    pub fn is_market_suspended(&self) -> bool {
+        *self.market_suspended.read()
     }
 
     /// Register a symmetric SIDC-style coupling between two
@@ -694,6 +725,9 @@ impl World {
     /// so the caller can hand them to the matcher without a second
     /// lookup.
     fn validate_common(&self, order: &Order, now: DateTime<Utc>) -> Result<(), SubmitError> {
+        if self.is_market_suspended() {
+            return Err(SubmitError::SuspendedMarket);
+        }
         let rules = self
             .markets
             .get(&order.area)
@@ -1226,6 +1260,41 @@ impl World {
         order_id: OrderId,
         now: DateTime<Utc>,
     ) -> Result<OrderDetail, SubmitError> {
+        self.cancel_order_with_actor(gridpool_id, order_id, now, MarketActor::User)
+    }
+
+    /// Force-cancel by id without needing to know the gridpool, with
+    /// `actor = System` to signal it's a TSO recall rather than a
+    /// user-initiated cancel. No-op (`OrderNotFound`) when the id
+    /// isn't owned by any gridpool — counterparty rests use the
+    /// counterparty cancel path.
+    pub fn recall_order(
+        &mut self,
+        order_id: OrderId,
+        now: DateTime<Utc>,
+    ) -> Result<OrderDetail, SubmitError> {
+        // owner_of finds the resting binding; once an order is
+        // terminal the binding is gone, so fall back to iterating
+        // gridpools to surface OrderAlreadyTerminal cleanly.
+        let gp_id = self
+            .owner_of(order_id)
+            .or_else(|| {
+                self.gridpools
+                    .iter()
+                    .find(|gp| gp.get_order(order_id).is_some())
+                    .map(|gp| gp.id)
+            })
+            .ok_or(SubmitError::OrderNotFound)?;
+        self.cancel_order_with_actor(gp_id, order_id, now, MarketActor::System)
+    }
+
+    fn cancel_order_with_actor(
+        &mut self,
+        gridpool_id: GridpoolId,
+        order_id: OrderId,
+        now: DateTime<Utc>,
+        actor: MarketActor,
+    ) -> Result<OrderDetail, SubmitError> {
         if self.gridpools.get(gridpool_id).is_none() {
             return Err(SubmitError::UnknownGridpool);
         }
@@ -1265,7 +1334,7 @@ impl World {
         gp.update_order(order_id, |d| {
             d.state.state = OrderState::Canceled;
             d.state.reason = StateReason::Delete;
-            d.state.actor = MarketActor::User;
+            d.state.actor = actor;
             d.modification_time = now;
         });
         let detail = gp.get_order(order_id).cloned().unwrap();
@@ -1597,6 +1666,43 @@ mod tests {
         // Double-cancel returns false (idempotent).
         counterparty_cancel = w.cancel_counterparty_order(cp_id);
         assert!(!counterparty_cancel);
+    }
+
+    #[test]
+    fn suspended_market_rejects_submissions() {
+        let (mut w, gp) = setup_world_with_pool();
+        *w.market_suspended_handle().write() = true;
+        let err = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap_err();
+        assert_eq!(err, SubmitError::SuspendedMarket);
+        // Resume and confirm submissions go through again.
+        *w.market_suspended_handle().write() = false;
+        let detail = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        assert_eq!(detail.state.state, OrderState::Active);
+    }
+
+    #[test]
+    fn recall_order_cancels_with_system_actor() {
+        let (mut w, gp) = setup_world_with_pool();
+        let placed = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        // Order is resting; recall it.
+        let recalled = w.recall_order(placed.id, t0()).unwrap();
+        assert_eq!(recalled.state.state, OrderState::Canceled);
+        assert_eq!(recalled.state.reason, StateReason::Delete);
+        assert_eq!(recalled.state.actor, MarketActor::System);
+        // Double-recall should hit OrderAlreadyTerminal.
+        let err = w.recall_order(placed.id, t0()).unwrap_err();
+        assert_eq!(err, SubmitError::OrderAlreadyTerminal);
+        // Recall for an unknown id is OrderNotFound.
+        let err = w
+            .recall_order(crate::sim::order::OrderId(9999), t0())
+            .unwrap_err();
+        assert_eq!(err, SubmitError::OrderNotFound);
     }
 
     #[test]

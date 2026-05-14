@@ -153,6 +153,9 @@ async fn main() {
             log::info!("Coupling: {} <-> {}", cs.area_a, cs.area_b);
             world.add_coupling(Area::eic(cs.area_a), Area::eic(cs.area_b));
         }
+        // Share the lisp-side market-suspended flag so
+        // `(suspend-market)` actually rejects future submissions.
+        world.set_market_suspended_handle(c.market_suspended());
     }
 
     let gridpool_specs = lisp_config
@@ -314,6 +317,35 @@ async fn main() {
                 let n = world_for_expiry.lock().await.expire_lapsed_orders(Utc::now());
                 if n > 0 {
                     log::info!("Expired {n} order(s) on the valid_until deadline");
+                }
+            }
+        });
+    }
+
+    // Drain the lisp-side recall queue. Each entry is an order id
+    // the lisp layer asked to force-cancel with actor=System; pop
+    // and apply against the World.
+    if let Some(c) = lisp_config_arc.as_ref() {
+        let world_for_recall = Arc::clone(&world);
+        let queue = c.recall_queue();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                tick.tick().await;
+                let drained: Vec<u64> = {
+                    let mut g = queue.lock();
+                    g.drain(..).collect()
+                };
+                if drained.is_empty() {
+                    continue;
+                }
+                let mut w = world_for_recall.lock().await;
+                for id in drained {
+                    let order_id = tradingsim::sim::order::OrderId(id);
+                    match w.recall_order(order_id, Utc::now()) {
+                        Ok(_) => log::info!("recall: order#{id} cancelled by system"),
+                        Err(e) => log::warn!("recall: order#{id} failed: {e:?}"),
+                    }
                 }
             }
         });

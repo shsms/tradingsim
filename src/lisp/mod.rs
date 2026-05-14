@@ -116,6 +116,8 @@ pub struct Config {
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
     weather: crate::sim::weather::SharedWeather,
+    market_suspended: Arc<RwLock<bool>>,
+    recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     /// Extra paths registered via `(watch-file PATH)`; the notify
     /// watcher reloads on any of them changing in addition to the
     /// top-level config file.
@@ -147,6 +149,8 @@ impl Config {
         let bias_scale = crate::scenarios::new_bias_scale();
         let curve = crate::scenarios::new_curve();
         let weather = crate::sim::weather::new_state();
+        let market_suspended = Arc::new(RwLock::new(false));
+        let recall_queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
@@ -169,6 +173,8 @@ impl Config {
             bias_scale.clone(),
             curve.clone(),
             weather.clone(),
+            market_suspended.clone(),
+            recall_queue.clone(),
             extra_watches.clone(),
             load_dir.clone(),
             anchor,
@@ -201,6 +207,8 @@ impl Config {
             bias_scale,
             curve,
             weather,
+            market_suspended,
+            recall_queue,
             extra_watches,
             timer_handle,
             anchor,
@@ -376,6 +384,20 @@ impl Config {
         self.weather.clone()
     }
 
+    /// Shared market-suspended flag. Set via `(suspend-market)`,
+    /// cleared via `(resume-market)`. The bin hands the clone to
+    /// the World so validate_common can short-circuit submissions.
+    pub fn market_suspended(&self) -> Arc<RwLock<bool>> {
+        self.market_suspended.clone()
+    }
+
+    /// Queue of order ids the lisp side wants force-cancelled with
+    /// actor=System (TSO recall). The bin drains this on a tokio
+    /// task and calls World::recall_order for each.
+    pub fn recall_queue(&self) -> Arc<Mutex<std::collections::VecDeque<u64>>> {
+        self.recall_queue.clone()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -402,6 +424,8 @@ fn register_runtime(
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
     weather: crate::sim::weather::SharedWeather,
+    market_suspended: Arc<RwLock<bool>>,
+    recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
     anchor: DateTime<Utc>,
@@ -418,7 +442,36 @@ fn register_runtime(
     register_bias_scale(ctx, bias_scale);
     register_curve(ctx, curve);
     register_weather(ctx, weather);
+    register_market_controls(ctx, market_suspended, recall_queue);
     register_watches(ctx, extra_watches, load_dir);
+}
+
+fn register_market_controls(
+    ctx: &mut TulispContext,
+    market_suspended: Arc<RwLock<bool>>,
+    recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
+) {
+    let suspended = market_suspended.clone();
+    ctx.defun("suspend-market", move || -> Result<bool, Error> {
+        *suspended.write() = true;
+        Ok(true)
+    });
+    ctx.defun("resume-market", move || -> Result<bool, Error> {
+        *market_suspended.write() = false;
+        Ok(false)
+    });
+    ctx.defun(
+        "recall-order",
+        move |id: i64| -> Result<i64, Error> {
+            if id <= 0 {
+                return Err(Error::os_error(format!(
+                    "recall-order: ID must be positive, got {id}"
+                )));
+            }
+            recall_queue.lock().push_back(id as u64);
+            Ok(id)
+        },
+    );
 }
 
 fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::SharedWeather) {
