@@ -112,6 +112,10 @@ pub enum SubmitError {
     AreaNotAllowedForGridpool,
     UnsupportedDurationForMarket,
     UnalignedDeliveryPeriod,
+    /// Submitted at or after the delivery-period start — the gate is
+    /// closed. Trading on a contract ends exactly at its delivery
+    /// start time (no pre-delivery buffer).
+    GateClosed,
     PriceOffGrid,
     NonPositivePrice,
     QuantityOffGrid,
@@ -520,8 +524,8 @@ impl World {
             return Err(SubmitError::AreaNotAllowedForGridpool);
         }
 
-        // 2-4. Shared validation: market, type, grid.
-        self.validate_common(&order)?;
+        // 2-4. Shared validation: market, type, grid, gate.
+        self.validate_common(&order, now)?;
         // FOK / IOC are honoured starting in Phase 6. AON is still
         // rejected — partial-quantity-or-rest semantics are open.
         if let Some(ExecutionOption::Aon) = order.execution_option {
@@ -655,11 +659,14 @@ impl World {
     /// submit_counterparty_order. Returns the matched MarketRules
     /// so the caller can hand them to the matcher without a second
     /// lookup.
-    fn validate_common(&self, order: &Order) -> Result<(), SubmitError> {
+    fn validate_common(&self, order: &Order, now: DateTime<Utc>) -> Result<(), SubmitError> {
         let rules = self
             .markets
             .get(&order.area)
             .ok_or(SubmitError::UnknownArea)?;
+        if order.period.start <= now {
+            return Err(SubmitError::GateClosed);
+        }
         if order.order_type != OrderType::Limit {
             return Err(SubmitError::UnsupportedOrderType(order.order_type));
         }
@@ -818,7 +825,7 @@ impl World {
         order: Order,
         now: DateTime<Utc>,
     ) -> Result<OrderId, SubmitError> {
-        self.validate_common(&order)?;
+        self.validate_common(&order, now)?;
 
         let taker_id = self.next_id();
         let key = ContractKey {
@@ -1428,6 +1435,29 @@ mod tests {
             .submit_order(GridpoolId(99), sample_buy(dec!(1.0), dec!(85.0)), t0())
             .unwrap_err();
         assert_eq!(err, SubmitError::UnknownGridpool);
+    }
+
+    #[test]
+    fn submit_rejects_orders_at_or_after_delivery_start() {
+        let (mut w, gp) = setup_world_with_pool();
+        let order = sample_buy(dec!(1.0), dec!(85.0));
+        let delivery_start = order.period.start;
+
+        // Exactly at gate: rejected.
+        let err = w
+            .submit_order(gp, order.clone(), delivery_start)
+            .unwrap_err();
+        assert_eq!(err, SubmitError::GateClosed);
+
+        // After gate: still rejected.
+        let later = delivery_start + chrono::Duration::seconds(1);
+        let err = w.submit_order(gp, order.clone(), later).unwrap_err();
+        assert_eq!(err, SubmitError::GateClosed);
+
+        // One second before gate: accepted.
+        let just_in_time = delivery_start - chrono::Duration::seconds(1);
+        let detail = w.submit_order(gp, order, just_in_time).unwrap();
+        assert_eq!(detail.state.state, OrderState::Active);
     }
 
     #[test]

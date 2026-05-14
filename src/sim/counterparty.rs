@@ -314,6 +314,13 @@ mod tests {
         (world, cfg)
     }
 
+    /// Deterministic "now" four hours before the test period — sits
+    /// well inside the trading window so the gate-closed check at
+    /// submission time passes.
+    fn t0() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 0).unwrap()
+    }
+
     #[test]
     fn refresh_posts_bid_and_ask_around_reference() {
         let (mut world, cfg) = setup_world();
@@ -322,7 +329,7 @@ mod tests {
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg.clone(), 42);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         let book = world.book(&key).unwrap();
         assert_eq!(book.best_bid(), Some(dec!(84.60)));
         assert_eq!(book.best_ask(), Some(dec!(85.40)));
@@ -337,8 +344,8 @@ mod tests {
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
-        mm.refresh(&mut world, Utc::now());
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
+        mm.refresh(&mut world, t0());
         let book = world.book(&key).unwrap();
         // After two refreshes the book still holds exactly one bid
         // + one ask — the old ones were cancelled, not stacked.
@@ -354,7 +361,7 @@ mod tests {
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         let book = world.book(&key).unwrap();
         assert_eq!(book.best_bid(), Some(dec!(84.80)));
         assert_eq!(book.best_ask(), Some(dec!(85.40)));
@@ -369,7 +376,7 @@ mod tests {
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         let book = world.book(&key).unwrap();
         assert_eq!(book.best_ask(), Some(dec!(85.20)));
     }
@@ -383,12 +390,12 @@ mod tests {
         };
         let mut mm = MarketMaker::new(cfg, 42);
         let shared = mm.shared_config();
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         let pre_bid = world.book(&key).unwrap().best_bid().unwrap();
 
         // External writer raises demand by 0.20 EUR/MWh.
         shared.write().demand = dec!(0.20);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         let post_bid = world.book(&key).unwrap().best_bid().unwrap();
         assert_eq!(post_bid - pre_bid, dec!(0.20));
     }
@@ -397,7 +404,7 @@ mod tests {
     fn aggressor_buys_against_best_ask() {
         let (mut world, mm_cfg) = setup_world();
         let mut mm = MarketMaker::new(mm_cfg.clone(), 42);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         // After MM refresh: best ask should be reference + spread = 85.4.
         let ask_before = world
             .book(&crate::sim::world::ContractKey {
@@ -413,7 +420,7 @@ mod tests {
             ..AggressorConfig::de_lu_default(mm_cfg.area.clone(), mm_cfg.period)
         };
         let mut ag = Aggressor::new(ag_cfg, 7);
-        ag.fire(&mut world, Utc::now());
+        ag.fire(&mut world, t0());
         // The MM's ask depth at that price drops by 0.5; if it
         // started at 1.0 it's now 0.5.
         let depth = world
@@ -432,7 +439,7 @@ mod tests {
         // No MM refresh — book is empty for this contract.
         let ag_cfg = AggressorConfig::de_lu_default(mm_cfg.area.clone(), mm_cfg.period);
         let mut ag = Aggressor::new(ag_cfg, 0);
-        ag.fire(&mut world, Utc::now());
+        ag.fire(&mut world, t0());
         // No panic, no trades — graceful no-op.
         let key = crate::sim::world::ContractKey {
             area: mm_cfg.area.clone(),
@@ -466,17 +473,17 @@ mod tests {
             tag: None,
         };
         world
-            .submit_counterparty_order(mk(Side::Sell, dec!(90.0)), Utc::now())
+            .submit_counterparty_order(mk(Side::Sell, dec!(90.0)), t0())
             .unwrap();
         world
-            .submit_counterparty_order(mk(Side::Buy, dec!(90.0)), Utc::now())
+            .submit_counterparty_order(mk(Side::Buy, dec!(90.0)), t0())
             .unwrap();
 
         // Now spawn the MM with drift enabled. First refresh sees
         // the seeded trade at 90 → ref pulls 85 → 87.50.
         let shared = Arc::new(RwLock::new(cfg.clone()));
         let mut mm = MarketMaker::with_shared_config(shared.clone(), 0);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         assert_eq!(shared.read().reference_price, dec!(87.50));
     }
 
@@ -490,7 +497,7 @@ mod tests {
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
-        mm.refresh(&mut world, Utc::now());
+        mm.refresh(&mut world, t0());
         let book = world.book(&key);
         // Book may not even exist yet; if it does, it should be empty.
         if let Some(b) = book {
