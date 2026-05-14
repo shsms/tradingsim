@@ -1,0 +1,61 @@
+;; Sample tradingsim config — loaded by the binary at startup.
+;;
+;; This file replaces the previous hardcoded defaults in
+;; bin/tradingsim.rs. Edit and re-launch the binary to take effect;
+;; hot reload (notify watcher) is on the deferred list.
+
+(set-socket-addr "[::1]:8810")
+(set-physics-tick-ms 100)
+
+;; Four hour-contracts of synthetic liquidity in DE-LU, starting at
+;; the next hour boundary. Each MM holds a SharedConfig the
+;; (set-mm-* …) defuns mutate in place.
+
+(%make-market-maker
+ :name "de-lu-h0"
+ :area "10Y1001A1001A82H"
+ :hour-offset 0
+ :reference 85.00
+ :spread 0.40
+ :size 1.0
+ :noise 0.10
+ :seed 1)
+
+(%make-market-maker
+ :name "de-lu-h1"
+ :area "10Y1001A1001A82H"
+ :hour-offset 1
+ :reference 86.00          ;; peak hour: slightly elevated
+ :spread 0.50
+ :size 1.0
+ :noise 0.15
+ :seed 2)
+
+(%make-market-maker
+ :name "de-lu-h2"
+ :area "10Y1001A1001A82H"
+ :hour-offset 2
+ :reference 84.00
+ :spread 0.40
+ :size 1.0
+ :noise 0.10
+ :seed 3)
+
+(%make-market-maker
+ :name "de-lu-h3"
+ :area "10Y1001A1001A82H"
+ :hour-offset 3
+ :reference 83.00
+ :spread 0.40
+ :size 1.0
+ :noise 0.10
+ :seed 4)
+
+;; --- Demand / surplus tilts ------------------------------------------------
+;;
+;; demand shifts the bid up (the MM wants to buy harder); surplus
+;; shifts the ask down (the MM wants to sell harder). Uncomment to
+;; bias the simulated market.
+;;
+;; (set-mm-demand "de-lu-h1" 0.20)   ;; peak hour: aggressive procurement
+;; (set-mm-surplus "de-lu-h2" 0.30)  ;; midday solar dump
