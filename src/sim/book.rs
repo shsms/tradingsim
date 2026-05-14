@@ -52,6 +52,7 @@ impl OrderBook {
         let level = match side {
             Side::Buy => self.bids.entry(price).or_default(),
             Side::Sell => self.asks.entry(price).or_default(),
+            Side::Unspecified => return false,
         };
         level.push_back(resting);
         self.by_id.insert(resting.id, (side, price));
@@ -65,6 +66,7 @@ impl OrderBook {
         let levels = match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
+            Side::Unspecified => return None,
         };
         let queue = levels.get_mut(&price)?;
         let pos = queue.iter().position(|r| r.id == id)?;
@@ -92,6 +94,7 @@ impl OrderBook {
         let levels = match side {
             Side::Buy => &self.bids,
             Side::Sell => &self.asks,
+            Side::Unspecified => return Decimal::ZERO,
         };
         levels
             .get(&price)
@@ -137,6 +140,7 @@ impl OrderBook {
         match taker {
             Side::Buy => self.best_ask(),
             Side::Sell => self.best_bid(),
+            Side::Unspecified => None,
         }
     }
 
@@ -157,6 +161,7 @@ impl OrderBook {
         let (level_price, queue) = match taker {
             Side::Buy => self.asks.iter_mut().next(),
             Side::Sell => self.bids.iter_mut().next_back(),
+            Side::Unspecified => return None,
         }?;
         let level_price = *level_price;
         let resting = queue.front_mut()?;
@@ -170,6 +175,7 @@ impl OrderBook {
                 match taker {
                     Side::Buy => self.asks.remove(&level_price),
                     Side::Sell => self.bids.remove(&level_price),
+                    Side::Unspecified => None,
                 };
             }
             self.by_id.remove(&maker_id);

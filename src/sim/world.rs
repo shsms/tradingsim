@@ -603,7 +603,7 @@ mod tests {
             area: Area::eic("10Y1001A1001A82H"),
             period: DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-                duration: DeliveryDuration::Hour,
+                duration: DeliveryDuration::DeliveryDuration60,
             },
         }
     }
@@ -670,7 +670,7 @@ mod tests {
             area: Area::eic("10Y1001A1001A82H"),
             period: DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-                duration: DeliveryDuration::Hour,
+                duration: DeliveryDuration::DeliveryDuration60,
             },
             order_type: OrderType::Limit,
             side: Side::Buy,
@@ -781,7 +781,7 @@ mod tests {
                 Order {
                     period: DeliveryPeriod {
                         start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 15, 0).unwrap(),
-                        duration: DeliveryDuration::Hour,
+                        duration: DeliveryDuration::DeliveryDuration60,
                     },
                     ..sample_buy(dec!(1.0), dec!(85.0))
                 },

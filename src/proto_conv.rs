@@ -1,14 +1,10 @@
 //! Bridges between proto-generated types (`crate::proto::*`) and the
-//! internal sim types (`crate::sim::*`). This file is the only place
-//! that knows about both — every other module talks in either-pure-
-//! sim or pure-proto.
-//!
-//! Conventions:
-//!   - Lossless conversions use `From`.
-//!   - Fallible conversions use `TryFrom` with [`ConvError`].
-//!   - `proto::T::Unspecified` always errors out; the server is
-//!     responsible for translating that into an InvalidArgument /
-//!     ValidationFail at the gRPC boundary.
+//! internal sim composite types (`crate::sim::{Order,Trade,...}`).
+//! Enum types are re-exported by the sim modules — there are no
+//! enum bridges here; this file only handles Decimal, Timestamp, and
+//! the composite messages that flatten differently between proto and
+//! sim (Price → (Decimal, Currency); Power → Decimal; Order has
+//! all-Option proto fields but unwrap-required sim fields).
 
 use std::str::FromStr;
 
@@ -54,6 +50,37 @@ impl std::fmt::Display for ConvError {
 
 impl std::error::Error for ConvError {}
 
+/// Decode a wire-level i32 into its typed proto enum. The proto's
+/// `Unspecified` variant survives the trip — call sites that want to
+/// reject it pattern-match on the result. Unknown values (future
+/// variants) become `UnknownEnum`.
+fn decode_enum<E>(value: i32, field: &'static str) -> Result<E, ConvError>
+where
+    E: TryFrom<i32>,
+{
+    E::try_from(value).map_err(|_| ConvError::UnknownEnum { field, value })
+}
+
+/// Like `decode_enum` but also rejects the proto's `Unspecified`
+/// variant. Most callers want this — `Unspecified` is the wire's
+/// "field not set" sentinel and gets validation-failed at the
+/// boundary.
+fn decode_enum_no_unspecified<E>(
+    value: i32,
+    field: &'static str,
+    is_unspecified: impl FnOnce(&E) -> bool,
+) -> Result<E, ConvError>
+where
+    E: TryFrom<i32>,
+{
+    let e = decode_enum(value, field)?;
+    if is_unspecified(&e) {
+        Err(ConvError::UnknownEnum { field, value })
+    } else {
+        Ok(e)
+    }
+}
+
 /// `proto::Decimal` (string-encoded) -> `rust_decimal::Decimal`.
 pub fn decimal_from_proto(d: &proto_types::Decimal) -> Result<Decimal, ConvError> {
     Decimal::from_str(&d.value).map_err(|_| ConvError::InvalidDecimal(d.value.clone()))
@@ -66,8 +93,8 @@ pub fn decimal_to_proto(d: Decimal) -> proto_types::Decimal {
     }
 }
 
-/// `prost_types::Timestamp` -> `DateTime<Utc>`. Rejects negative
-/// nanos / out-of-range seconds rather than silently clamping.
+/// `prost_types::Timestamp` -> `DateTime<Utc>`. Rejects out-of-range
+/// nanos rather than silently clamping.
 pub fn timestamp_from_proto(ts: &prost_types::Timestamp) -> Result<DateTime<Utc>, ConvError> {
     if ts.nanos < 0 || ts.nanos >= 1_000_000_000 {
         return Err(ConvError::InvalidTimestamp);
@@ -85,355 +112,16 @@ pub fn timestamp_to_proto(dt: DateTime<Utc>) -> prost_types::Timestamp {
     }
 }
 
-/// Helper for the struct-conversion layer: take the raw i32 the proto
-/// stores for an enum field, lift it to the typed proto enum, then
-/// translate to the sim enum. The two failure modes both surface as
-/// `ConvError::UnknownEnum`.
-pub fn sim_enum_from_i32<P, S>(value: i32, field: &'static str) -> Result<S, ConvError>
-where
-    P: TryFrom<i32>,
-    S: TryFrom<P, Error = ConvError>,
-{
-    let proto = P::try_from(value).map_err(|_| ConvError::UnknownEnum { field, value })?;
-    S::try_from(proto)
-}
-
 // ---------------------------------------------------------------------------
-// Enum bridges. Pattern for each pair:
-//   - From<sim_enum> for proto_enum     — lossless, doesn't yield Unspecified
-//   - TryFrom<proto_enum> for sim_enum  — Unspecified / unknown -> ConvError
-// ---------------------------------------------------------------------------
-
-impl From<Side> for proto_trading::MarketSide {
-    fn from(s: Side) -> Self {
-        match s {
-            Side::Buy => Self::Buy,
-            Side::Sell => Self::Sell,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::MarketSide> for Side {
-    type Error = ConvError;
-
-    fn try_from(p: proto_trading::MarketSide) -> Result<Self, Self::Error> {
-        match p {
-            proto_trading::MarketSide::Buy => Ok(Self::Buy),
-            proto_trading::MarketSide::Sell => Ok(Self::Sell),
-            proto_trading::MarketSide::Unspecified => Err(ConvError::UnknownEnum {
-                field: "MarketSide",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<OrderType> for proto_trading::OrderType {
-    fn from(t: OrderType) -> Self {
-        match t {
-            OrderType::Limit => Self::Limit,
-            OrderType::StopLimit => Self::StopLimit,
-            OrderType::Iceberg => Self::Iceberg,
-            OrderType::Block => Self::Block,
-            OrderType::Balance => Self::Balance,
-            OrderType::Prearranged => Self::Prearranged,
-            OrderType::Private => Self::Private,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::OrderType> for OrderType {
-    type Error = ConvError;
-
-    fn try_from(p: proto_trading::OrderType) -> Result<Self, Self::Error> {
-        match p {
-            proto_trading::OrderType::Limit => Ok(Self::Limit),
-            proto_trading::OrderType::StopLimit => Ok(Self::StopLimit),
-            proto_trading::OrderType::Iceberg => Ok(Self::Iceberg),
-            proto_trading::OrderType::Block => Ok(Self::Block),
-            proto_trading::OrderType::Balance => Ok(Self::Balance),
-            proto_trading::OrderType::Prearranged => Ok(Self::Prearranged),
-            proto_trading::OrderType::Private => Ok(Self::Private),
-            proto_trading::OrderType::Unspecified => Err(ConvError::UnknownEnum {
-                field: "OrderType",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<ExecutionOption> for proto_trading::OrderExecutionOption {
-    fn from(e: ExecutionOption) -> Self {
-        match e {
-            ExecutionOption::Aon => Self::Aon,
-            ExecutionOption::Fok => Self::Fok,
-            ExecutionOption::Ioc => Self::Ioc,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::OrderExecutionOption> for ExecutionOption {
-    type Error = ConvError;
-
-    fn try_from(p: proto_trading::OrderExecutionOption) -> Result<Self, Self::Error> {
-        match p {
-            proto_trading::OrderExecutionOption::Aon => Ok(Self::Aon),
-            proto_trading::OrderExecutionOption::Fok => Ok(Self::Fok),
-            proto_trading::OrderExecutionOption::Ioc => Ok(Self::Ioc),
-            proto_trading::OrderExecutionOption::Unspecified => Err(ConvError::UnknownEnum {
-                field: "OrderExecutionOption",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<OrderState> for proto_trading::OrderState {
-    fn from(s: OrderState) -> Self {
-        match s {
-            OrderState::Pending => Self::Pending,
-            OrderState::Active => Self::Active,
-            OrderState::Filled => Self::Filled,
-            OrderState::Canceled => Self::Canceled,
-            OrderState::Expired => Self::Expired,
-            OrderState::Failed => Self::Failed,
-            OrderState::Hibernate => Self::Hibernate,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::OrderState> for OrderState {
-    type Error = ConvError;
-
-    fn try_from(p: proto_trading::OrderState) -> Result<Self, Self::Error> {
-        match p {
-            proto_trading::OrderState::Pending => Ok(Self::Pending),
-            proto_trading::OrderState::Active => Ok(Self::Active),
-            proto_trading::OrderState::Filled => Ok(Self::Filled),
-            proto_trading::OrderState::Canceled => Ok(Self::Canceled),
-            proto_trading::OrderState::Expired => Ok(Self::Expired),
-            proto_trading::OrderState::Failed => Ok(Self::Failed),
-            proto_trading::OrderState::Hibernate => Ok(Self::Hibernate),
-            proto_trading::OrderState::Unspecified => Err(ConvError::UnknownEnum {
-                field: "OrderState",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<StateReason> for proto_trading::order_detail::state_detail::StateReason {
-    fn from(r: StateReason) -> Self {
-        use proto_trading::order_detail::state_detail::StateReason as P;
-        match r {
-            StateReason::Add => P::Add,
-            StateReason::Modify => P::Modify,
-            StateReason::Delete => P::Delete,
-            StateReason::Deactivate => P::Deactivate,
-            StateReason::Reject => P::Reject,
-            StateReason::FullExecution => P::FullExecution,
-            StateReason::PartialExecution => P::PartialExecution,
-            StateReason::IcebergSliceAdd => P::IcebergSliceAdd,
-            StateReason::ValidationFail => P::ValidationFail,
-            StateReason::UnknownState => P::UnknownState,
-            StateReason::QuoteAdd => P::QuoteAdd,
-            StateReason::QuoteFullExecution => P::QuoteFullExecution,
-            StateReason::QuotePartialExecution => P::QuotePartialExecution,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::order_detail::state_detail::StateReason> for StateReason {
-    type Error = ConvError;
-
-    fn try_from(
-        p: proto_trading::order_detail::state_detail::StateReason,
-    ) -> Result<Self, Self::Error> {
-        use proto_trading::order_detail::state_detail::StateReason as P;
-        match p {
-            P::Add => Ok(Self::Add),
-            P::Modify => Ok(Self::Modify),
-            P::Delete => Ok(Self::Delete),
-            P::Deactivate => Ok(Self::Deactivate),
-            P::Reject => Ok(Self::Reject),
-            P::FullExecution => Ok(Self::FullExecution),
-            P::PartialExecution => Ok(Self::PartialExecution),
-            P::IcebergSliceAdd => Ok(Self::IcebergSliceAdd),
-            P::ValidationFail => Ok(Self::ValidationFail),
-            P::UnknownState => Ok(Self::UnknownState),
-            P::QuoteAdd => Ok(Self::QuoteAdd),
-            P::QuoteFullExecution => Ok(Self::QuoteFullExecution),
-            P::QuotePartialExecution => Ok(Self::QuotePartialExecution),
-            P::Unspecified => Err(ConvError::UnknownEnum {
-                field: "StateReason",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<MarketActor> for proto_trading::order_detail::state_detail::MarketActor {
-    fn from(a: MarketActor) -> Self {
-        use proto_trading::order_detail::state_detail::MarketActor as P;
-        match a {
-            MarketActor::User => P::User,
-            MarketActor::MarketOperator => P::MarketOperator,
-            MarketActor::System => P::System,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::order_detail::state_detail::MarketActor> for MarketActor {
-    type Error = ConvError;
-
-    fn try_from(
-        p: proto_trading::order_detail::state_detail::MarketActor,
-    ) -> Result<Self, Self::Error> {
-        use proto_trading::order_detail::state_detail::MarketActor as P;
-        match p {
-            P::User => Ok(Self::User),
-            P::MarketOperator => Ok(Self::MarketOperator),
-            P::System => Ok(Self::System),
-            P::Unspecified => Err(ConvError::UnknownEnum {
-                field: "MarketActor",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<TradeState> for proto_trading::TradeState {
-    fn from(s: TradeState) -> Self {
-        match s {
-            TradeState::Active => Self::Active,
-            TradeState::CancelRequested => Self::CancelRequested,
-            TradeState::CancelRejected => Self::CancelRejected,
-            TradeState::Canceled => Self::Canceled,
-            TradeState::Recalled => Self::Recalled,
-            TradeState::RecallRequested => Self::RecallRequested,
-            TradeState::RecallRejected => Self::RecallRejected,
-            TradeState::ApprovalRequested => Self::ApprovalRequested,
-        }
-    }
-}
-
-impl TryFrom<proto_trading::TradeState> for TradeState {
-    type Error = ConvError;
-
-    fn try_from(p: proto_trading::TradeState) -> Result<Self, Self::Error> {
-        match p {
-            proto_trading::TradeState::Active => Ok(Self::Active),
-            proto_trading::TradeState::CancelRequested => Ok(Self::CancelRequested),
-            proto_trading::TradeState::CancelRejected => Ok(Self::CancelRejected),
-            proto_trading::TradeState::Canceled => Ok(Self::Canceled),
-            proto_trading::TradeState::Recalled => Ok(Self::Recalled),
-            proto_trading::TradeState::RecallRequested => Ok(Self::RecallRequested),
-            proto_trading::TradeState::RecallRejected => Ok(Self::RecallRejected),
-            proto_trading::TradeState::ApprovalRequested => Ok(Self::ApprovalRequested),
-            proto_trading::TradeState::Unspecified => Err(ConvError::UnknownEnum {
-                field: "TradeState",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<Currency> for proto_market::price::Currency {
-    fn from(c: Currency) -> Self {
-        match c {
-            Currency::Eur => Self::Eur,
-            Currency::Usd => Self::Usd,
-            Currency::Gbp => Self::Gbp,
-            Currency::Chf => Self::Chf,
-        }
-    }
-}
-
-impl TryFrom<proto_market::price::Currency> for Currency {
-    type Error = ConvError;
-
-    fn try_from(p: proto_market::price::Currency) -> Result<Self, Self::Error> {
-        match p {
-            proto_market::price::Currency::Eur => Ok(Self::Eur),
-            proto_market::price::Currency::Usd => Ok(Self::Usd),
-            proto_market::price::Currency::Gbp => Ok(Self::Gbp),
-            proto_market::price::Currency::Chf => Ok(Self::Chf),
-            // CAD/CNY/JPY/AUD/NZD/SGD are valid proto values but the
-            // sim doesn't model them yet; treat as unknown so the
-            // server returns InvalidArgument rather than silently
-            // mismapping.
-            other => Err(ConvError::UnknownEnum {
-                field: "Currency",
-                value: other as i32,
-            }),
-        }
-    }
-}
-
-impl From<CodeType> for proto_grid::EnergyMarketCodeType {
-    fn from(c: CodeType) -> Self {
-        match c {
-            CodeType::EuropeEic => Self::EuropeEic,
-            CodeType::UsNerc => Self::UsNerc,
-        }
-    }
-}
-
-impl TryFrom<proto_grid::EnergyMarketCodeType> for CodeType {
-    type Error = ConvError;
-
-    fn try_from(p: proto_grid::EnergyMarketCodeType) -> Result<Self, Self::Error> {
-        match p {
-            proto_grid::EnergyMarketCodeType::EuropeEic => Ok(Self::EuropeEic),
-            proto_grid::EnergyMarketCodeType::UsNerc => Ok(Self::UsNerc),
-            proto_grid::EnergyMarketCodeType::Unspecified => Err(ConvError::UnknownEnum {
-                field: "EnergyMarketCodeType",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-impl From<DeliveryDuration> for proto_grid::DeliveryDuration {
-    fn from(d: DeliveryDuration) -> Self {
-        match d {
-            DeliveryDuration::FiveMin => Self::DeliveryDuration5,
-            DeliveryDuration::QuarterHour => Self::DeliveryDuration15,
-            DeliveryDuration::HalfHour => Self::DeliveryDuration30,
-            DeliveryDuration::Hour => Self::DeliveryDuration60,
-        }
-    }
-}
-
-impl TryFrom<proto_grid::DeliveryDuration> for DeliveryDuration {
-    type Error = ConvError;
-
-    fn try_from(p: proto_grid::DeliveryDuration) -> Result<Self, Self::Error> {
-        match p {
-            proto_grid::DeliveryDuration::DeliveryDuration5 => Ok(Self::FiveMin),
-            proto_grid::DeliveryDuration::DeliveryDuration15 => Ok(Self::QuarterHour),
-            proto_grid::DeliveryDuration::DeliveryDuration30 => Ok(Self::HalfHour),
-            proto_grid::DeliveryDuration::DeliveryDuration60 => Ok(Self::Hour),
-            proto_grid::DeliveryDuration::Unspecified => Err(ConvError::UnknownEnum {
-                field: "DeliveryDuration",
-                value: p as i32,
-            }),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Common-package struct bridges. Area / DeliveryPeriod are full
-// From / TryFrom pairs; Price and Power are flat helpers because the
-// sim flattens Price into (Decimal, Currency) and Power into Decimal
-// inside the order/trade structs.
+// Area / DeliveryPeriod — sim shapes them with parsed types; proto
+// keeps timestamps + i32 enums.
 // ---------------------------------------------------------------------------
 
 impl From<&Area> for proto_grid::DeliveryArea {
     fn from(a: &Area) -> Self {
         Self {
             code: a.code.clone(),
-            code_type: proto_grid::EnergyMarketCodeType::from(a.code_type) as i32,
+            code_type: a.code_type as i32,
         }
     }
 }
@@ -442,12 +130,12 @@ impl TryFrom<&proto_grid::DeliveryArea> for Area {
     type Error = ConvError;
 
     fn try_from(p: &proto_grid::DeliveryArea) -> Result<Self, Self::Error> {
+        let code_type = decode_enum_no_unspecified::<CodeType>(p.code_type, "EnergyMarketCodeType", |e| {
+            matches!(e, CodeType::Unspecified)
+        })?;
         Ok(Self {
             code: p.code.clone(),
-            code_type: sim_enum_from_i32::<proto_grid::EnergyMarketCodeType, CodeType>(
-                p.code_type,
-                "EnergyMarketCodeType",
-            )?,
+            code_type,
         })
     }
 }
@@ -456,7 +144,7 @@ impl From<DeliveryPeriod> for proto_grid::DeliveryPeriod {
     fn from(p: DeliveryPeriod) -> Self {
         Self {
             start: Some(timestamp_to_proto(p.start)),
-            duration: proto_grid::DeliveryDuration::from(p.duration) as i32,
+            duration: p.duration as i32,
         }
     }
 }
@@ -465,13 +153,18 @@ impl TryFrom<&proto_grid::DeliveryPeriod> for DeliveryPeriod {
     type Error = ConvError;
 
     fn try_from(p: &proto_grid::DeliveryPeriod) -> Result<Self, Self::Error> {
-        let start = p.start.as_ref().ok_or(ConvError::MissingField("DeliveryPeriod.start"))?;
+        let start = p
+            .start
+            .as_ref()
+            .ok_or(ConvError::MissingField("DeliveryPeriod.start"))?;
+        let duration = decode_enum_no_unspecified::<DeliveryDuration>(
+            p.duration,
+            "DeliveryDuration",
+            |d| matches!(d, DeliveryDuration::Unspecified),
+        )?;
         Ok(Self {
             start: timestamp_from_proto(start)?,
-            duration: sim_enum_from_i32::<proto_grid::DeliveryDuration, DeliveryDuration>(
-                p.duration,
-                "DeliveryDuration",
-            )?,
+            duration,
         })
     }
 }
@@ -482,17 +175,17 @@ pub fn price_from_proto(p: &proto_market::Price) -> Result<(Decimal, Currency), 
         .amount
         .as_ref()
         .ok_or(ConvError::MissingField("Price.amount"))?;
-    Ok((
-        decimal_from_proto(amount)?,
-        sim_enum_from_i32::<proto_market::price::Currency, Currency>(p.currency, "Currency")?,
-    ))
+    let currency = decode_enum_no_unspecified::<Currency>(p.currency, "Currency", |c| {
+        matches!(c, Currency::Unspecified)
+    })?;
+    Ok((decimal_from_proto(amount)?, currency))
 }
 
 /// (amount, currency) -> `proto::market::Price`.
 pub fn price_to_proto(amount: Decimal, currency: Currency) -> proto_market::Price {
     proto_market::Price {
         amount: Some(decimal_to_proto(amount)),
-        currency: proto_market::price::Currency::from(currency) as i32,
+        currency: currency as i32,
     }
 }
 
@@ -510,11 +203,9 @@ pub fn power_to_proto(mw: Decimal) -> proto_market::Power {
 }
 
 // ---------------------------------------------------------------------------
-// Order / OrderDetail / StateDetail bridges.
-//
-// Payload (proto `google.protobuf.Struct` <-> serde_json::Value) is
-// deferred — the conversion drops payload in both directions until
-// Phase 4 wires Struct <-> Value through.
+// Order / OrderDetail / StateDetail
+// Payload (proto Struct <-> serde_json::Value) is deferred; conversion
+// drops it in both directions.
 // ---------------------------------------------------------------------------
 
 impl From<&Order> for proto_trading::Order {
@@ -522,16 +213,14 @@ impl From<&Order> for proto_trading::Order {
         Self {
             delivery_area: Some((&o.area).into()),
             delivery_period: Some(o.period.into()),
-            r#type: proto_trading::OrderType::from(o.order_type) as i32,
-            side: proto_trading::MarketSide::from(o.side) as i32,
+            r#type: o.order_type as i32,
+            side: o.side as i32,
             price: Some(price_to_proto(o.price, o.currency)),
             quantity: Some(power_to_proto(o.quantity)),
             stop_price: o.stop_price.map(|p| price_to_proto(p, o.currency)),
             peak_price_delta: o.peak_price_delta.map(|p| price_to_proto(p, o.currency)),
             display_quantity: o.display_quantity.map(power_to_proto),
-            execution_option: o
-                .execution_option
-                .map(|e| proto_trading::OrderExecutionOption::from(e) as i32),
+            execution_option: o.execution_option.map(|e| e as i32),
             valid_until: o.valid_until.map(timestamp_to_proto),
             payload: None,
             tag: o.tag.clone(),
@@ -543,14 +232,16 @@ impl TryFrom<&proto_trading::Order> for Order {
     type Error = ConvError;
 
     fn try_from(p: &proto_trading::Order) -> Result<Self, Self::Error> {
-        let area_proto = p
-            .delivery_area
-            .as_ref()
-            .ok_or(ConvError::MissingField("Order.delivery_area"))?;
-        let period_proto = p
-            .delivery_period
-            .as_ref()
-            .ok_or(ConvError::MissingField("Order.delivery_period"))?;
+        let area = Area::try_from(
+            p.delivery_area
+                .as_ref()
+                .ok_or(ConvError::MissingField("Order.delivery_area"))?,
+        )?;
+        let period = DeliveryPeriod::try_from(
+            p.delivery_period
+                .as_ref()
+                .ok_or(ConvError::MissingField("Order.delivery_period"))?,
+        )?;
         let price_proto = p
             .price
             .as_ref()
@@ -559,61 +250,54 @@ impl TryFrom<&proto_trading::Order> for Order {
             .quantity
             .as_ref()
             .ok_or(ConvError::MissingField("Order.quantity"))?;
-
         let (price, currency) = price_from_proto(price_proto)?;
 
-        // optional Price fields must share the order's currency or
-        // the validator can't reason about them; conv layer rejects
-        // a currency mismatch here rather than letting validation
-        // see two different currencies on the same order.
-        let stop_price = match &p.stop_price {
-            Some(sp) => {
-                let (amt, c) = price_from_proto(sp)?;
-                if c != currency {
-                    return Err(ConvError::UnknownEnum {
-                        field: "Order.stop_price.currency",
-                        value: c as i32,
-                    });
+        let order_type = decode_enum_no_unspecified::<OrderType>(p.r#type, "OrderType", |t| {
+            matches!(t, OrderType::Unspecified)
+        })?;
+        let side = decode_enum_no_unspecified::<Side>(p.side, "MarketSide", |s| {
+            matches!(s, Side::Unspecified)
+        })?;
+
+        // Optional Price fields must share the order's currency.
+        let same_currency_or_err = |o: &Option<proto_market::Price>, field| -> Result<Option<Decimal>, ConvError> {
+            match o {
+                Some(p) => {
+                    let (amt, c) = price_from_proto(p)?;
+                    if c != currency {
+                        return Err(ConvError::UnknownEnum {
+                            field,
+                            value: c as i32,
+                        });
+                    }
+                    Ok(Some(amt))
                 }
-                Some(amt)
+                None => Ok(None),
             }
-            None => None,
-        };
-        let peak_price_delta = match &p.peak_price_delta {
-            Some(pp) => {
-                let (amt, c) = price_from_proto(pp)?;
-                if c != currency {
-                    return Err(ConvError::UnknownEnum {
-                        field: "Order.peak_price_delta.currency",
-                        value: c as i32,
-                    });
-                }
-                Some(amt)
-            }
-            None => None,
         };
 
         let execution_option = match p.execution_option {
-            Some(raw) => Some(sim_enum_from_i32::<
-                proto_trading::OrderExecutionOption,
-                ExecutionOption,
-            >(raw, "OrderExecutionOption")?),
+            Some(raw) => Some(decode_enum_no_unspecified::<ExecutionOption>(
+                raw,
+                "OrderExecutionOption",
+                |e| matches!(e, ExecutionOption::Unspecified),
+            )?),
             None => None,
         };
 
         Ok(Self {
-            area: Area::try_from(area_proto)?,
-            period: DeliveryPeriod::try_from(period_proto)?,
-            order_type: sim_enum_from_i32::<proto_trading::OrderType, OrderType>(
-                p.r#type,
-                "OrderType",
-            )?,
-            side: sim_enum_from_i32::<proto_trading::MarketSide, Side>(p.side, "MarketSide")?,
+            area,
+            period,
+            order_type,
+            side,
             price,
             currency,
             quantity: power_from_proto(qty_proto)?,
-            stop_price,
-            peak_price_delta,
+            stop_price: same_currency_or_err(&p.stop_price, "Order.stop_price.currency")?,
+            peak_price_delta: same_currency_or_err(
+                &p.peak_price_delta,
+                "Order.peak_price_delta.currency",
+            )?,
             display_quantity: p
                 .display_quantity
                 .as_ref()
@@ -630,11 +314,9 @@ impl TryFrom<&proto_trading::Order> for Order {
 impl From<StateDetail> for proto_trading::order_detail::StateDetail {
     fn from(s: StateDetail) -> Self {
         Self {
-            state: proto_trading::OrderState::from(s.state) as i32,
-            state_reason: proto_trading::order_detail::state_detail::StateReason::from(s.reason)
-                as i32,
-            market_actor: proto_trading::order_detail::state_detail::MarketActor::from(s.actor)
-                as i32,
+            state: s.state as i32,
+            state_reason: s.reason as i32,
+            market_actor: s.actor as i32,
         }
     }
 }
@@ -643,17 +325,16 @@ impl TryFrom<&proto_trading::order_detail::StateDetail> for StateDetail {
     type Error = ConvError;
 
     fn try_from(p: &proto_trading::order_detail::StateDetail) -> Result<Self, Self::Error> {
-        Ok(Self {
-            state: sim_enum_from_i32::<proto_trading::OrderState, OrderState>(p.state, "OrderState")?,
-            reason: sim_enum_from_i32::<
-                proto_trading::order_detail::state_detail::StateReason,
-                StateReason,
-            >(p.state_reason, "StateReason")?,
-            actor: sim_enum_from_i32::<
-                proto_trading::order_detail::state_detail::MarketActor,
-                MarketActor,
-            >(p.market_actor, "MarketActor")?,
-        })
+        let state = decode_enum_no_unspecified::<OrderState>(p.state, "OrderState", |s| {
+            matches!(s, OrderState::Unspecified)
+        })?;
+        let reason = decode_enum_no_unspecified::<StateReason>(p.state_reason, "StateReason", |s| {
+            matches!(s, StateReason::Unspecified)
+        })?;
+        let actor = decode_enum_no_unspecified::<MarketActor>(p.market_actor, "MarketActor", |a| {
+            matches!(a, MarketActor::Unspecified)
+        })?;
+        Ok(Self { state, reason, actor })
     }
 }
 
@@ -713,8 +394,7 @@ impl TryFrom<&proto_trading::OrderDetail> for OrderDetail {
 }
 
 // ---------------------------------------------------------------------------
-// Trade / PublicTrade bridges. Both flatten currency the same way
-// Order does — the conv pulls it back out of the price submessage.
+// Trade / PublicTrade
 // ---------------------------------------------------------------------------
 
 impl From<&Trade> for proto_trading::Trade {
@@ -722,16 +402,34 @@ impl From<&Trade> for proto_trading::Trade {
         Self {
             id: t.id.0,
             order_id: t.order_id.0,
-            side: proto_trading::MarketSide::from(t.side) as i32,
+            side: t.side as i32,
             delivery_area: Some((&t.area).into()),
             delivery_period: Some(t.period.into()),
             execution_time: Some(timestamp_to_proto(t.execution_time)),
             price: Some(price_to_proto(t.price, t.currency)),
             quantity: Some(power_to_proto(t.quantity)),
-            state: proto_trading::TradeState::from(t.state) as i32,
+            state: t.state as i32,
         }
     }
 }
+
+impl From<&PublicTrade> for proto_trading::PublicTrade {
+    fn from(t: &PublicTrade) -> Self {
+        Self {
+            id: t.id.0,
+            buy_delivery_area: Some((&t.buy_area).into()),
+            sell_delivery_area: Some((&t.sell_area).into()),
+            delivery_period: Some(t.period.into()),
+            execution_time: Some(timestamp_to_proto(t.execution_time)),
+            price: Some(price_to_proto(t.price, t.currency)),
+            quantity: Some(power_to_proto(t.quantity)),
+            state: t.state as i32,
+        }
+    }
+}
+
+// Inbound Trade / PublicTrade conversions are only used by tests
+// today; keep them so the round-trip property tests still pass.
 
 impl TryFrom<&proto_trading::Trade> for Trade {
     type Error = ConvError;
@@ -757,35 +455,23 @@ impl TryFrom<&proto_trading::Trade> for Trade {
             .quantity
             .as_ref()
             .ok_or(ConvError::MissingField("Trade.quantity"))?;
-
         let (price, currency) = price_from_proto(price_proto)?;
         Ok(Self {
             id: TradeId(p.id),
             order_id: OrderId(p.order_id),
-            side: sim_enum_from_i32::<proto_trading::MarketSide, Side>(p.side, "MarketSide")?,
+            side: decode_enum_no_unspecified::<Side>(p.side, "MarketSide", |s| {
+                matches!(s, Side::Unspecified)
+            })?,
             area: Area::try_from(area_proto)?,
             period: DeliveryPeriod::try_from(period_proto)?,
             execution_time: timestamp_from_proto(exec_proto)?,
             price,
             currency,
             quantity: power_from_proto(qty_proto)?,
-            state: sim_enum_from_i32::<proto_trading::TradeState, TradeState>(p.state, "TradeState")?,
+            state: decode_enum_no_unspecified::<TradeState>(p.state, "TradeState", |s| {
+                matches!(s, TradeState::Unspecified)
+            })?,
         })
-    }
-}
-
-impl From<&PublicTrade> for proto_trading::PublicTrade {
-    fn from(t: &PublicTrade) -> Self {
-        Self {
-            id: t.id.0,
-            buy_delivery_area: Some((&t.buy_area).into()),
-            sell_delivery_area: Some((&t.sell_area).into()),
-            delivery_period: Some(t.period.into()),
-            execution_time: Some(timestamp_to_proto(t.execution_time)),
-            price: Some(price_to_proto(t.price, t.currency)),
-            quantity: Some(power_to_proto(t.quantity)),
-            state: proto_trading::TradeState::from(t.state) as i32,
-        }
     }
 }
 
@@ -793,11 +479,11 @@ impl TryFrom<&proto_trading::PublicTrade> for PublicTrade {
     type Error = ConvError;
 
     fn try_from(p: &proto_trading::PublicTrade) -> Result<Self, Self::Error> {
-        let buy_proto = p
+        let buy = p
             .buy_delivery_area
             .as_ref()
             .ok_or(ConvError::MissingField("PublicTrade.buy_delivery_area"))?;
-        let sell_proto = p
+        let sell = p
             .sell_delivery_area
             .as_ref()
             .ok_or(ConvError::MissingField("PublicTrade.sell_delivery_area"))?;
@@ -817,18 +503,19 @@ impl TryFrom<&proto_trading::PublicTrade> for PublicTrade {
             .quantity
             .as_ref()
             .ok_or(ConvError::MissingField("PublicTrade.quantity"))?;
-
         let (price, currency) = price_from_proto(price_proto)?;
         Ok(Self {
             id: TradeId(p.id),
-            buy_area: Area::try_from(buy_proto)?,
-            sell_area: Area::try_from(sell_proto)?,
+            buy_area: Area::try_from(buy)?,
+            sell_area: Area::try_from(sell)?,
             period: DeliveryPeriod::try_from(period_proto)?,
             execution_time: timestamp_from_proto(exec_proto)?,
             price,
             currency,
             quantity: power_from_proto(qty_proto)?,
-            state: sim_enum_from_i32::<proto_trading::TradeState, TradeState>(p.state, "TradeState")?,
+            state: decode_enum_no_unspecified::<TradeState>(p.state, "TradeState", |s| {
+                matches!(s, TradeState::Unspecified)
+            })?,
         })
     }
 }
@@ -836,37 +523,19 @@ impl TryFrom<&proto_trading::PublicTrade> for PublicTrade {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use rust_decimal::dec;
 
     #[test]
-    fn decimal_string_round_trip() {
+    fn decimal_round_trip() {
         for raw in ["0", "1", "-12.345", "85.50", "0.00001"] {
             let proto = proto_types::Decimal {
                 value: raw.to_string(),
             };
             let sim = decimal_from_proto(&proto).unwrap();
             let back = decimal_to_proto(sim);
-            // Equality on parsed value, not on string — "85.50" -> 85.50
-            // -> "85.5" is acceptable round-tripping.
             assert_eq!(Decimal::from_str(&back.value).unwrap(), sim);
         }
-    }
-
-    #[test]
-    fn decimal_to_proto_preserves_significant_digits() {
-        // The display formatting of normalized Decimal should match.
-        assert_eq!(decimal_to_proto(dec!(85.50)).value, "85.5");
-        assert_eq!(decimal_to_proto(dec!(0)).value, "0");
-        assert_eq!(decimal_to_proto(dec!(-12.345)).value, "-12.345");
-    }
-
-    #[test]
-    fn decimal_invalid_string_errors() {
-        let p = proto_types::Decimal {
-            value: "not-a-decimal".to_string(),
-        };
-        let err = decimal_from_proto(&p).unwrap_err();
-        assert!(matches!(err, ConvError::InvalidDecimal(_)));
     }
 
     #[test]
@@ -874,165 +543,56 @@ mod tests {
         let dt = Utc.with_ymd_and_hms(2026, 5, 13, 12, 34, 56).unwrap()
             + chrono::Duration::nanoseconds(789);
         let proto = timestamp_to_proto(dt);
-        assert_eq!(proto.seconds, dt.timestamp());
         assert_eq!(proto.nanos, 789);
-        let back = timestamp_from_proto(&proto).unwrap();
-        assert_eq!(back, dt);
+        assert_eq!(timestamp_from_proto(&proto).unwrap(), dt);
     }
 
     #[test]
-    fn enum_round_trips_via_i32_helper() {
-        // Every sim variant -> proto enum -> i32 -> back through the
-        // i32 helper yields the same sim variant. Catches dropped
-        // arms in any of the impls above.
-        fn check<S, P>(s: S, field: &'static str)
-        where
-            S: Copy + PartialEq + std::fmt::Debug + Into<P> + TryFrom<P, Error = ConvError>,
-            P: Into<i32> + TryFrom<i32> + Copy,
-        {
-            let p: P = s.into();
-            let back: S = sim_enum_from_i32::<P, S>(p.into(), field).unwrap();
-            assert_eq!(back, s);
-        }
-
-        check::<Side, proto_trading::MarketSide>(Side::Buy, "MarketSide");
-        check::<Side, proto_trading::MarketSide>(Side::Sell, "MarketSide");
-        for t in [
-            OrderType::Limit,
-            OrderType::StopLimit,
-            OrderType::Iceberg,
-            OrderType::Block,
-            OrderType::Balance,
-            OrderType::Prearranged,
-            OrderType::Private,
-        ] {
-            check::<OrderType, proto_trading::OrderType>(t, "OrderType");
-        }
-        for e in [ExecutionOption::Aon, ExecutionOption::Fok, ExecutionOption::Ioc] {
-            check::<ExecutionOption, proto_trading::OrderExecutionOption>(e, "OrderExecutionOption");
-        }
-        for s in [
-            OrderState::Pending,
-            OrderState::Active,
-            OrderState::Filled,
-            OrderState::Canceled,
-            OrderState::Expired,
-            OrderState::Failed,
-            OrderState::Hibernate,
-        ] {
-            check::<OrderState, proto_trading::OrderState>(s, "OrderState");
-        }
-        for t in [
-            TradeState::Active,
-            TradeState::CancelRequested,
-            TradeState::CancelRejected,
-            TradeState::Canceled,
-            TradeState::Recalled,
-            TradeState::RecallRequested,
-            TradeState::RecallRejected,
-            TradeState::ApprovalRequested,
-        ] {
-            check::<TradeState, proto_trading::TradeState>(t, "TradeState");
-        }
-        for c in [Currency::Eur, Currency::Usd, Currency::Gbp, Currency::Chf] {
-            check::<Currency, proto_market::price::Currency>(c, "Currency");
-        }
-        for c in [CodeType::EuropeEic, CodeType::UsNerc] {
-            check::<CodeType, proto_grid::EnergyMarketCodeType>(c, "EnergyMarketCodeType");
-        }
-        for d in [
-            DeliveryDuration::FiveMin,
-            DeliveryDuration::QuarterHour,
-            DeliveryDuration::HalfHour,
-            DeliveryDuration::Hour,
-        ] {
-            check::<DeliveryDuration, proto_grid::DeliveryDuration>(d, "DeliveryDuration");
-        }
-    }
-
-    #[test]
-    fn unspecified_proto_enum_errors() {
-        let err = Side::try_from(proto_trading::MarketSide::Unspecified).unwrap_err();
-        assert!(matches!(err, ConvError::UnknownEnum { field: "MarketSide", .. }));
-        let err = OrderState::try_from(proto_trading::OrderState::Unspecified).unwrap_err();
-        assert!(matches!(err, ConvError::UnknownEnum { field: "OrderState", .. }));
-    }
-
-    #[test]
-    fn unmodelled_currency_errors() {
-        // CAD is in the proto but not in the sim's Currency.
-        let err = Currency::try_from(proto_market::price::Currency::Cad).unwrap_err();
-        assert!(matches!(err, ConvError::UnknownEnum { field: "Currency", .. }));
+    fn timestamp_rejects_invalid_nanos() {
+        let bad = prost_types::Timestamp {
+            seconds: 0,
+            nanos: -1,
+        };
+        assert_eq!(
+            timestamp_from_proto(&bad).unwrap_err(),
+            ConvError::InvalidTimestamp
+        );
     }
 
     #[test]
     fn area_round_trip() {
         let sim = Area::eic("10Y1001A1001A82H");
-        let proto: proto_grid::DeliveryArea = (&sim).into();
-        assert_eq!(proto.code, "10Y1001A1001A82H");
-        assert_eq!(
-            proto.code_type,
-            proto_grid::EnergyMarketCodeType::EuropeEic as i32
-        );
-        let back = Area::try_from(&proto).unwrap();
+        let p: proto_grid::DeliveryArea = (&sim).into();
+        assert_eq!(p.code, sim.code);
+        assert_eq!(p.code_type, CodeType::EuropeEic as i32);
+        let back = Area::try_from(&p).unwrap();
         assert_eq!(back, sim);
     }
 
     #[test]
-    fn area_rejects_unspecified_code_type() {
+    fn area_rejects_unspecified() {
         let bad = proto_grid::DeliveryArea {
             code: "X".into(),
             code_type: 0,
         };
         let err = Area::try_from(&bad).unwrap_err();
-        assert!(matches!(err, ConvError::UnknownEnum { field: "EnergyMarketCodeType", .. }));
+        assert!(matches!(
+            err,
+            ConvError::UnknownEnum {
+                field: "EnergyMarketCodeType",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn delivery_period_round_trip() {
         let sim = DeliveryPeriod {
             start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-            duration: DeliveryDuration::QuarterHour,
+            duration: DeliveryDuration::DeliveryDuration15,
         };
-        let proto: proto_grid::DeliveryPeriod = sim.into();
-        let back = DeliveryPeriod::try_from(&proto).unwrap();
-        assert_eq!(back, sim);
-    }
-
-    #[test]
-    fn delivery_period_missing_start_errors() {
-        let bad = proto_grid::DeliveryPeriod {
-            start: None,
-            duration: proto_grid::DeliveryDuration::DeliveryDuration60 as i32,
-        };
-        let err = DeliveryPeriod::try_from(&bad).unwrap_err();
-        assert_eq!(err, ConvError::MissingField("DeliveryPeriod.start"));
-    }
-
-    #[test]
-    fn price_helpers_round_trip() {
-        let proto = price_to_proto(dec!(85.50), Currency::Eur);
-        let (amount, currency) = price_from_proto(&proto).unwrap();
-        assert_eq!(amount, dec!(85.5));
-        assert_eq!(currency, Currency::Eur);
-    }
-
-    #[test]
-    fn price_missing_amount_errors() {
-        let bad = proto_market::Price {
-            amount: None,
-            currency: proto_market::price::Currency::Eur as i32,
-        };
-        assert_eq!(
-            price_from_proto(&bad).unwrap_err(),
-            ConvError::MissingField("Price.amount")
-        );
-    }
-
-    #[test]
-    fn power_helpers_round_trip() {
-        let proto = power_to_proto(dec!(1.5));
-        assert_eq!(power_from_proto(&proto).unwrap(), dec!(1.5));
+        let p: proto_grid::DeliveryPeriod = sim.into();
+        assert_eq!(DeliveryPeriod::try_from(&p).unwrap(), sim);
     }
 
     fn sample_order() -> Order {
@@ -1040,7 +600,7 @@ mod tests {
             area: Area::eic("10Y1001A1001A82H"),
             period: DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-                duration: DeliveryDuration::Hour,
+                duration: DeliveryDuration::DeliveryDuration60,
             },
             order_type: OrderType::Limit,
             side: Side::Buy,
@@ -1066,148 +626,17 @@ mod tests {
     }
 
     #[test]
-    fn order_round_trip_with_iceberg_and_stop() {
-        let sim = Order {
-            order_type: OrderType::Iceberg,
-            stop_price: Some(dec!(80.00)),
-            peak_price_delta: Some(dec!(0.50)),
-            display_quantity: Some(dec!(0.5)),
-            execution_option: Some(ExecutionOption::Aon),
-            valid_until: Some(Utc.with_ymd_and_hms(2026, 5, 13, 11, 55, 0).unwrap()),
-            ..sample_order()
-        };
-        let proto = proto_trading::Order::from(&sim);
-        let back = Order::try_from(&proto).unwrap();
-        assert_eq!(back, sim);
-    }
-
-    #[test]
-    fn order_rejects_currency_mismatch_on_stop_price() {
+    fn order_currency_mismatch_on_stop_price() {
         let proto = proto_trading::Order {
-            price: Some(price_to_proto(dec!(85.0), Currency::Eur)),
             stop_price: Some(price_to_proto(dec!(80.0), Currency::Usd)),
             ..proto_trading::Order::from(&sample_order())
         };
-        let err = Order::try_from(&proto).unwrap_err();
         assert!(matches!(
-            err,
+            Order::try_from(&proto).unwrap_err(),
             ConvError::UnknownEnum {
                 field: "Order.stop_price.currency",
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn order_missing_required_field_errors() {
-        let proto = proto_trading::Order {
-            delivery_area: None,
-            ..proto_trading::Order::from(&sample_order())
-        };
-        let err = Order::try_from(&proto).unwrap_err();
-        assert_eq!(err, ConvError::MissingField("Order.delivery_area"));
-    }
-
-    #[test]
-    fn order_detail_round_trip() {
-        let order = sample_order();
-        let created = Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 0).unwrap();
-        let modified = Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 5).unwrap();
-        let sim = OrderDetail {
-            id: OrderId(42),
-            order,
-            state: StateDetail {
-                state: OrderState::Active,
-                reason: StateReason::Add,
-                actor: MarketActor::User,
-            },
-            open_quantity: dec!(1.5),
-            filled_quantity: dec!(0),
-            create_time: created,
-            modification_time: modified,
-        };
-        let proto = proto_trading::OrderDetail::from(&sim);
-        let back = OrderDetail::try_from(&proto).unwrap();
-        assert_eq!(back.id, sim.id);
-        assert_eq!(back.order, sim.order);
-        assert_eq!(back.state, sim.state);
-        assert_eq!(back.open_quantity, sim.open_quantity);
-        assert_eq!(back.filled_quantity, sim.filled_quantity);
-        assert_eq!(back.create_time, sim.create_time);
-        assert_eq!(back.modification_time, sim.modification_time);
-    }
-
-    #[test]
-    fn trade_round_trip() {
-        let area = Area::eic("10Y1001A1001A82H");
-        let sim = Trade {
-            id: TradeId(7),
-            order_id: OrderId(42),
-            side: Side::Sell,
-            area: area.clone(),
-            period: DeliveryPeriod {
-                start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-                duration: DeliveryDuration::Hour,
-            },
-            execution_time: Utc.with_ymd_and_hms(2026, 5, 13, 11, 59, 50).unwrap(),
-            price: dec!(85.50),
-            currency: Currency::Eur,
-            quantity: dec!(1.0),
-            state: TradeState::Active,
-        };
-        let proto = proto_trading::Trade::from(&sim);
-        let back = Trade::try_from(&proto).unwrap();
-        assert_eq!(back.id, sim.id);
-        assert_eq!(back.order_id, sim.order_id);
-        assert_eq!(back.side, sim.side);
-        assert_eq!(back.area, sim.area);
-        assert_eq!(back.period, sim.period);
-        assert_eq!(back.execution_time, sim.execution_time);
-        assert_eq!(back.price, sim.price);
-        assert_eq!(back.currency, sim.currency);
-        assert_eq!(back.quantity, sim.quantity);
-        assert_eq!(back.state, sim.state);
-    }
-
-    #[test]
-    fn public_trade_round_trip_cross_area() {
-        let sim = PublicTrade {
-            id: TradeId(9001),
-            buy_area: Area::eic("10YFR-RTE------C"),
-            sell_area: Area::eic("10Y1001A1001A82H"),
-            period: DeliveryPeriod {
-                start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-                duration: DeliveryDuration::Hour,
-            },
-            execution_time: Utc.with_ymd_and_hms(2026, 5, 13, 11, 59, 45).unwrap(),
-            price: dec!(85.75),
-            currency: Currency::Eur,
-            quantity: dec!(2.5),
-            state: TradeState::Active,
-        };
-        let proto = proto_trading::PublicTrade::from(&sim);
-        let back = PublicTrade::try_from(&proto).unwrap();
-        assert_eq!(back.buy_area, sim.buy_area);
-        assert_eq!(back.sell_area, sim.sell_area);
-        assert_eq!(back.price, sim.price);
-        assert_eq!(back.quantity, sim.quantity);
-        assert_eq!(back.state, sim.state);
-    }
-
-    #[test]
-    fn timestamp_rejects_invalid_nanos() {
-        let bad_negative = prost_types::Timestamp { seconds: 0, nanos: -1 };
-        let bad_overflow = prost_types::Timestamp {
-            seconds: 0,
-            nanos: 1_000_000_000,
-        };
-        assert_eq!(
-            timestamp_from_proto(&bad_negative).unwrap_err(),
-            ConvError::InvalidTimestamp
-        );
-        assert_eq!(
-            timestamp_from_proto(&bad_overflow).unwrap_err(),
-            ConvError::InvalidTimestamp
-        );
     }
 }

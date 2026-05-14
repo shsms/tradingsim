@@ -55,6 +55,7 @@ fn crosses(taker: Side, taker_price: Decimal, level_price: Decimal) -> bool {
     match taker {
         Side::Buy => level_price <= taker_price,
         Side::Sell => level_price >= taker_price,
+        Side::Unspecified => false,
     }
 }
 
@@ -308,8 +309,9 @@ mod props {
                 });
                 for f in &out.fills {
                     match taker_side {
-                        Side::Buy  => prop_assert!(f.price <= taker_limit),
+                        Side::Buy => prop_assert!(f.price <= taker_limit),
                         Side::Sell => prop_assert!(f.price >= taker_limit),
+                        Side::Unspecified => prop_assert!(false, "generator only emits Buy/Sell"),
                     }
                 }
             }

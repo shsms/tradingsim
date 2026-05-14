@@ -7,6 +7,8 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+pub use crate::proto::trading::TradeState;
+
 use crate::sim::market::{Area, Currency, DeliveryPeriod};
 use crate::sim::order::{OrderId, Side};
 
@@ -15,24 +17,9 @@ use crate::sim::order::{OrderId, Side};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TradeId(pub u64);
 
-/// `proto::trading::TradeState`. v0.1 only emits Active; the cancel /
-/// recall workflow lands once we have a market-operator actor in
-/// Phase 6+.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TradeState {
-    Active,
-    CancelRequested,
-    CancelRejected,
-    Canceled,
-    Recalled,
-    RecallRequested,
-    RecallRejected,
-    ApprovalRequested,
-}
-
 impl TradeState {
-    /// True iff the trade is still settling — listing/streaming
-    /// filters that ask for "live" trades reject anything terminal.
+    /// True iff the trade has settled into a terminal state (no
+    /// further transitions possible).
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Canceled | Self::Recalled)
     }

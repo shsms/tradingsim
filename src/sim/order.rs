@@ -1,13 +1,23 @@
-//! Order data types and state machines. Pure data — the matcher,
-//! validator, and proto bridge live elsewhere. Each enum mirrors a
-//! proto enum 1:1 (proto bridging is the next commit).
+//! Order data types and state machines.
+//!
+//! State-machine enums (Side, OrderType, ExecutionOption, OrderState,
+//! StateReason, MarketActor) are the proto-generated types directly —
+//! duplicating them in sim only paid the cost of ten near-identical
+//! From/TryFrom pairs. Since the proto module lives inside our crate,
+//! inherent impls (Side::opposite, OrderState::is_terminal) can be
+//! attached here without an orphan-rule fight.
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+pub use crate::proto::trading::{
+    MarketSide as Side, OrderExecutionOption as ExecutionOption, OrderState, OrderType,
+};
+pub use crate::proto::trading::order_detail::state_detail::{MarketActor, StateReason};
+
 use crate::sim::market::{Area, Currency, DeliveryPeriod};
 
-/// Monotonic server-assigned id. Allocated on admit-time, not at
+/// Monotonic server-assigned id. Allocated at admit-time, not at
 /// validation, so a rejected order never burns an id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OrderId(pub u64);
@@ -16,65 +26,17 @@ pub struct OrderId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GridpoolId(pub u64);
 
-/// `proto::trading::MarketSide`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Side {
-    Buy,
-    Sell,
-}
-
 impl Side {
+    /// Buy ↔ Sell. Unspecified passes through to itself — the sim
+    /// never constructs Unspecified, and the admit-time validator
+    /// catches it before the matcher sees it.
     pub fn opposite(self) -> Self {
         match self {
             Self::Buy => Self::Sell,
             Self::Sell => Self::Buy,
+            Self::Unspecified => Self::Unspecified,
         }
     }
-}
-
-/// `proto::trading::OrderType`. Only LIMIT is wired in Phase 4; the
-/// rest land in the phases noted in plan.org §Order types table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum OrderType {
-    Limit,
-    StopLimit,
-    Iceberg,
-    Block,
-    Balance,
-    Prearranged,
-    Private,
-}
-
-/// `proto::trading::OrderExecutionOption`. None means "rest on the
-/// book until filled, cancelled, or expired" (the proto's implicit
-/// default).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ExecutionOption {
-    /// All-or-None: matches only against an aggregate ≥ full qty.
-    Aon,
-    /// Fill-or-Kill: match in full immediately or reject.
-    Fok,
-    /// Immediate-or-Cancel: match what's available, cancel the rest.
-    Ioc,
-}
-
-/// `proto::trading::OrderState`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum OrderState {
-    /// Admitted, not yet seen by the matcher.
-    Pending,
-    /// On the book (visible portion, for iceberg).
-    Active,
-    /// Open quantity reached zero.
-    Filled,
-    /// Cancelled by user, system, or operator.
-    Canceled,
-    /// `valid_until` reached.
-    Expired,
-    /// Validation rejected; never made it to the book.
-    Failed,
-    /// Stop order armed, not yet triggered.
-    Hibernate,
 }
 
 impl OrderState {
@@ -85,32 +47,6 @@ impl OrderState {
             Self::Filled | Self::Canceled | Self::Expired | Self::Failed
         )
     }
-}
-
-/// `proto::trading::OrderDetail.StateDetail.StateReason`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum StateReason {
-    Add,
-    Modify,
-    Delete,
-    Deactivate,
-    Reject,
-    FullExecution,
-    PartialExecution,
-    IcebergSliceAdd,
-    ValidationFail,
-    UnknownState,
-    QuoteAdd,
-    QuoteFullExecution,
-    QuotePartialExecution,
-}
-
-/// `proto::trading::OrderDetail.StateDetail.MarketActor`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MarketActor {
-    User,
-    MarketOperator,
-    System,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
