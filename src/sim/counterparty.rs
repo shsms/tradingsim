@@ -118,22 +118,15 @@ impl MarketMaker {
         self.config.clone()
     }
 
-    /// Cancel any outstanding quotes, then post a fresh bid + ask
-    /// around the live reference price.
+    /// Step the reference, compute a fresh bid + ask, then — only
+    /// once the new pair is known to be valid — cancel the old
+    /// quotes and post the new ones.
     pub fn refresh(&mut self, world: &mut World, now: DateTime<Utc>) {
         // Step the reference once per refresh — mean-revert toward
         // the fundamentals baseline, follow the last public trade,
         // and take one random-walk step whose amplitude grows as
-        // delivery approaches. Runs before cancel/repost so the new
-        // quotes reflect the just-stepped price.
+        // delivery approaches.
         self.step_reference(world, now);
-
-        if let Some(id) = self.bid_id.take() {
-            world.cancel_counterparty_order(id);
-        }
-        if let Some(id) = self.ask_id.take() {
-            world.cancel_counterparty_order(id);
-        }
 
         // Snapshot the config under the read lock — the lisp side may
         // race us on a write, but we want one consistent set of knobs
@@ -141,13 +134,23 @@ impl MarketMaker {
         let cfg = self.config.read().clone();
 
         let mid = cfg.reference_price;
-        let bid_raw = mid - cfg.spread + cfg.demand;
-        let ask_raw = mid + cfg.spread - cfg.surplus;
-        let bid_price = snap_to_tick(bid_raw, cfg.tick);
-        let ask_price = snap_to_tick(ask_raw, cfg.tick);
+        let bid_price = snap_to_tick(mid - cfg.spread + cfg.demand, cfg.tick);
+        let ask_price = snap_to_tick(mid + cfg.spread - cfg.surplus, cfg.tick);
 
         if bid_price >= ask_price {
+            // Demand + surplus collapsed the spread. Leave the
+            // previous quotes resting — wiping them would create a
+            // window where the MM contributes no liquidity, and
+            // aggressors firing through that window have lifted
+            // stale far-off-market orders in the past.
             return;
+        }
+
+        if let Some(id) = self.bid_id.take() {
+            world.cancel_counterparty_order(id);
+        }
+        if let Some(id) = self.ask_id.take() {
+            world.cancel_counterparty_order(id);
         }
 
         if let Ok(id) = world.submit_counterparty_order(build(&cfg, Side::Buy, bid_price), now) {

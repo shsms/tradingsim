@@ -23,12 +23,12 @@ map (every edge stored as A→B + B→A, halved for the unique count).
 =/api/info= calls it directly. Removed the gridpool-area indirection
 and the inline =/ 2= dedup.
 
-*** TODO MM goes silent on spread collapse
-=MarketMaker::refresh= cancels both quotes unconditionally then
-bails when =bid_price >= ask_price=. Aggressors that fire during
-that refresh window see no MM ask and may target the next-cheapest
-resting order. Compute the new pair first; only cancel-and-repost
-when it's valid; otherwise leave the previous quotes alive.
+*** DONE MM goes silent on spread collapse
+Reordered =MarketMaker::refresh= to compute the new bid/ask
+*before* cancelling. When demand+surplus collapse the spread
+(bid_price >= ask_price), leaves the previous quotes resting
+instead of wiping them — no more zero-MM-quote window for
+aggressors to slip through.
 
 *** TODO Trade WS snapshot on connect
 =handle_book_ws= already snapshots-then-subscribes;
