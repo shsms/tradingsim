@@ -9,10 +9,10 @@
 (define-scenario
  :name "scarcity-spike"
  :description "Evening peak goes parabolic. Bias pinned at 0.95 between 17:00 and 22:00."
- :stages '(;; name                  hr-from  hr-to  bias-from  bias-to
-           ("overnight calm"          0.0     5.0   0.50       0.50)
-           ("morning normal"          5.0    10.0   0.55       0.60)
-           ("midday quiet"           10.0    15.0   0.50       0.50)
-           ("afternoon ramp"         15.0    17.0   0.55       0.85)
-           ("evening scarcity"       17.0    22.0   0.95       0.97)
-           ("late cooling"           22.0    24.0   0.85       0.55)))
+ :stages
+ '((:name "overnight calm"    :hour-from 0.0  :hour-to 5.0  :bias-from 0.50 :bias-to 0.50)
+   (:name "morning normal"    :hour-from 5.0  :hour-to 10.0 :bias-from 0.55 :bias-to 0.60)
+   (:name "midday quiet"      :hour-from 10.0 :hour-to 15.0 :bias-from 0.50 :bias-to 0.50)
+   (:name "afternoon ramp"    :hour-from 15.0 :hour-to 17.0 :bias-from 0.55 :bias-to 0.85)
+   (:name "evening scarcity"  :hour-from 17.0 :hour-to 22.0 :bias-from 0.95 :bias-to 0.97)
+   (:name "late cooling"      :hour-from 22.0 :hour-to 24.0 :bias-from 0.85 :bias-to 0.55)))

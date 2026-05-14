@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use notify::{RecommendedWatcher, Watcher};
 use parking_lot::{Mutex, RwLock};
 use rust_decimal::Decimal;
-use tulisp::{AsPlist, Error, Plist, SharedMut, TulispContext};
+use tulisp::{AsPlist, Error, Plist, Plistable, SharedMut, TulispContext};
 
 use crate::sim::counterparty::{
     AggressorConfig, MarketMakerConfig, SharedAggressorConfig, SharedConfig,
@@ -612,33 +612,33 @@ AsPlist! {
     }
 }
 
+AsPlist! {
+    pub struct StageArgs {
+        name: String,
+        hour_from<":hour-from">: f64,
+        hour_to<":hour-to">: f64,
+        bias_from<":bias-from">: f64,
+        bias_to<":bias-to">: f64,
+    }
+}
+
 fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::SharedScenarios) {
     use crate::scenarios::{ScenarioDef, ScenarioEntry, ScenarioRuntime, Stage};
     ctx.defun(
         "define-scenario",
-        move |args: Plist<DefineScenarioArgs>| -> Result<String, Error> {
+        move |ctx: &mut TulispContext,
+              args: Plist<DefineScenarioArgs>|
+              -> Result<String, Error> {
             let a = args.into_inner();
             let mut stages = Vec::new();
             for raw in a.stages {
-                let parts: Vec<tulisp::TulispObject> = raw.0.base_iter().collect();
-                if parts.len() != 5 {
-                    return Err(Error::os_error(format!(
-                        "define-scenario: each :stages entry must be \
-                         (NAME HOUR-FROM HOUR-TO BIAS-FROM BIAS-TO); got {} elements",
-                        parts.len()
-                    )));
-                }
-                let name: String = (&parts[0]).try_into()?;
-                let hour_from: f64 = (&parts[1]).try_into()?;
-                let hour_to: f64 = (&parts[2]).try_into()?;
-                let bias_from: f64 = (&parts[3]).try_into()?;
-                let bias_to: f64 = (&parts[4]).try_into()?;
+                let s = StageArgs::from_plist(ctx, &raw.0)?;
                 stages.push(Stage {
-                    name,
-                    hour_from,
-                    hour_to,
-                    bias_from,
-                    bias_to,
+                    name: s.name,
+                    hour_from: s.hour_from,
+                    hour_to: s.hour_to,
+                    bias_from: s.bias_from,
+                    bias_to: s.bias_to,
                 });
             }
             let def = ScenarioDef {

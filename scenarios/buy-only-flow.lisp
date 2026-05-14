@@ -9,5 +9,5 @@
 (define-scenario
  :name "buy-only-flow"
  :description "Aggressor bias pinned at 1.0 all day — no sell-side trade flow at all."
- :stages '(;; name        hr-from  hr-to  bias-from  bias-to
-           ("all buys"     0.0    24.0    1.00       1.00)))
+ :stages
+ '((:name "all buys" :hour-from 0.0 :hour-to 24.0 :bias-from 1.00 :bias-to 1.00)))
