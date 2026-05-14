@@ -94,10 +94,11 @@ small =mm_cfg= / =ag_cfg= fn pointers cover the two specs; the
 aggressor's =set-aggressor-size= + =set-aggressor-side-bias= now
 go through the same helper as every MM setter.
 
-*** TODO Split =ui-assets/index.html= into three files
-1900 LOC of mixed HTML/CSS/JS. Split into =index.html=,
-=style.css=, =app.js=. =rust-embed= already supports multiple
-files. Editing each becomes pleasant.
+*** DONE Split =ui-assets/index.html= into three files
+=index.html= (125 LOC), =style.css= (700 LOC), =app.js= (1117
+LOC). =index.html= references the other two via =<link>= /
+=<script src>=. New =/style.css= and =/app.js= axum routes
+serve them with appropriate Content-Type headers.
 
 *** DONE Unify the three UI area lists
 Single =ALL_AREAS= array now holds every configured zone with

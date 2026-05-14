@@ -46,6 +46,8 @@ pub fn build_router(
     };
     Router::new()
         .route("/", get(index))
+        .route("/style.css", get(style_css))
+        .route("/app.js", get(app_js))
         .route("/api/info", get(api_info))
         .route("/api/clock", get(api_clock))
         .route("/api/gridpools", get(api_gridpools))
@@ -76,6 +78,23 @@ pub async fn serve(
 
 async fn index() -> impl IntoResponse {
     Html(include_str!("../../ui-assets/index.html"))
+}
+
+async fn style_css() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../../ui-assets/style.css"),
+    )
+}
+
+async fn app_js() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../../ui-assets/app.js"),
+    )
 }
 
 #[derive(Serialize)]
