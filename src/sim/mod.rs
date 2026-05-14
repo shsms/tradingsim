@@ -1,4 +1,5 @@
 pub mod book;
+pub mod clock;
 pub mod counterparty;
 pub mod curve;
 pub mod decimal;
