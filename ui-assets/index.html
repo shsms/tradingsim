@@ -822,9 +822,37 @@ td { padding: 2px 6px; }
 </div>
 
 <script>
+// The simulation's timezone — physics + scenario stage hours are
+// interpreted in this zone server-side, so the UI formats every
+// timestamp in it too. Default is what /api/clock returns
+// (Europe/Berlin unless the lisp config overrode it). Falling back
+// to the browser's zone would mismatch the server for any remote
+// operator and silently shift dropdown labels by 1–2 hours.
+let SIM_TZ = 'UTC';
+let SIM_TZ_LABEL = 'UTC';
+
+async function loadClock() {
+  try {
+    const r = await fetch('/api/clock');
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.tz) SIM_TZ = j.tz;
+    // Probe the short zone abbreviation for the *current* instant.
+    // CEST in summer, CET in winter — Intl picks based on DST.
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: SIM_TZ, timeZoneName: 'short',
+    }).formatToParts(new Date());
+    const tag = parts.find(p => p.type === 'timeZoneName');
+    if (tag) SIM_TZ_LABEL = tag.value;
+  } catch (_) { /* keep UTC fallback */ }
+}
+
 function shortTime(iso) {
   const d = new Date(iso);
-  return d.toISOString().slice(11, 19);
+  if (Number.isNaN(d.getTime())) return '--:--';
+  return d.toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: SIM_TZ,
+  });
 }
 
 async function loadInfo() {
@@ -886,8 +914,14 @@ function setPill(id, state, label) {
 }
 
 function tickClock() {
-  const now = new Date();
-  document.getElementById('clock').textContent = now.toISOString().slice(11, 19);
+  const hhmmss = new Date().toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false, timeZone: SIM_TZ,
+  });
+  // Show the sim's local time + zone tag so the user can tell at
+  // a glance whether they're looking at e.g. 14:00 CEST (= UTC 12)
+  // vs 14:00 UTC.
+  document.getElementById('clock').textContent = `${hhmmss} ${SIM_TZ_LABEL}`;
 }
 
 const DENSITY_KEY = 'tradingsim-density';
@@ -1780,6 +1814,10 @@ setInterval(() => {
 
 (async () => {
   initDensity();
+  // Pull the sim's timezone first so the very first tickClock /
+  // renderTrades / renderBook formats in the right zone — without
+  // this they'd render in UTC for a frame, then snap.
+  await loadClock();
   tickClock();
   renderSparkbars();
   renderChartLegend();
