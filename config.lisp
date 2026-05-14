@@ -6,8 +6,7 @@
 
 (unless (boundp 'tradingsim-loaded)
   (setq tradingsim-loaded t)
-  (load "sim/common.lisp")
-  (load "sim/scenarios.lisp"))
+  (load "sim/common.lisp"))
 
 ;; Cancel any timers from a previous load before the new config
 ;; re-registers them. Required for hot reload to start clean.
@@ -15,7 +14,6 @@
 
 ;; Watch the support files so saving them also triggers a reload.
 (watch-file "sim/common.lisp")
-(watch-file "sim/scenarios.lisp")
 
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
@@ -125,15 +123,11 @@
 
 ;; --- Scenarios -------------------------------------------------------------
 ;;
-;; Library lives in sim/scenarios.lisp. Uncomment any of these to
-;; activate the matching market-animation curve:
+;; Each script in scenarios/ is self-running on load. Uncomment any
+;; line below to activate the matching market animation; each
+;; scenario exposes a (scenario-NAME-stop) defun for manual cancel.
 ;;
-;; Single-knob scenarios (each runs until -stop is called):
-;; (scenario-morning-ramp-start "de-lu-q0")
-;; (scenario-gate-crunch-start  "de-lu-q3")
-;; (scenario-curtailment-start  "de-lu-q2")
-;;
-;; Six-phase 3-hour tour through every dial — calm → ramp →
-;; volatility → curtailment shock → recovery → gate-closure crunch.
-;; Logs each phase transition at INFO level.
-;; (scenario-elaborate-start "de-lu-q0" "ag-q0")
+;; (load "scenarios/morning-ramp.lisp")   ;; demand ramp on de-lu-q0
+;; (load "scenarios/gate-crunch.lisp")    ;; widening spread on de-lu-q3
+;; (load "scenarios/curtailment.lisp")    ;; supply surge on de-lu-q2
+;; (load "scenarios/elaborate.lisp")      ;; 3-hour six-phase tour
