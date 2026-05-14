@@ -114,6 +114,7 @@ pub struct Config {
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
+    curve: crate::scenarios::SharedCurve,
     /// Extra paths registered via `(watch-file PATH)`; the notify
     /// watcher reloads on any of them changing in addition to the
     /// top-level config file.
@@ -143,6 +144,7 @@ impl Config {
         let aggressors = Arc::new(Mutex::new(HashMap::new()));
         let scenarios = crate::scenarios::new_registry();
         let bias_scale = crate::scenarios::new_bias_scale();
+        let curve = crate::scenarios::new_curve();
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
@@ -163,6 +165,7 @@ impl Config {
             aggressors.clone(),
             scenarios.clone(),
             bias_scale.clone(),
+            curve.clone(),
             extra_watches.clone(),
             load_dir.clone(),
             anchor,
@@ -193,6 +196,7 @@ impl Config {
             aggressors,
             scenarios,
             bias_scale,
+            curve,
             extra_watches,
             timer_handle,
             anchor,
@@ -355,6 +359,12 @@ impl Config {
         self.bias_scale.clone()
     }
 
+    /// Shared forward-curve handle. Lisp overrides per-hour base
+    /// prices via `(set-forward-curve-base HOUR PRICE)`.
+    pub fn curve(&self) -> crate::scenarios::SharedCurve {
+        self.curve.clone()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -379,6 +389,7 @@ fn register_runtime(
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
+    curve: crate::scenarios::SharedCurve,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
     anchor: DateTime<Utc>,
@@ -393,7 +404,23 @@ fn register_runtime(
     register_aggressors(ctx, aggressors, anchor);
     register_scenarios(ctx, scenarios);
     register_bias_scale(ctx, bias_scale);
+    register_curve(ctx, curve);
     register_watches(ctx, extra_watches, load_dir);
+}
+
+fn register_curve(ctx: &mut TulispContext, curve: crate::scenarios::SharedCurve) {
+    ctx.defun(
+        "set-forward-curve-base",
+        move |hour: i64, price: f64| -> Result<f64, Error> {
+            if !(0..=24).contains(&hour) {
+                return Err(Error::os_error(format!(
+                    "set-forward-curve-base: HOUR must be 0..=24, got {hour}"
+                )));
+            }
+            curve.write().set_base_price_at(hour as usize, price);
+            Ok(price)
+        },
+    );
 }
 
 fn register_bias_scale(

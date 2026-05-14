@@ -115,6 +115,22 @@ impl ForwardCurve {
     pub fn base_price_at(&self, hour: f64) -> Decimal {
         snap_to_cent(self.point_at(hour).base_price)
     }
+
+    /// Override the base price at integer hour `h` (0..=24).
+    /// `h = 0` and `h = 24` are kept in sync so the cyclic boundary
+    /// stays continuous. Caller's responsibility to call with `h` in
+    /// range; out-of-range silently does nothing.
+    pub fn set_base_price_at(&mut self, h: usize, price: f64) {
+        if h > 24 {
+            return;
+        }
+        self.anchors[h].base_price = price;
+        if h == 0 {
+            self.anchors[24].base_price = price;
+        } else if h == 24 {
+            self.anchors[0].base_price = price;
+        }
+    }
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
@@ -203,5 +219,22 @@ mod tests {
         assert_eq!(c.point_at(24.0).base_price, c.point_at(0.0).base_price);
         // 25.0 should wrap to 1.0
         assert_eq!(c.point_at(25.0).base_price, c.point_at(1.0).base_price);
+    }
+
+    #[test]
+    fn set_base_overrides_one_anchor() {
+        let mut c = ForwardCurve::default();
+        c.set_base_price_at(12, -50.0);
+        assert_eq!(c.point_at(12.0).base_price, -50.0);
+        // Other hours untouched.
+        assert_eq!(c.point_at(18.0).base_price, 150.0);
+    }
+
+    #[test]
+    fn set_base_at_zero_syncs_with_twentyfour() {
+        let mut c = ForwardCurve::default();
+        c.set_base_price_at(0, 200.0);
+        assert_eq!(c.point_at(0.0).base_price, 200.0);
+        assert_eq!(c.point_at(24.0).base_price, 200.0);
     }
 }

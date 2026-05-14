@@ -188,6 +188,14 @@ pub fn new_bias_scale() -> SharedBiasScale {
     Arc::new(RwLock::new(DEFAULT_MM_BIAS_SCALE))
 }
 
+/// Shared forward curve. Lisp can mutate via `(set-forward-curve-base …)`;
+/// the bias tick reads it each cycle.
+pub type SharedCurve = Arc<RwLock<ForwardCurve>>;
+
+pub fn new_curve() -> SharedCurve {
+    Arc::new(RwLock::new(ForwardCurve::default()))
+}
+
 /// Spawn a tokio task that, every `cadence`, walks `aggressors` and
 /// `mms` and writes their effective side-bias / demand / surplus to
 /// the SharedConfigs. The scenarios registry is consulted on each
@@ -201,7 +209,7 @@ pub fn spawn_bias_tick(
     mms: Vec<MmView>,
     scenarios: SharedScenarios,
     bias_scale: SharedBiasScale,
-    curve: Arc<ForwardCurve>,
+    curve: SharedCurve,
     cadence: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -211,7 +219,8 @@ pub fn spawn_bias_tick(
             let now = Utc::now();
             let scenario_bias = pick_active_bias(&scenarios, now);
             let scale = *bias_scale.read();
-            apply_biases(&aggressors, &mms, scenario_bias, scale, &curve, now);
+            let curve_snap = curve.read().clone();
+            apply_biases(&aggressors, &mms, scenario_bias, scale, &curve_snap, now);
         }
     })
 }
