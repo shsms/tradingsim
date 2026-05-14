@@ -231,6 +231,69 @@ td { padding: 2px 6px; }
   width: 10px; height: 2px; display: inline-block;
 }
 #price-chart { display: block; }
+
+/* Book ladder — vertical depth per contract. asks stack from worst
+   price down to the spread row, bids continue below; quantity bars
+   give a quick visual of where liquidity sits. Top-3-per-side by
+   default; click '+ N more' to expand. */
+.book-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.ladder {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.ladder-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+  font-size: var(--fs-small);
+}
+.ladder-head .midprice { color: var(--muted); }
+.ladder-row {
+  display: grid;
+  grid-template-columns: 60px 44px 1fr;
+  align-items: center;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  gap: 6px;
+  padding: 1px 0;
+}
+.ladder-row.ask { color: var(--sell); }
+.ladder-row.bid { color: var(--buy); }
+.ladder-row .price { text-align: right; }
+.ladder-row .qty { text-align: right; color: var(--muted); }
+.ladder-row .bar { height: 4px; background: currentColor; opacity: 0.35; border-radius: 1px; }
+.ladder-spread {
+  color: var(--muted);
+  font-size: var(--fs-mini);
+  text-align: center;
+  padding: 2px 0;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+  margin: 2px 0;
+}
+.ladder-empty {
+  color: var(--muted);
+  font-size: var(--fs-small);
+  text-align: center;
+  padding: 4px;
+}
+.ladder-more {
+  color: var(--muted);
+  font-size: var(--fs-mini);
+  text-align: center;
+  cursor: pointer;
+  padding: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ladder-more:hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -278,21 +341,14 @@ td { padding: 2px 6px; }
   </div>
 
   <div class="panel">
-    <h2>Public order book (top of book)</h2>
-    <div class="muted" style="margin-bottom:6px">
-      Aggregated by (area, period, side, price). Updated live; entries
-      removed when their qty drops to 0.
+    <h2>Order book</h2>
+    <div class="muted" style="margin-bottom:8px">
+      One ladder per contract, top 3 levels per side. Bar width
+      shows quantity relative to the deepest level in that
+      contract; click '+ more' to expand the full depth.
     </div>
     <div class="scroll">
-      <table>
-        <thead><tr>
-          <th style="width:8%">area</th>
-          <th style="width:18%">period</th>
-          <th style="width:38%; text-align:right" class="buy">bids (qty @ price)</th>
-          <th style="width:38%" class="sell">asks (price @ qty)</th>
-        </tr></thead>
-        <tbody id="book"></tbody>
-      </table>
+      <div id="book" class="book-grid"></div>
     </div>
   </div>
 
@@ -666,6 +722,98 @@ function openTradesWs() {
 const bookState = new Map();
 let bookDirty = false;
 
+const AREA_TAGS = {
+  '10YDE-EON------1': 'TN',
+  '10YDE-RWENET---I': 'AM',
+  '10YDE-VE-------2': 'HZ',
+  '10YDE-ENBW-----N': 'BW',
+  '10YFR-RTE------C': 'FR',
+  '10YNL----------L': 'NL',
+  '10YBE----------2': 'BE',
+  '10YAT-APG------L': 'AT',
+};
+function areaTag(code) {
+  return AREA_TAGS[code] || code.slice(0, 4);
+}
+
+const TOP_LEVELS = 3;
+const ladderExpanded = new Set();
+
+function toggleLadder(key) {
+  if (ladderExpanded.has(key)) ladderExpanded.delete(key);
+  else ladderExpanded.add(key);
+  rerenderBook();
+}
+
+function ladderRow(side, price, qty, maxQ) {
+  const pct = Math.max(2, Math.round((qty / maxQ) * 100));
+  return `<div class="ladder-row ${side}">
+    <span class="price">${parseFloat(price).toFixed(2)}</span>
+    <span class="qty">${qty.toFixed(1)}</span>
+    <span class="bar" style="width:${pct}%"></span>
+  </div>`;
+}
+
+function renderLadder(g) {
+  const key = `${g.area}|${g.period}`;
+  const expanded = ladderExpanded.has(key);
+  const asks = Array.from(g.asks.entries())
+    .map(([p, q]) => [parseFloat(p), q])
+    .sort((a, b) => a[0] - b[0]);
+  const bids = Array.from(g.bids.entries())
+    .map(([p, q]) => [parseFloat(p), q])
+    .sort((a, b) => b[0] - a[0]);
+  const maxQ = Math.max(0.01, ...asks.map(x => x[1]), ...bids.map(x => x[1]));
+
+  const visAsks = expanded ? asks : asks.slice(0, TOP_LEVELS);
+  const visBids = expanded ? bids : bids.slice(0, TOP_LEVELS);
+
+  // asks rendered worst-to-best so the lowest ask sits next to the
+  // spread row at the centre of the ladder.
+  const askRows = visAsks
+    .slice()
+    .reverse()
+    .map(([p, q]) => ladderRow('ask', p, q, maxQ))
+    .join('');
+  const bidRows = visBids
+    .map(([p, q]) => ladderRow('bid', p, q, maxQ))
+    .join('');
+
+  const bestBid = bids[0]?.[0];
+  const bestAsk = asks[0]?.[0];
+  const mid = (bestBid != null && bestAsk != null)
+    ? ((bestBid + bestAsk) / 2).toFixed(2)
+    : '—';
+  const spread = (bestBid != null && bestAsk != null)
+    ? (bestAsk - bestBid).toFixed(2)
+    : '—';
+
+  const safeKey = key.replace(/'/g, '%27');
+  const askMore = (!expanded && asks.length > TOP_LEVELS)
+    ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">+ ${asks.length - TOP_LEVELS} more asks</div>`
+    : '';
+  const bidMore = (!expanded && bids.length > TOP_LEVELS)
+    ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">+ ${bids.length - TOP_LEVELS} more bids</div>`
+    : '';
+  const collapse = expanded
+    ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">collapse</div>`
+    : '';
+
+  return `
+    <div class="ladder">
+      <div class="ladder-head">
+        <span><span class="area-badge">${areaTag(g.area)}</span> ${shortTime(g.period)}</span>
+        <span class="midprice">mid ${mid}</span>
+      </div>
+      ${askMore}
+      ${askRows || '<div class="ladder-empty">no asks</div>'}
+      <div class="ladder-spread">spread ${spread}</div>
+      ${bidRows || '<div class="ladder-empty">no bids</div>'}
+      ${bidMore}
+      ${collapse}
+    </div>`;
+}
+
 function rerenderBook() {
   // Group rows by (area, period). Within each group, aggregate
   // bids and asks separately by price level. Contracts whose gate
@@ -687,38 +835,19 @@ function rerenderBook() {
     }
     const target = r.side === 1 ? g.bids : (r.side === 2 ? g.asks : null);
     if (target == null) continue;
-    const prev = parseFloat(target.get(r.price) || '0');
+    const prev = target.get(r.price) || 0;
     const next = prev + parseFloat(r.qty || '0');
-    target.set(r.price, next.toFixed(1));
+    target.set(r.price, next);
   }
 
-  const tbody = document.getElementById('book');
-  tbody.innerHTML = '';
-  // Stable sort: most-imminent period first, then area code.
+  const container = document.getElementById('book');
+  if (!container) return;
   const sorted = Array.from(groups.values()).sort((a, b) =>
     a.period < b.period ? -1 : a.period > b.period ? 1 : a.area.localeCompare(b.area)
   );
-  for (const g of sorted) {
-    // Bids descending by price; asks ascending.
-    const bids = Array.from(g.bids.entries()).sort((a, b) =>
-      parseFloat(b[0]) - parseFloat(a[0])
-    );
-    const asks = Array.from(g.asks.entries()).sort((a, b) =>
-      parseFloat(a[0]) - parseFloat(b[0])
-    );
-    const bidStr = bids
-      .map(([p, q]) => `<span class="buy">${q} @ ${p}</span>`)
-      .join(' · ') || '<span class="muted">—</span>';
-    const askStr = asks
-      .map(([p, q]) => `<span class="sell">${p} @ ${q}</span>`)
-      .join(' · ') || '<span class="muted">—</span>';
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="muted">${g.area.slice(0, 12)}</td>` +
-      `<td class="muted">${shortTime(g.period)}</td>` +
-      `<td style="text-align:right">${bidStr}</td>` +
-      `<td>${askStr}</td>`;
-    tbody.appendChild(tr);
-  }
+  container.innerHTML = sorted.length
+    ? sorted.map(renderLadder).join('')
+    : '<div class="ladder-empty"><i>no resting orders</i></div>';
 }
 
 function openBookWs() {
