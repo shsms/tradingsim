@@ -60,6 +60,9 @@ enum Cmd {
         /// Delivery area code (EIC). Defaults to DE-LU.
         #[arg(long, default_value = "10Y1001A1001A82H")]
         area: String,
+        /// Execution restriction (fok / ioc). Default: none (resting).
+        #[arg(long, value_enum)]
+        exec: Option<ExecArg>,
     },
     /// Fetch a single order.
     Get {
@@ -126,6 +129,12 @@ enum Cmd {
 enum SideArg {
     Buy,
     Sell,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ExecArg {
+    Fok,
+    Ioc,
 }
 
 impl From<SideArg> for MarketSide {
@@ -300,7 +309,13 @@ async fn cmd_place(
     duration: u32,
     tag: Option<String>,
     area: String,
+    exec: Option<ExecArg>,
 ) -> Result<(), String> {
+    use tradingsim::proto::trading::OrderExecutionOption;
+    let exec_i32 = exec.map(|e| match e {
+        ExecArg::Fok => OrderExecutionOption::Fok as i32,
+        ExecArg::Ioc => OrderExecutionOption::Ioc as i32,
+    });
     let order = Order {
         delivery_area: Some(tradingsim::proto::common::grid::DeliveryArea {
             code: area,
@@ -322,7 +337,7 @@ async fn cmd_place(
         stop_price: None,
         peak_price_delta: None,
         display_quantity: None,
-        execution_option: None,
+        execution_option: exec_i32,
         valid_until: None,
         payload: None,
         tag,
@@ -569,6 +584,7 @@ async fn main() {
                         duration,
                         tag,
                         area,
+                        exec,
                     } => {
                         cmd_place(
                             &mut client,
@@ -580,6 +596,7 @@ async fn main() {
                             duration,
                             tag,
                             area,
+                            exec,
                         )
                         .await
                     }

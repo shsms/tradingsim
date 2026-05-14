@@ -115,6 +115,32 @@ impl OrderBook {
         self.by_id.len()
     }
 
+    /// Total opposite-side depth at-or-better-than `taker_price`.
+    /// Used by the FOK feasibility check before any state mutation.
+    pub fn marketable_depth(&self, taker: Side, taker_price: Decimal) -> Decimal {
+        let mut total = Decimal::ZERO;
+        match taker {
+            Side::Buy => {
+                for (price, queue) in self.asks.iter() {
+                    if *price > taker_price {
+                        break;
+                    }
+                    total += queue.iter().map(|r| r.open_qty).sum::<Decimal>();
+                }
+            }
+            Side::Sell => {
+                for (price, queue) in self.bids.iter().rev() {
+                    if *price < taker_price {
+                        break;
+                    }
+                    total += queue.iter().map(|r| r.open_qty).sum::<Decimal>();
+                }
+            }
+            Side::Unspecified => {}
+        }
+        total
+    }
+
     /// Sum of open_qty across every resting entry on both sides.
     /// Used by tests for the conservation invariant and by the UI
     /// for "open book volume" headline numbers.

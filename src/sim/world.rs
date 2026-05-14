@@ -13,7 +13,7 @@ use crate::sim::book::OrderBook;
 use crate::sim::decimal::is_multiple_of;
 use crate::sim::gridpool::{Gridpool, GridpoolRegistry};
 use crate::sim::market::{Area, DeliveryPeriod, MarketRegistry};
-use crate::sim::matching::{IncomingLimit, LimitMatchOutcome, match_limit};
+use crate::sim::matching::{ExecMode, IncomingLimit, LimitMatchOutcome, match_limit};
 use crate::sim::order::{
     ExecutionOption, GridpoolId, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType,
     StateDetail, StateReason,
@@ -221,15 +221,26 @@ impl World {
         self.books.get(key)
     }
 
-    /// Run the continuous matcher for `key` against `incoming`.
-    /// Thin wrapper so the server layer doesn't have to fish out
-    /// the book itself.
+    /// Run the continuous matcher for `key` against `incoming` with
+    /// the default Resting mode. Thin wrapper so the server layer
+    /// doesn't have to fish out the book itself.
     pub fn match_limit_in(
         &mut self,
         key: ContractKey,
         incoming: IncomingLimit,
     ) -> LimitMatchOutcome {
-        match_limit(self.book_mut(key), incoming)
+        match_limit(self.book_mut(key), incoming, ExecMode::Resting)
+    }
+
+    /// Variant of `match_limit_in` that lets the caller pick the
+    /// execution mode (FOK / IOC / Resting).
+    pub fn match_limit_in_with_mode(
+        &mut self,
+        key: ContractKey,
+        incoming: IncomingLimit,
+        mode: ExecMode,
+    ) -> LimitMatchOutcome {
+        match_limit(self.book_mut(key), incoming, mode)
     }
 
     pub fn contracts(&self) -> impl Iterator<Item = &ContractKey> {
@@ -262,8 +273,20 @@ impl World {
             return Err(SubmitError::AreaNotAllowedForGridpool);
         }
 
-        // 2-4. Shared validation: market, type, exec-option, grid.
+        // 2-4. Shared validation: market, type, grid.
         self.validate_common(&order)?;
+        // FOK / IOC are honoured starting in Phase 6. AON is still
+        // rejected — partial-quantity-or-rest semantics are open.
+        if let Some(ExecutionOption::Aon) = order.execution_option {
+            return Err(SubmitError::UnsupportedExecutionOption(
+                ExecutionOption::Aon,
+            ));
+        }
+        if order.execution_option.is_some() && order.valid_until.is_some() {
+            return Err(SubmitError::UnsupportedExecutionOption(
+                order.execution_option.unwrap(),
+            ));
+        }
 
         // 5. Admit. Mint id; build the contract key.
         let taker_id = self.next_id();
@@ -276,8 +299,13 @@ impl World {
         let taker_currency = order.currency;
         let total_qty = order.quantity;
 
-        // 6. Match.
-        let outcome = self.match_limit_in(
+        // 6. Match — execution option picks the matcher mode.
+        let mode = match order.execution_option {
+            Some(ExecutionOption::Fok) => ExecMode::FillOrKill,
+            Some(ExecutionOption::Ioc) => ExecMode::ImmediateOrCancel,
+            _ => ExecMode::Resting,
+        };
+        let outcome = self.match_limit_in_with_mode(
             key,
             IncomingLimit {
                 id: taker_id,
@@ -285,6 +313,7 @@ impl World {
                 price: taker_price,
                 quantity: total_qty,
             },
+            mode,
         );
 
         // 7. Record trades + update maker state. The taker is always
@@ -307,10 +336,36 @@ impl World {
         // 8. Build the taker's OrderDetail.
         let filled: Decimal = outcome.fills.iter().map(|f| f.quantity).sum();
         let open = total_qty - filled;
-        let (state, reason) = match outcome.rested {
-            Some(_) if filled.is_zero() => (OrderState::Active, StateReason::Add),
-            Some(_) => (OrderState::Active, StateReason::PartialExecution),
-            None => (OrderState::Filled, StateReason::FullExecution),
+        // FOK / IOC outcomes:
+        //   FOK + 0 fills = no execution at all → Canceled, Reject.
+        //   IOC + filled < total = killed leftover → Canceled if any
+        //     leftover; Filled if all matched.
+        //   Resting + filled < total but no rest = unreachable for now.
+        // (mode, rested, no-fills, fully-filled) → (state, reason).
+        let (state, reason) = match (mode, outcome.rested.is_some(), filled.is_zero(), open.is_zero()) {
+            // Restable + on-book outcomes (Resting only — IOC/FOK
+            // never rest):
+            (_, true, true, _) => (OrderState::Active, StateReason::Add),
+            (_, true, false, _) => (OrderState::Active, StateReason::PartialExecution),
+            // Fully filled outcomes (any mode):
+            (_, false, false, true) => (OrderState::Filled, StateReason::FullExecution),
+            // FOK: pre-check fails → 0 fills, no rest → Canceled.
+            (ExecMode::FillOrKill, false, true, _) => (OrderState::Canceled, StateReason::Reject),
+            // IOC: some fills, leftover killed → Canceled with
+            // PartialExecution reason.
+            (ExecMode::ImmediateOrCancel, false, false, false) => {
+                (OrderState::Canceled, StateReason::PartialExecution)
+            }
+            // IOC: no fills, nothing to take → Canceled / Reject.
+            (ExecMode::ImmediateOrCancel, false, true, _) => {
+                (OrderState::Canceled, StateReason::Reject)
+            }
+            // Resting w/o rest is only the "fully filled" case above.
+            // FOK can't reach (filled=true, fully=false) because the
+            // pre-check makes the matcher take everything or nothing.
+            // Cover the unreachable arms with Failed/Reject so the
+            // exhaustiveness checker is satisfied.
+            _ => (OrderState::Failed, StateReason::Reject),
         };
         let detail = OrderDetail {
             id: taker_id,
@@ -351,9 +406,6 @@ impl World {
             .ok_or(SubmitError::UnknownArea)?;
         if order.order_type != OrderType::Limit {
             return Err(SubmitError::UnsupportedOrderType(order.order_type));
-        }
-        if let Some(e) = order.execution_option {
-            return Err(SubmitError::UnsupportedExecutionOption(e));
         }
         if order.currency != rules.currency {
             return Err(SubmitError::CurrencyMismatch);
@@ -965,10 +1017,10 @@ mod tests {
             ),
             (
                 Order {
-                    execution_option: Some(ExecutionOption::Fok),
+                    execution_option: Some(ExecutionOption::Aon),
                     ..sample_buy(dec!(1.0), dec!(85.0))
                 },
-                SubmitError::UnsupportedExecutionOption(ExecutionOption::Fok),
+                SubmitError::UnsupportedExecutionOption(ExecutionOption::Aon),
             ),
         ];
         for (order, want) in cases {
@@ -1104,6 +1156,55 @@ mod tests {
         w.cancel_order(gp, d.id, t0()).unwrap();
         let received = rx.try_recv().unwrap();
         assert_eq!(received.state.state, OrderState::Canceled);
+    }
+
+    #[test]
+    fn fok_with_insufficient_depth_cancels_without_fills() {
+        let (mut w, gp) = setup_world_with_pool();
+        // Resting sell of 0.5; FOK buy of 1.0 needs full match.
+        w.submit_order(gp, sample_sell(dec!(0.5), dec!(85.0)), t0()).unwrap();
+        let fok = Order {
+            execution_option: Some(ExecutionOption::Fok),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        let d = w.submit_order(gp, fok, t0()).unwrap();
+        assert_eq!(d.state.state, OrderState::Canceled);
+        assert_eq!(d.state.reason, StateReason::Reject);
+        assert_eq!(d.filled_quantity, dec!(0));
+        // Resting 0.5 sell is untouched.
+        assert_eq!(
+            w.book(&de_lu_hour()).unwrap().best_ask(),
+            Some(dec!(85.0))
+        );
+    }
+
+    #[test]
+    fn fok_with_sufficient_depth_fully_fills() {
+        let (mut w, gp) = setup_world_with_pool();
+        w.submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0()).unwrap();
+        let fok = Order {
+            execution_option: Some(ExecutionOption::Fok),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        let d = w.submit_order(gp, fok, t0()).unwrap();
+        assert_eq!(d.state.state, OrderState::Filled);
+        assert_eq!(d.filled_quantity, dec!(1.0));
+    }
+
+    #[test]
+    fn ioc_takes_what_it_can_then_cancels_rest() {
+        let (mut w, gp) = setup_world_with_pool();
+        w.submit_order(gp, sample_sell(dec!(0.4), dec!(85.0)), t0()).unwrap();
+        let ioc = Order {
+            execution_option: Some(ExecutionOption::Ioc),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        let d = w.submit_order(gp, ioc, t0()).unwrap();
+        assert_eq!(d.state.state, OrderState::Canceled);
+        assert_eq!(d.state.reason, StateReason::PartialExecution);
+        assert_eq!(d.filled_quantity, dec!(0.4));
+        // No leftover on the book.
+        assert_eq!(w.book(&de_lu_hour()).unwrap().best_bid(), None);
     }
 
     #[test]
