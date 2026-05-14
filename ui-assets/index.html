@@ -163,14 +163,64 @@ td { padding: 2px 6px; }
 .scenario-controls button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 3px 12px; border-radius: 3px; cursor: pointer; font-family: inherit; font-size: var(--fs-small); margin-right: 4px; }
 .scenario-controls button:disabled { opacity: 0.35; cursor: not-allowed; }
 .scenario-controls button:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+
+/* Tier 1 — pulse bar. Single horizontal strip pinned above the
+   grid. Three status pills + per-area trade-rate sparkbars +
+   running scenario indicator + wallclock. */
+.page-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.page-meta { font-size: var(--fs-small); }
+.pulse {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: var(--fs-small);
+}
+.pulse-group { display: flex; align-items: center; gap: 6px; }
+.pulse-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+.pulse-clock { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.spark-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+.spark {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 14px;
+  width: 26px;
+}
+.spark-bar {
+  width: 2px;
+  background: var(--accent);
+  opacity: 0.75;
+  min-height: 1px;
+  border-radius: 1px;
+}
 </style>
 </head>
 <body>
-<h1>tradingsim</h1>
-<div class="muted">
-  <span class="status live" id="status">connecting…</span>
-  <span id="info"></span>
-</div>
+<header class="page-header">
+  <h1>tradingsim</h1>
+  <span class="page-meta muted" id="info"></span>
+</header>
+
+<section class="pulse" aria-label="system pulse">
+  <div class="pulse-group">
+    <span class="pill" id="pill-trades">trades</span>
+    <span class="pill" id="pill-book">book</span>
+    <span class="pill" id="pill-weather">weather</span>
+  </div>
+  <div class="pulse-sep"></div>
+  <div class="pulse-group" id="spark-row" title="prints per 5s, last 60s"></div>
+  <div class="pulse-sep"></div>
+  <div class="pulse-group">
+    <span class="muted">scenario</span>
+    <span id="scenario-indicator" class="muted">—</span>
+  </div>
+  <div class="pulse-clock" id="clock">--:--:--</div>
+</section>
 
 <div class="grid">
   <div class="panel">
@@ -250,7 +300,62 @@ async function loadInfo() {
   if (!r.ok) return;
   const j = await r.json();
   document.getElementById('info').textContent =
-    `· v${j.version} · gridpools ${j.gridpools} · markets ${j.markets} · couplings ${j.couplings}`;
+    `v${j.version} · ${j.gridpools} gridpool${j.gridpools === 1 ? '' : 's'} · ${j.markets} markets · ${j.couplings} couplings`;
+}
+
+// Pulse-bar state: per-area trade counts in 12 × 5s rolling buckets.
+// DE TSO zones only at this step; the +neighbours chip in step 5
+// will surface the international areas.
+const SPARK_BUCKET_MS = 5000;
+const SPARK_BUCKETS = 12;
+const DE_AREAS = [
+  { code: '10YDE-EON------1', tag: 'TN' },
+  { code: '10YDE-RWENET---I', tag: 'AM' },
+  { code: '10YDE-VE-------2', tag: 'HZ' },
+  { code: '10YDE-ENBW-----N', tag: 'BW' },
+];
+const sparkState = new Map();
+for (const a of DE_AREAS) sparkState.set(a.code, new Array(SPARK_BUCKETS).fill(0));
+
+function rotateSparkBuckets() {
+  for (const buckets of sparkState.values()) {
+    buckets.shift();
+    buckets.push(0);
+  }
+}
+
+function recordTrade(t) {
+  // Credit the buy-side area; counts both intra and cross-area
+  // prints from the perspective of the bidding zone receiving energy.
+  const buckets = sparkState.get(t.buy_area);
+  if (buckets) buckets[buckets.length - 1] += 1;
+}
+
+function renderSparkbars() {
+  const el = document.getElementById('spark-row');
+  if (!el) return;
+  el.innerHTML = DE_AREAS.map(a => {
+    const buckets = sparkState.get(a.code) || [];
+    const max = Math.max(1, ...buckets);
+    const bars = buckets.map(n => {
+      const h = Math.max(1, Math.round((n / max) * 14));
+      return `<span class="spark-bar" style="height:${h}px"></span>`;
+    }).join('');
+    return `<span class="spark-item"><span class="area-badge">${a.tag}</span><span class="spark">${bars}</span></span>`;
+  }).join('');
+}
+
+function setPill(id, state, label) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('ok', 'down', 'warn');
+  if (state) el.classList.add(state);
+  if (label) el.textContent = label;
+}
+
+function tickClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toISOString().slice(11, 19);
 }
 
 async function loadGridpools() {
@@ -319,9 +424,19 @@ async function scenarioJump(name, idx) {
 }
 
 async function loadWeather() {
-  const r = await fetch('/api/weather');
-  if (!r.ok) return;
-  const list = await r.json();
+  let list;
+  try {
+    const r = await fetch('/api/weather');
+    if (!r.ok) {
+      setPill('pill-weather', 'down', 'weather');
+      return;
+    }
+    list = await r.json();
+    setPill('pill-weather', list.length ? 'ok' : 'warn', 'weather');
+  } catch (_e) {
+    setPill('pill-weather', 'down', 'weather');
+    return;
+  }
   const tbody = document.getElementById('weather');
   if (!list.length) {
     tbody.innerHTML = '<tr><td colspan="9" class="muted"><i>no weather locations registered</i></td></tr>';
@@ -349,6 +464,17 @@ async function loadScenarios() {
   el.innerHTML = list.length
     ? list.map(renderScenario).join('')
     : '<i>no scenarios registered</i>';
+
+  const active = list.find(s => s.current_stage !== null && s.current_stage !== undefined);
+  const indicator = document.getElementById('scenario-indicator');
+  if (active) {
+    const stageName = active.stages[active.current_stage] || '?';
+    indicator.textContent = `${active.name} · ${stageName} (${active.current_stage + 1}/${active.stages.length})`;
+    indicator.classList.remove('muted');
+  } else {
+    indicator.textContent = '—';
+    indicator.classList.add('muted');
+  }
 }
 
 async function scenarioAction(name, action) {
@@ -356,24 +482,13 @@ async function scenarioAction(name, action) {
   loadScenarios();
 }
 
-// Connection heartbeat — both WebSockets must be open for the
-// status pill to read "live". Either dropping flips it to offline
-// + red, so a dead server is visible at a glance.
-const wsState = { trades: false, book: false };
-function updateStatus() {
-  const el = document.getElementById('status');
-  const live = wsState.trades && wsState.book;
-  el.textContent = live ? 'live' : 'offline';
-  el.classList.toggle('live', live);
-  el.classList.toggle('offline', !live);
-}
-
 function openTradesWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-trades`);
-  ws.onopen = () => { wsState.trades = true; updateStatus(); };
+  ws.onopen = () => setPill('pill-trades', 'ok', 'trades');
   ws.onmessage = (e) => {
     const t = JSON.parse(e.data);
+    recordTrade(t);
     const tbody = document.getElementById('trades');
     const row = document.createElement('tr');
     const area = t.buy_area === t.sell_area
@@ -387,8 +502,7 @@ function openTradesWs() {
     while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
   };
   ws.onclose = () => {
-    wsState.trades = false;
-    updateStatus();
+    setPill('pill-trades', 'down', 'trades');
     setTimeout(openTradesWs, 1000);
   };
 }
@@ -457,7 +571,7 @@ function rerenderBook() {
 function openBookWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-book`);
-  ws.onopen = () => { wsState.book = true; updateStatus(); };
+  ws.onopen = () => setPill('pill-book', 'ok', 'book');
   ws.onmessage = (e) => {
     const r = JSON.parse(e.data);
     const qty = parseFloat(r.quantity || '0');
@@ -475,8 +589,7 @@ function openBookWs() {
     bookDirty = true;
   };
   ws.onclose = () => {
-    wsState.book = false;
-    updateStatus();
+    setPill('pill-book', 'down', 'book');
     setTimeout(openBookWs, 1000);
   };
 }
@@ -491,10 +604,18 @@ setInterval(() => {
 }, 200);
 
 (async () => {
+  tickClock();
+  renderSparkbars();
+  setPill('pill-trades', 'down', 'trades');
+  setPill('pill-book', 'down', 'book');
+  setPill('pill-weather', 'down', 'weather');
   await Promise.all([loadInfo(), loadGridpools(), loadScenarios(), loadWeather()]);
   setInterval(loadGridpools, 5000);
   setInterval(loadScenarios, 2000);
   setInterval(loadWeather, 10000);
+  setInterval(tickClock, 1000);
+  setInterval(rotateSparkBuckets, SPARK_BUCKET_MS);
+  setInterval(renderSparkbars, 1000);
   openTradesWs();
   openBookWs();
 })();
