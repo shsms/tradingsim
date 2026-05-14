@@ -84,7 +84,19 @@ async fn main() {
     };
 
     let mut markets = MarketRegistry::new();
-    markets.insert(MarketRules::de_lu());
+    let lisp_market_rules = lisp_config
+        .as_ref()
+        .map(|c| c.market_rules())
+        .unwrap_or_default();
+    if !lisp_market_rules.is_empty() {
+        log::info!("Registering {} market(s) from config.lisp", lisp_market_rules.len());
+        for rules in lisp_market_rules {
+            markets.insert(rules);
+        }
+    } else {
+        log::info!("No markets in lisp config — registering default DE-LU");
+        markets.insert(MarketRules::de_lu());
+    }
     let area = Area::eic("10Y1001A1001A82H");
     let mut world = World::new(markets);
 

@@ -109,12 +109,24 @@ pub struct MarketRules {
 
 impl MarketRules {
     pub fn de_lu() -> Self {
+        Self::for_area(Area::eic("10Y1001A1001A82H"), Currency::Eur)
+    }
+
+    /// Generic constructor — same defaults across EU bidding zones:
+    /// 0.01 EUR/MWh tick, 0.1 MW step, all four delivery durations
+    /// (5 / 15 / 30 / 60 min) admissible.
+    pub fn for_area(area: Area, currency: Currency) -> Self {
         Self {
-            area: Area::eic("10Y1001A1001A82H"),
-            currency: Currency::Eur,
+            area,
+            currency,
             price_tick: DEFAULT_PRICE_TICK,
             qty_step: DEFAULT_QTY_STEP,
-            durations: vec![DeliveryDuration::DeliveryDuration60],
+            durations: vec![
+                DeliveryDuration::DeliveryDuration60,
+                DeliveryDuration::DeliveryDuration30,
+                DeliveryDuration::DeliveryDuration15,
+                DeliveryDuration::DeliveryDuration5,
+            ],
         }
     }
 
@@ -218,6 +230,6 @@ mod tests {
         assert_eq!(got.currency, Currency::Eur);
         assert_eq!(got.price_tick, dec!(0.01));
         assert!(got.allows(DeliveryDuration::DeliveryDuration60));
-        assert!(!got.allows(DeliveryDuration::DeliveryDuration15));
+        assert!(got.allows(DeliveryDuration::DeliveryDuration15));
     }
 }

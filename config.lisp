@@ -11,6 +11,13 @@
 (set-socket-addr "[::1]:8810")
 (set-physics-tick-ms 100)
 
+;; Markets — one per delivery area, all four durations (5/15/30/60)
+;; admissible by default. Add more (%make-market …) entries for FR /
+;; AT / NL / BE if you want multi-area gridpools.
+(%make-market
+ :area "10Y1001A1001A82H"
+ :currency "eur")
+
 ;; One gridpool trading in DE-LU.
 (%make-gridpool
  :id 1

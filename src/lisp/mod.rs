@@ -22,7 +22,7 @@ use rust_decimal::Decimal;
 use tulisp::{AsPlist, Error, Plist, SharedMut, TulispContext};
 
 use crate::sim::counterparty::{MarketMakerConfig, SharedConfig};
-use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod};
+use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod, MarketRules};
 
 /// Top-level identity + transport settings, set via lisp defuns.
 #[derive(Clone, Debug)]
@@ -62,6 +62,14 @@ pub struct GridpoolSpec {
     pub area_codes: Vec<String>,
 }
 
+/// One market from `(%make-market …)`. The binary builds a
+/// `MarketRules` from this and registers it.
+#[derive(Clone, Debug)]
+pub struct MarketSpec {
+    pub area_code: String,
+    pub currency: Currency,
+}
+
 #[derive(Clone)]
 pub struct Config {
     #[allow(dead_code)]
@@ -70,6 +78,7 @@ pub struct Config {
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
+    markets: Arc<Mutex<Vec<MarketSpec>>>,
     /// tulisp-async timer queue. The binary calls `spawn_timer_loop`
     /// to drain it on a tokio interval; without that, `(every …)` /
     /// `(run-with-timer …)` registrations from config.lisp would
@@ -90,6 +99,7 @@ impl Config {
         let metadata = Arc::new(RwLock::new(Metadata::default()));
         let market_makers = Arc::new(Mutex::new(HashMap::new()));
         let gridpools = Arc::new(Mutex::new(Vec::new()));
+        let markets = Arc::new(Mutex::new(Vec::new()));
         let anchor = Utc::now();
 
         let load_dir: PathBuf = match Path::new(filename).parent() {
@@ -104,6 +114,7 @@ impl Config {
             metadata.clone(),
             market_makers.clone(),
             gridpools.clone(),
+            markets.clone(),
             anchor,
         );
 
@@ -127,6 +138,7 @@ impl Config {
             metadata,
             market_makers,
             gridpools,
+            markets,
             timer_handle,
             anchor,
         })
@@ -169,6 +181,19 @@ impl Config {
         self.gridpools.lock().clone()
     }
 
+    pub fn markets(&self) -> Vec<MarketSpec> {
+        self.markets.lock().clone()
+    }
+
+    /// Resolve `markets()` into proper MarketRules. Currencies default
+    /// to EUR for any area that wasn't explicitly configured.
+    pub fn market_rules(&self) -> Vec<MarketRules> {
+        self.markets()
+            .into_iter()
+            .map(|m| MarketRules::for_area(Area::eic(&m.area_code), m.currency))
+            .collect()
+    }
+
     pub fn anchor(&self) -> DateTime<Utc> {
         self.anchor
     }
@@ -179,12 +204,51 @@ fn register_runtime(
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
+    markets: Arc<Mutex<Vec<MarketSpec>>>,
     anchor: DateTime<Utc>,
 ) {
     add_log_functions(ctx);
     register_metadata(ctx, metadata);
+    register_markets(ctx, markets);
     register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
+}
+
+AsPlist! {
+    pub struct MakeMarketArgs {
+        area<":area">: String,
+        /// Currency code: "eur" (default), "usd", "gbp", "chf".
+        currency<":currency">: Option<String> {= None},
+    }
+}
+
+fn register_markets(
+    ctx: &mut TulispContext,
+    markets: Arc<Mutex<Vec<MarketSpec>>>,
+) {
+    ctx.defun(
+        "%make-market",
+        move |args: Plist<MakeMarketArgs>| -> Result<String, Error> {
+            let a = args.into_inner();
+            let currency = match a.currency.as_deref().unwrap_or("eur").to_lowercase().as_str() {
+                "eur" => Currency::Eur,
+                "usd" => Currency::Usd,
+                "gbp" => Currency::Gbp,
+                "chf" => Currency::Chf,
+                other => {
+                    return Err(Error::os_error(format!(
+                        "make-market: unsupported currency {other:?}"
+                    )));
+                }
+            };
+            let spec = MarketSpec {
+                area_code: a.area.clone(),
+                currency,
+            };
+            markets.lock().push(spec);
+            Ok(a.area)
+        },
+    );
 }
 
 AsPlist! {
