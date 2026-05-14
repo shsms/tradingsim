@@ -14,3 +14,4 @@ mod pb {
 
 pub use pb::frequenz::api::common::v1alpha8 as common;
 pub use pb::frequenz::api::electricity_trading::electricity_trading::v1 as trading;
+pub use pb::frequenz::api::weather::v1 as weather;

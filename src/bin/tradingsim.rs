@@ -335,6 +335,30 @@ async fn main() {
         });
     }
 
+    // Weather forecast service: exposes the sim's internal weather
+    // state via the Frequenz weather API. Sibling port to the
+    // electricity-trading gRPC. Only spawned when a lisp config is
+    // present (the weather state lives there).
+    if let Some(c) = lisp_config_arc.as_ref() {
+        use tradingsim::proto::weather::weather_forecast_service_server::WeatherForecastServiceServer;
+        use tradingsim::weather_server::WeatherForecastServer;
+        let weather_handle = c.weather();
+        let weather_addr: std::net::SocketAddr = "[::1]:8812".parse().unwrap();
+        tokio::spawn(async move {
+            let service = WeatherForecastServiceServer::new(WeatherForecastServer::new(
+                weather_handle,
+            ));
+            log::info!("WeatherForecast gRPC server listening on {weather_addr}");
+            if let Err(e) = Server::builder()
+                .add_service(service)
+                .serve(weather_addr)
+                .await
+            {
+                log::error!("Weather server exited: {e}");
+            }
+        });
+    }
+
     let service =
         ElectricityTradingServiceServer::new(ElectricityTradingServer::new(Arc::clone(&world)));
 

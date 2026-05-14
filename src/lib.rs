@@ -5,3 +5,4 @@ pub mod scenarios;
 pub mod server;
 pub mod sim;
 pub mod ui;
+pub mod weather_server;

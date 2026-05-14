@@ -1,3 +1,6 @@
 [submodule "submodules/frequenz-api-electricity-trading"]
 	path = submodules/frequenz-api-electricity-trading
 	url = https://github.com/frequenz-floss/frequenz-api-electricity-trading
+[submodule "submodules/frequenz-api-weather"]
+	path = submodules/frequenz-api-weather
+	url = https://github.com/frequenz-floss/frequenz-api-weather
