@@ -77,6 +77,43 @@
  :noise 0.10
  :seed 4)
 
+;; --- Aggressors ------------------------------------------------------------
+;;
+;; External counterparties that cross the MM's spread each fire,
+;; generating public trades. side-bias 0.5 = balanced; > 0.5 leans
+;; buy (lifts prices when paired with MM follow-last-trade);
+;; < 0.5 leans sell.
+
+(%make-aggressor
+ :name "ag-q0"
+ :area "10Y1001A1001A82H"
+ :quarter-offset 0
+ :rate-ms 1000
+ :size 0.2
+ :side-bias 0.5
+ :seed 101)
+
+(%make-aggressor
+ :name "ag-q1"
+ :area "10Y1001A1001A82H"
+ :quarter-offset 1
+ :rate-ms 1500
+ :size 0.2
+ :side-bias 0.55
+ :seed 102)
+
+;; --- Reference drift -------------------------------------------------------
+;;
+;; Tie the MM's reference to the last public trade so prices migrate
+;; with activity. 0.10 = 10% pull toward last trade each refresh —
+;; a gentle exponential moving average. Comment out for a static
+;; reference.
+
+(set-mm-follow-last-trade "de-lu-q0" 0.10)
+(set-mm-follow-last-trade "de-lu-q1" 0.10)
+(set-mm-follow-last-trade "de-lu-q2" 0.10)
+(set-mm-follow-last-trade "de-lu-q3" 0.10)
+
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
 ;; demand shifts the bid up (the MM wants to buy harder); surplus

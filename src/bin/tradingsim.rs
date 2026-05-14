@@ -16,7 +16,7 @@ use tradingsim::{
     lisp::Config as LispConfig,
     proto::trading::electricity_trading_service_server::ElectricityTradingServiceServer,
     server::ElectricityTradingServer,
-    sim::counterparty::{MarketMaker, MarketMakerConfig},
+    sim::counterparty::{Aggressor, MarketMaker, MarketMakerConfig},
     sim::gridpool::Gridpool,
     sim::market::{Area, DeliveryDuration, DeliveryPeriod, MarketRegistry, MarketRules},
     sim::order::GridpoolId,
@@ -43,6 +43,18 @@ fn spawn_mm_task(world: Arc<Mutex<World>>, mut mm: MarketMaker) {
             tick.tick().await;
             let mut w = world.lock().await;
             mm.refresh(&mut w, Utc::now());
+        }
+    });
+}
+
+/// Spawn one tokio task that fires `ag.fire(...)` every `rate`.
+fn spawn_aggressor_task(world: Arc<Mutex<World>>, mut ag: Aggressor, rate: Duration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(rate);
+        loop {
+            tick.tick().await;
+            let mut w = world.lock().await;
+            ag.fire(&mut w, Utc::now());
         }
     });
 }
@@ -192,6 +204,35 @@ async fn main() {
             );
             let mm = MarketMaker::new(cfg, (hour_offset as u64).wrapping_mul(0x9E37_79B9));
             spawn_mm_task(Arc::clone(&world), mm);
+        }
+    }
+
+    // Aggressors — non-gridpool takers that cross the MM's quotes
+    // and generate public trades. Drives observable price activity
+    // on the public trade tape.
+    let aggressor_specs = lisp_config_arc
+        .as_ref()
+        .map(|c| c.aggressors())
+        .unwrap_or_default();
+    if !aggressor_specs.is_empty() {
+        log::info!(
+            "Spawning {} aggressor(s) from config.lisp",
+            aggressor_specs.len()
+        );
+        for spec in aggressor_specs {
+            let rate = Duration::from_millis(spec.rate_ms);
+            let cfg_now = spec.shared_config.read();
+            log::info!(
+                "  {} @ {}: size {} side-bias {:.2} rate {} ms",
+                spec.name,
+                cfg_now.period.start.format("%Y-%m-%dT%H:%M:%SZ"),
+                cfg_now.size,
+                cfg_now.side_bias,
+                spec.rate_ms,
+            );
+            drop(cfg_now);
+            let ag = Aggressor::with_shared_config(spec.shared_config, spec.seed);
+            spawn_aggressor_task(Arc::clone(&world), ag, rate);
         }
     }
 

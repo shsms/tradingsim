@@ -23,7 +23,9 @@ use parking_lot::{Mutex, RwLock};
 use rust_decimal::Decimal;
 use tulisp::{AsPlist, Error, Plist, SharedMut, TulispContext};
 
-use crate::sim::counterparty::{MarketMakerConfig, SharedConfig};
+use crate::sim::counterparty::{
+    AggressorConfig, MarketMakerConfig, SharedAggressorConfig, SharedConfig,
+};
 use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod, MarketRules};
 
 /// Top-level identity + transport settings, set via lisp defuns.
@@ -80,6 +82,17 @@ pub struct CouplingSpec {
     pub area_b: String,
 }
 
+/// One aggressor from `(%make-aggressor …)`. The binary spawns one
+/// tokio task per spec that fires `Aggressor::fire(&mut world)` on
+/// the configured cadence.
+#[derive(Clone)]
+pub struct AggressorSpec {
+    pub name: String,
+    pub shared_config: SharedAggressorConfig,
+    pub seed: u64,
+    pub rate_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct Config {
     #[allow(dead_code)]
@@ -90,6 +103,7 @@ pub struct Config {
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
+    aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     /// Extra paths registered via `(watch-file PATH)`; the notify
     /// watcher reloads on any of them changing in addition to the
     /// top-level config file.
@@ -116,6 +130,7 @@ impl Config {
         let gridpools = Arc::new(Mutex::new(Vec::new()));
         let markets = Arc::new(Mutex::new(Vec::new()));
         let couplings = Arc::new(Mutex::new(Vec::new()));
+        let aggressors = Arc::new(Mutex::new(HashMap::new()));
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
         let anchor = Utc::now();
 
@@ -133,6 +148,7 @@ impl Config {
             gridpools.clone(),
             markets.clone(),
             couplings.clone(),
+            aggressors.clone(),
             extra_watches.clone(),
             load_dir.clone(),
             anchor,
@@ -160,6 +176,7 @@ impl Config {
             gridpools,
             markets,
             couplings,
+            aggressors,
             extra_watches,
             timer_handle,
             anchor,
@@ -299,6 +316,10 @@ impl Config {
         self.couplings.lock().clone()
     }
 
+    pub fn aggressors(&self) -> Vec<AggressorSpec> {
+        self.aggressors.lock().values().cloned().collect()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -320,6 +341,7 @@ fn register_runtime(
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
+    aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
     anchor: DateTime<Utc>,
@@ -330,7 +352,97 @@ fn register_runtime(
     register_couplings(ctx, couplings);
     register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
+    register_aggressors(ctx, aggressors, anchor);
     register_watches(ctx, extra_watches, load_dir);
+}
+
+AsPlist! {
+    pub struct MakeAggressorArgs {
+        name: String,
+        area<":area">: String,
+        quarter_offset<":quarter-offset">: Option<i64> {= None},
+        rate_ms<":rate-ms">: Option<i64> {= None},
+        size<":size">: Option<f64> {= None},
+        side_bias<":side-bias">: Option<f64> {= None},
+        seed<":seed">: Option<i64> {= None},
+    }
+}
+
+fn register_aggressors(
+    ctx: &mut TulispContext,
+    aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
+    anchor: DateTime<Utc>,
+) {
+    let ag = aggressors.clone();
+    ctx.defun(
+        "%make-aggressor",
+        move |args: Plist<MakeAggressorArgs>| -> Result<String, Error> {
+            let a = args.into_inner();
+            let area = Area::eic(&a.area);
+            let period = DeliveryPeriod {
+                start: next_quarter_boundary(anchor)
+                    + chrono::Duration::minutes(15 * a.quarter_offset.unwrap_or(0)),
+                duration: DeliveryDuration::DeliveryDuration15,
+            };
+            let cfg = AggressorConfig {
+                area,
+                period,
+                currency: Currency::Eur,
+                size: a.size.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.2)),
+                side_bias: a.side_bias.unwrap_or(0.5).clamp(0.0, 1.0),
+            };
+            let seed = a.seed.unwrap_or(1) as u64;
+            let rate_ms = a.rate_ms.unwrap_or(1000).max(50) as u64;
+            let mut map = ag.lock();
+            if let Some(existing) = map.get(&a.name) {
+                // Hot-reload: keep the SharedConfig handle alive so
+                // the running task picks up new size / side-bias on
+                // its next fire. rate_ms is task-time only — needs
+                // a process restart to change.
+                let mut w = existing.shared_config.write();
+                *w = cfg;
+            } else {
+                map.insert(
+                    a.name.clone(),
+                    AggressorSpec {
+                        name: a.name.clone(),
+                        shared_config: Arc::new(RwLock::new(cfg)),
+                        seed,
+                        rate_ms,
+                    },
+                );
+            }
+            Ok(a.name)
+        },
+    );
+
+    // Runtime setters for the size + side-bias knobs.
+    let ag2 = aggressors.clone();
+    ctx.defun(
+        "set-aggressor-size",
+        move |name: String, value: f64| -> Result<bool, Error> {
+            match ag2.lock().get(&name) {
+                Some(spec) => {
+                    spec.shared_config.write().size = f64_to_dec(value);
+                    Ok(true)
+                }
+                None => Err(Error::os_error(format!("unknown aggressor {name:?}"))),
+            }
+        },
+    );
+    let ag3 = aggressors;
+    ctx.defun(
+        "set-aggressor-side-bias",
+        move |name: String, value: f64| -> Result<bool, Error> {
+            match ag3.lock().get(&name) {
+                Some(spec) => {
+                    spec.shared_config.write().side_bias = value.clamp(0.0, 1.0);
+                    Ok(true)
+                }
+                None => Err(Error::os_error(format!("unknown aggressor {name:?}"))),
+            }
+        },
+    );
 }
 
 fn register_watches(
@@ -502,6 +614,7 @@ fn register_market_makers(
                 surplus: a.surplus.map(f64_to_dec).unwrap_or(Decimal::ZERO),
                 price_noise: a.noise.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.10)),
                 tick: f64_to_dec(0.01),
+                follow_last_trade: Decimal::ZERO,
             };
             // demand/surplus are already in cfg; nothing else to set.
             let _ = &mut cfg;
@@ -570,8 +683,12 @@ fn register_market_makers(
     mk_setter(ctx, "set-mm-surplus", market_makers.clone(), |c, v| {
         c.surplus = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-noise", market_makers, |c, v| {
+    mk_setter(ctx, "set-mm-noise", market_makers.clone(), |c, v| {
         c.price_noise = f64_to_dec(v);
+    });
+    mk_setter(ctx, "set-mm-follow-last-trade", market_makers, |c, v| {
+        // 0.0 = static; 1.0 = snap to last trade each refresh.
+        c.follow_last_trade = f64_to_dec(v.clamp(0.0, 1.0));
     });
 }
 
