@@ -99,10 +99,12 @@ go through the same helper as every MM setter.
 =style.css=, =app.js=. =rust-embed= already supports multiple
 files. Editing each becomes pleasant.
 
-*** TODO Unify the three UI area lists
-=DE_AREAS=, =CHART_AREAS=, =ALL_FILTER_AREAS= are three
-overlapping definitions of the same set with slightly different
-fields. One source-of-truth array with =.filter()= for views.
+*** DONE Unify the three UI area lists
+Single =ALL_AREAS= array now holds every configured zone with
+=code=, =tag=, =group=, =color=. =DE_AREAS= and =CHART_AREAS=
+derive via =.filter()=; =ALL_FILTER_AREAS= is an alias for callers
+that already use that name. Removing duplicated zone definitions
+also means adding a new area only requires touching one place.
 
 ** P2 — Architecture observations worth discussing
 

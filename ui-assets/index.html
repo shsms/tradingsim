@@ -903,12 +903,23 @@ async function loadInfo() {
 // will surface the international areas.
 const SPARK_BUCKET_MS = 5000;
 const SPARK_BUCKETS = 12;
-const DE_AREAS = [
-  { code: '10YDE-EON------1', tag: 'TN' },
-  { code: '10YDE-RWENET---I', tag: 'AM' },
-  { code: '10YDE-VE-------2', tag: 'HZ' },
-  { code: '10YDE-ENBW-----N', tag: 'BW' },
+
+// Single source of truth for all configured delivery zones. Each
+// entry carries every field any subsystem cares about; the spark
+// bars / chart / filter chips all derive their views via .filter().
+// Keep the four control zones first so the home market sits on the
+// left in every list.
+const ALL_AREAS = [
+  { code: '10YDE-EON------1', tag: 'TN', group: 'de',   color: '#58a6ff' },
+  { code: '10YDE-RWENET---I', tag: 'AM', group: 'de',   color: '#a371f7' },
+  { code: '10YDE-VE-------2', tag: 'HZ', group: 'de',   color: '#9ee493' },
+  { code: '10YDE-ENBW-----N', tag: 'BW', group: 'de',   color: '#e1af6c' },
+  { code: '10YFR-RTE------C', tag: 'FR', group: 'intl', color: null },
+  { code: '10YNL----------L', tag: 'NL', group: 'intl', color: null },
+  { code: '10YBE----------2', tag: 'BE', group: 'intl', color: null },
+  { code: '10YAT-APG------L', tag: 'AT', group: 'intl', color: null },
 ];
+const DE_AREAS = ALL_AREAS.filter(a => a.group === 'de');
 const sparkState = new Map();
 for (const a of DE_AREAS) sparkState.set(a.code, new Array(SPARK_BUCKETS).fill(0));
 
@@ -992,12 +1003,10 @@ function initDensity() {
 const PERIOD_STEP_MS = 15 * 60 * 1000;
 const MAX_WINDOW_MS = 4 * 60 * 60 * 1000;
 let chartWindowMs = 30 * 60 * 1000;
-const CHART_AREAS = [
-  { code: '10YDE-EON------1', tag: 'TN', color: '#58a6ff' },
-  { code: '10YDE-RWENET---I', tag: 'AM', color: '#a371f7' },
-  { code: '10YDE-VE-------2', tag: 'HZ', color: '#9ee493' },
-  { code: '10YDE-ENBW-----N', tag: 'BW', color: '#e1af6c' },
-];
+// Chart plots only the colored areas (the four control zones).
+// Intl areas don't get a chart line — they show up in trades and
+// the order book but not the per-area price tape.
+const CHART_AREAS = ALL_AREAS.filter(a => a.color);
 const priceSeries = new Map();
 for (const a of CHART_AREAS) priceSeries.set(a.code, []);
 
@@ -1503,16 +1512,10 @@ function openTradesWs() {
 const bookState = new Map();
 let bookDirty = false;
 
-const ALL_FILTER_AREAS = [
-  { code: '10YDE-EON------1', tag: 'TN', group: 'de' },
-  { code: '10YDE-RWENET---I', tag: 'AM', group: 'de' },
-  { code: '10YDE-VE-------2', tag: 'HZ', group: 'de' },
-  { code: '10YDE-ENBW-----N', tag: 'BW', group: 'de' },
-  { code: '10YFR-RTE------C', tag: 'FR', group: 'intl' },
-  { code: '10YNL----------L', tag: 'NL', group: 'intl' },
-  { code: '10YBE----------2', tag: 'BE', group: 'intl' },
-  { code: '10YAT-APG------L', tag: 'AT', group: 'intl' },
-];
+// Same array as ALL_AREAS — kept as an alias for the places that
+// already use the longer name to talk about "every chip the filter
+// row knows about".
+const ALL_FILTER_AREAS = ALL_AREAS;
 const AREA_TAGS = Object.fromEntries(ALL_FILTER_AREAS.map(a => [a.code, a.tag]));
 function areaTag(code) {
   return AREA_TAGS[code] || code.slice(0, 4);
