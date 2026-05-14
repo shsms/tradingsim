@@ -66,4 +66,4 @@
 ;; near-term shape so the orderbook looks like a different point in
 ;; the day. See plan.org "Scenarios" for the full design.
 ;;
-;; (load "scenarios/sunny-summer-day.lisp")
+(load "scenarios/sunny-summer-day.lisp")
