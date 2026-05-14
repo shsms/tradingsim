@@ -300,6 +300,24 @@ A handful of canned strategies live in =sim/counterparties.lisp=
 "battery-arb"). User configs can drop them in by name or define their
 own.
 
+*** Demand / surplus tilt
+
+The market-maker exposes two scalar knobs that shift quotes
+independently:
+
+- =demand= (EUR/MWh) — adds to the bid. A "demand" scenario procures
+  aggressively, lifting the prevailing price. User sells against the
+  MM clear faster.
+- =surplus= (EUR/MWh) — subtracts from the ask. A "surplus" scenario
+  dumps curtailment, depressing prices. User buys against the MM
+  clear faster.
+
+Both are positive numbers; they affect different sides so they can
+fire together (a scenario where the market is volatile in both
+directions) without zeroing each other out. Lisp-side =(set-mm-demand
+NAME EUR)= / =(set-mm-surplus NAME EUR)= take effect on the next
+refresh tick.
+
 ** Public order book stream semantics
 
 Per the proto:
@@ -599,20 +617,21 @@ scenarios, logs. Same protocol shape switchyard uses
 Clap-derived. Default endpoint =http://[::1]:8810= (gRPC) and
 =http://127.0.0.1:8811= (UI HTTP). Sub-commands:
 
-| Command                                         | RPC / Endpoint                              |
-|-------------------------------------------------|---------------------------------------------|
-| =tsctl info=                                    | =GET /api/info= (sim version, clock)        |
-| =tsctl markets=                                 | =GET /api/markets=                          |
-| =tsctl pools=                                   | =GET /api/gridpools=                        |
-| =tsctl book <area> <period>=                    | =GET /api/book/...=                         |
-| =tsctl trades --area … --period … [--live]=     | =ReceivePublicTradesStream= or list         |
-| =tsctl orders <pool-id> [--state …] [--live]=   | =ReceiveGridpoolOrdersStream= or list       |
-| =tsctl place <pool-id> --side --price --qty …=  | =CreateGridpoolOrder=                       |
-| =tsctl modify <pool-id> <order-id> --price …=   | =UpdateGridpoolOrder=                       |
-| =tsctl cancel <pool-id> <order-id>=             | =CancelGridpoolOrder=                       |
-| =tsctl cancel-all <pool-id>=                    | =CancelAllGridpoolOrders=                   |
-| =tsctl scenario <name> {start,stop,status}=     | =POST /api/scenarios/:name/...=             |
-| =tsctl clock {advance,freeze,resume}=           | =POST /api/clock/...=                       |
+| Command                                              | RPC / Endpoint                              |
+|------------------------------------------------------|---------------------------------------------|
+| =tsctl info=                                         | client-side, no RPC                         |
+| =tsctl markets=                                      | =GET /api/markets= (UI HTTP)                |
+| =tsctl pools=                                        | =GET /api/gridpools= (UI HTTP)              |
+| =tsctl book <area> <period>=                         | =GET /api/book/...= (UI HTTP)               |
+| =tsctl trades --pool N [--side …] [--live]=          | =ListGridpoolTrades= / =Receive…Stream=     |
+| =tsctl public-trades [--buy-area X] [--sell-area X]= | =ReceivePublicTradesStream=                 |
+| =tsctl orders <pool-id> [--state …] [--live]=        | =ListGridpoolOrders= / =Receive…Stream=     |
+| =tsctl place <pool-id> --side --price --qty …=       | =CreateGridpoolOrder=                       |
+| =tsctl modify <pool-id> <order-id> --price …=        | =UpdateGridpoolOrder=                       |
+| =tsctl cancel <pool-id> <order-id>=                  | =CancelGridpoolOrder=                       |
+| =tsctl cancel-all <pool-id>=                         | =CancelAllGridpoolOrders=                   |
+| =tsctl scenario <name> {start,stop,status}=          | =POST /api/scenarios/:name/...= (UI HTTP)   |
+| =tsctl clock {advance,freeze,resume}=                | =POST /api/clock/...= (UI HTTP)             |
 
 Scenario commands go through HTTP (no proto surface), same trick
 switchyard uses for non-gRPC actions.
@@ -758,6 +777,28 @@ Estimated 5–7 commits.
 Estimated 6–8 commits.
 
 ** [X] Phase 4 — gridpools + minimum viable gRPC
+
+** [P] Out-of-order pull: streaming + synthetic liquidity
+
+Brought forward from Phases 5 / 7 / 8 so the v0.1 demo has a live,
+filling market without waiting on the lisp loader:
+
+- Public trade tape on World + =ReceivePublicTradesStream= RPC +
+  =tsctl public-trades= (Phase 8 surface)
+- Per-gridpool trade broadcaster + =ListGridpoolTrades= +
+  =ReceiveGridpoolTradesStream= + =tsctl trades [--live]= (Phase 7)
+- Counterparty (non-gridpool) order origin: =submit_counterparty_order=
+  / =cancel_counterparty_order= on World (Phase 5)
+- =sim::counterparty::MarketMaker= continuous quoting engine with
+  demand/surplus tilt + random-walked reference (Phase 5)
+- Binary spawns one MM per hour-contract for the next 4 hours; lisp
+  config in Phase 5 will replace the hardcoded knobs.
+
+What's NOT yet done from those phases:
+- =UpdateGridpoolOrder= (Phase 6)
+- =ReceivePublicOrderBookStream= (Phase 8)
+- Cross-area / SIDC coupling on public trades (Phase 7)
+- Replay window (=start_time= / =end_time=) on the public trade stream
 - =sim/gridpool.rs=: =Gridpool { id, name, areas, order_index,
   trade_index, broadcast: Sender<…> }=.
 - =sim/streams.rs=: broadcast channels + filter eval.

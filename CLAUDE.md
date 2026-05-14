@@ -19,16 +19,17 @@ build; use this file to figure out how to work in the repo.
 
 ## Layout
 
-Phases 0–4 landed: v0.1 demo (single hard-coded gridpool, LIMIT
-orders only) speaks the gRPC API end-to-end. Lisp config + execution
-options + multi-area still to come.
+Phases 0–4 landed; partial Phase 5/7/8 work pulled forward so the
+v0.1 demo has a live filling market. Update RPC + lisp loader still
+to come.
 
 - `src/lib.rs` — module roots
 - `src/proto.rs` — tonic include of the generated proto
 - `src/proto_conv.rs` — bidirectional sim ↔ proto bridges
 - `src/server.rs` — `ElectricityTradingServer` (impls all 11 RPCs;
-  Create/Get/Cancel/CancelAll/List/ReceiveOrdersStream wired; the
-  rest return Unimplemented with phase-number hints)
+  Create / Get / Cancel / CancelAll / List / Receive…OrdersStream /
+  ListTrades / Receive…TradesStream / ReceivePublicTradesStream
+  wired; Update + ReceivePublicOrderBookStream still unimplemented)
 - `src/sim/decimal.rs` — `snap_to_tick`, `is_multiple_of`, defaults
 - `src/sim/market.rs` — `Area`, `Currency`, `MarketRules`,
   `MarketRegistry`, `DeliveryDuration/Period`
@@ -39,15 +40,19 @@ options + multi-area still to come.
 - `src/sim/matching.rs` — `match_limit` continuous matcher +
   proptest invariants
 - `src/sim/gridpool.rs` — `Gridpool` per-portfolio order/trade index
-- `src/sim/world.rs` — owns markets, gridpools, books, broadcasters,
-  id sources; `submit_order`, `cancel_order` are the admit/cancel
-  pipelines
-- `src/bin/tradingsim.rs` — serves the gRPC API on `[::1]:8810` with
-  one hard-coded DE-LU gridpool (id 1)
+- `src/sim/world.rs` — owns markets, gridpools, books, broadcasters
+  (orders + per-gridpool trades + public trades), id sources;
+  `submit_order` / `cancel_order` for gridpool flow and
+  `submit_counterparty_order` / `cancel_counterparty_order` for
+  synthetic liquidity
+- `src/sim/counterparty.rs` — `MarketMaker` engine: random-walked
+  reference, configurable spread + size + demand/surplus tilt
+- `src/bin/tradingsim.rs` — serves the gRPC API on `[::1]:8810`;
+  spawns one MarketMaker per hour-contract for the next 4 hours
 - `src/bin/tsctl.rs` — info / place / get / cancel / cancel-all /
-  orders [--live]
+  orders [--live] / trades [--live] / public-trades
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
-  service (random port, fresh world per test)
+  service
 
 Target layout in plan.org §Architecture overview.
 
