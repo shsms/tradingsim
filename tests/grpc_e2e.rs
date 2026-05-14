@@ -14,10 +14,11 @@ use tradingsim::proto::common::market::{Power, Price, price::Currency as PrCurre
 use tradingsim::proto::common::types::Decimal as PrDecimal;
 use tradingsim::proto::trading::{
     CancelGridpoolOrderRequest, CreateGridpoolOrderRequest, GetGridpoolOrderRequest,
-    GridpoolOrderFilter, ListGridpoolOrdersRequest, MarketSide, Order, OrderState, OrderType,
-    ReceiveGridpoolOrdersStreamRequest,
+    GridpoolOrderFilter, ListGridpoolOrdersRequest, MarketSide, Order, OrderExecutionOption,
+    OrderState, OrderType, ReceiveGridpoolOrdersStreamRequest, UpdateGridpoolOrderRequest,
     electricity_trading_service_client::ElectricityTradingServiceClient,
     electricity_trading_service_server::ElectricityTradingServiceServer,
+    update_gridpool_order_request::UpdateOrder,
 };
 use tradingsim::server::ElectricityTradingServer;
 use tradingsim::sim::gridpool::Gridpool;
@@ -267,6 +268,93 @@ async fn validation_rejection_returns_invalid_argument() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn modify_crosses_spread_after_price_bump() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+
+    // Resting sell @ 85.
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Sell, "85.00", "1.0")),
+        })
+        .await
+        .unwrap();
+
+    // Buy @ 84 (below the ask) — should rest, not fill.
+    let placed = client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Buy, "84.00", "1.0")),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let buy_id = placed.order_detail.unwrap().order_id;
+
+    // Modify to 86 — now crosses the resting sell.
+    let after = client
+        .update_gridpool_order(UpdateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order_id: buy_id,
+            update_mask: None,
+            update_order_fields: Some(UpdateOrder {
+                price: Some(price("86.00")),
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let detail = after.order_detail.unwrap();
+    assert_eq!(
+        detail.state_detail.as_ref().unwrap().state,
+        OrderState::Filled as i32
+    );
+}
+
+#[tokio::test]
+async fn fok_insufficient_depth_cancels_no_fills() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr).await.unwrap();
+
+    // Resting sell @ 85, 0.5 MW.
+    client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(limit_order(MarketSide::Sell, "85.00", "0.5")),
+        })
+        .await
+        .unwrap();
+
+    // FOK buy @ 85 for 1.0 MW: needs full depth, has 0.5 → kill.
+    let fok_order = Order {
+        execution_option: Some(OrderExecutionOption::Fok as i32),
+        ..limit_order(MarketSide::Buy, "85.00", "1.0")
+    };
+    let resp = client
+        .create_gridpool_order(CreateGridpoolOrderRequest {
+            gridpool_id: 1,
+            order: Some(fok_order),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let detail = resp.order_detail.unwrap();
+    assert_eq!(
+        detail.state_detail.as_ref().unwrap().state,
+        OrderState::Canceled as i32
+    );
+    // 0 filled — FOK never partials.
+    let filled = detail
+        .filled_quantity
+        .as_ref()
+        .and_then(|p| p.mw.as_ref())
+        .map(|d| d.value.clone());
+    assert_eq!(filled.unwrap(), "0");
 }
 
 #[tokio::test]
