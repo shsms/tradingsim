@@ -90,11 +90,9 @@ h1 {
 /* Scenarios + chart panels share a stable min-height so the
    panel doesn't jump between idle (picker only) and active
    (timeline + controls) states. Sized to fit the 9-stage
-   summer scenario comfortably. */
+   summer scenario comfortably; idle picker content sits at the
+   top of the box. */
 .panel-scenarios, .panel-chart { min-height: 280px; }
-.panel-scenarios { display: flex; flex-direction: column; }
-.panel-scenarios > #scenarios { flex: 1; display: flex; flex-direction: column; }
-.panel-scenarios > #scenarios > * { flex: 1; }
 
 .panel {
   background: var(--panel);
