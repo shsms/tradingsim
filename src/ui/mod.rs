@@ -233,7 +233,15 @@ async fn handle_book_ws(mut socket: WebSocket, s: UiState) {
 
     let mut stream = BroadcastStream::new(rx);
     while let Some(item) = stream.next().await {
-        let Ok(r) = item else { continue };
+        let r = match item {
+            Ok(r) => r,
+            // Lagged means we missed events. Close the socket so the
+            // browser reconnects and gets a fresh snapshot instead
+            // of accumulating ghost orders for the deletes it never
+            // saw. The browser's openBookWs() already retries on
+            // close.
+            Err(_) => break,
+        };
         let payload = book_record_to_json(&r);
         if let Ok(s) = serde_json::to_string(&payload)
             && socket.send(Message::Text(s.into())).await.is_err()

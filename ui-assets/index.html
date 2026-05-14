@@ -1411,7 +1411,16 @@ function rerenderBook() {
 function openBookWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-book`);
-  ws.onopen = () => setPill('pill-book', 'ok', 'book');
+  ws.onopen = () => {
+    // Wipe any state from the previous connection — the server
+    // re-emits a full snapshot on every connect, so anything we
+    // already had is either reflected in that snapshot or has
+    // since been cancelled. Without this clear, ghost orders left
+    // over from a Lagged disconnect would accumulate.
+    bookState.clear();
+    bookDirty = true;
+    setPill('pill-book', 'ok', 'book');
+  };
   ws.onmessage = (e) => {
     const r = JSON.parse(e.data);
     const qty = parseFloat(r.quantity || '0');

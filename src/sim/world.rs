@@ -39,7 +39,7 @@ const ORDER_BROADCAST_CAPACITY: usize = 256;
 /// the same capacity. PublicTrade events are emitted globally (one
 /// per fill); Trade events are per-gridpool (two per fill, one per
 /// side of the match).
-const TRADE_BROADCAST_CAPACITY: usize = 512;
+const TRADE_BROADCAST_CAPACITY: usize = 8192;
 
 /// (delivery area, delivery period) — the identity of a contract.
 /// Cheap to clone; the area code is short and the period is `Copy`.
