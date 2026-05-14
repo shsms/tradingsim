@@ -7,4 +7,5 @@ pub mod market;
 pub mod matching;
 pub mod order;
 pub mod trade;
+pub mod weather;
 pub mod world;
