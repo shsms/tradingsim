@@ -806,6 +806,12 @@ Done:
 Still deferred:
 - `(watch-file …)` + notify-rs for hot reload.
 
+** Scope adjustment (per user, 2026-05-14)
+- LIMIT orders only; ICEBERG / STOP_LIMIT / BLOCK / BALANCE / PRE /
+  PRIVATE move to nice-to-have.
+- 15-minute delivery duration only; 5/30/60-min reject.
+- Phases 7, 8, 9, 10, and hot reload are in-scope; the rest waits.
+
 ** [P] Phase 6 — execution options / Update RPC / valid_until
 
 Done:
@@ -828,17 +834,71 @@ Still deferred to Phase 6:
   public trade).
 - AON proper semantics (resting AON + take-or-leave).
 
-** [P] Phase 7 — multi-area + multi-duration
+** [X] Phase 7 — multi-area + 15-min + SIDC coupling
 
 Done:
-- =MarketRules::for_area= constructor + all four delivery durations
-  (5/15/30/60) admissible by default.
-- `(%make-market …)` lisp defun so additional zones (FR/AT/NL/BE)
-  can be registered without a rebuild.
+- =MarketRules::for_area= constructor. Per the scope adjustment,
+  only 15-minute duration is admitted; 5/30/60-min reject at
+  admit time as UnsupportedDurationForMarket.
+- `(%make-market …)` registers additional zones (FR/AT/NL/BE) at
+  config-time.
+- `(%make-coupling :areas '("A" "B"))` registers symmetric SIDC-
+  style couplings. World::match_limit_across walks coupled-area
+  books in global price-time priority; PublicTrade emits
+  distinct buy_area / sell_area on cross-area matches. Capacity
+  is infinite for now — a later commit can add per-direction MW
+  caps.
 
-Still deferred:
-- Cross-area (SIDC) coupled matches — public trades with
-  buy_delivery_area ≠ sell_delivery_area.
+** [X] Phase 8 — public order book stream + history replay
+
+Done:
+- =ReceivePublicOrderBookStream= wired. World emits a
+  proto-shaped PublicOrderBookRecord on every resting-order state
+  change (add / update / delete = qty-zero). create_time / update_time
+  tracked across calls.
+- In-memory replay rings (HISTORY_CAP = 10k) for both the
+  PublicTrade tape and the PublicOrderBookRecord stream. Stream
+  handlers snapshot under the world lock, replay matching
+  entries since `start_time`, then forward the live broadcast.
+- =tsctl public-book [--area X] [--side buy|sell]= subscribes.
+
+** [X] Phase 9 — minimum-viable UI
+
+axum-driven SPA on 127.0.0.1:8811 with:
+  - =/= embedded single-page HTML (ui-assets/index.html)
+  - =/api/info= + =/api/gridpools= JSON endpoints
+  - =/ws/public-trades= + =/ws/public-book= WebSockets
+Plain monospace dark theme. Vanilla JS — no framework, no
+charting library. Spawned alongside the gRPC server.
+
+The fuller plan.org §UI shape (book ladder per period, gridpool
+detail page, scenarios control, REPL) is deferred.
+
+** [X] Phase 10 — scenarios library
+
+sim/scenarios.lisp ships three canned scenarios on top of
+`(every …)`:
+  - scenario-morning-ramp-start MM-NAME (demand 0 → 0.40 EUR over 60s)
+  - scenario-gate-crunch-start  MM-NAME (spread widens, size shrinks)
+  - scenario-curtailment-start  MM-NAME (surplus = 5.0 EUR steady)
+Each has a matching -stop function. No new Rust framework — the
+existing (every) primitive + (set-mm-*) defuns do the work.
+config.lisp loads scenarios.lisp; activation lines are commented
+out so a default boot is calm.
+
+** [X] Hot reload
+
+Config::spawn_file_watcher starts a notify-rs watcher on
+config.lisp + every path added via `(watch-file PATH)`. On a
+debounced modify (150ms), Config::reload re-evaluates the file
+against the existing TulispContext.
+
+The file is expected to call =(reset-state)= at the top
+(defined in sim/common.lisp): cancels every timer registered
+via `(every …)` so the new load starts clean. (%make-market-maker)
+is update-or-insert by name — existing SharedConfigs are mutated
+in place so the running MM tasks pick up new knobs on their next
+refresh, no task respawn needed.
 
 ** [P] Out-of-order pull: streaming + synthetic liquidity
 

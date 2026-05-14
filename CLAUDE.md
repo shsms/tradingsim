@@ -19,9 +19,8 @@ build; use this file to figure out how to work in the repo.
 
 ## Layout
 
-Phases 0–4 landed; partial Phase 5/7/8 work pulled forward so the
-v0.1 demo has a live filling market. Update RPC + lisp loader still
-to come.
+Phases 0–10 + hot reload all functional. Scope per user request:
+LIMIT orders only, 15-min delivery duration only.
 
 - `src/lib.rs` — module roots
 - `src/proto.rs` — tonic include of the generated proto
