@@ -33,17 +33,17 @@ pub struct ForwardCurve {
 
 impl Default for ForwardCurve {
     fn default() -> Self {
-        Self::de_lu_typical()
+        Self::default_for_tests()
     }
 }
 
 impl ForwardCurve {
-    /// The default DE-LU intraday curve. Numbers chosen to match a
-    /// median DE-LU weekday: night ~50, morning peak ~110, midday
+    /// The default intraday curve. Numbers chosen to match a
+    /// median European intraday weekday: night ~50, morning peak ~110, midday
     /// belly ~25, evening peak ~150 (EUR/MWh). Sensitivity coefs
     /// concentrated in the hours where the respective driver
     /// actually matters (solar 09-16, wind / load overnight).
-    pub fn de_lu_typical() -> Self {
+    pub fn default_for_tests() -> Self {
         // (base_price, solar_coef, wind_coef, load_coef), one row per hour.
         // Row 24 must equal row 0 (cyclic).
         const ROWS: [(f64, f64, f64, f64); 25] = [

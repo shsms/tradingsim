@@ -67,7 +67,7 @@ pub struct MarketMakerConfig {
 }
 
 impl MarketMakerConfig {
-    pub fn de_lu_default(area: Area, period: DeliveryPeriod) -> Self {
+    pub fn default_for(area: Area, period: DeliveryPeriod) -> Self {
         Self {
             area,
             period,
@@ -269,7 +269,7 @@ pub struct AggressorConfig {
 }
 
 impl AggressorConfig {
-    pub fn de_lu_default(area: Area, period: DeliveryPeriod) -> Self {
+    pub fn default_for(area: Area, period: DeliveryPeriod) -> Self {
         Self {
             area,
             period,
@@ -415,12 +415,12 @@ mod tests {
 
     fn setup_world() -> (World, MarketMakerConfig) {
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         let world = World::new(markets);
         let cfg = MarketMakerConfig {
             price_noise: dec!(0), // deterministic
-            ..MarketMakerConfig::de_lu_default(
-                Area::eic("10Y1001A1001A82H"),
+            ..MarketMakerConfig::default_for(
+                Area::eic("10YDE-EON------1"),
                 DeliveryPeriod {
                     start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                     duration: DeliveryDuration::DeliveryDuration15,
@@ -533,7 +533,7 @@ mod tests {
         let ag_cfg = AggressorConfig {
             side_bias: 1.0, // always buy
             size: dec!(0.5),
-            ..AggressorConfig::de_lu_default(mm_cfg.area.clone(), mm_cfg.period)
+            ..AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period)
         };
         let mut ag = Aggressor::new(ag_cfg, 7);
         ag.fire(&mut world, t0());
@@ -592,7 +592,7 @@ mod tests {
             size: dec!(0.5),
             reference_price: dec!(80.00),
             max_slippage: dec!(5.00),
-            ..AggressorConfig::de_lu_default(mm_cfg.area.clone(), mm_cfg.period)
+            ..AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period)
         };
         let mut ag = Aggressor::new(ag_cfg, 0);
         for _ in 0..10 {
@@ -608,7 +608,7 @@ mod tests {
     fn aggressor_skips_empty_book() {
         let (mut world, mm_cfg) = setup_world();
         // No MM refresh — book is empty for this contract.
-        let ag_cfg = AggressorConfig::de_lu_default(mm_cfg.area.clone(), mm_cfg.period);
+        let ag_cfg = AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period);
         let mut ag = Aggressor::new(ag_cfg, 0);
         ag.fire(&mut world, t0());
         // No panic, no trades — graceful no-op.
@@ -728,7 +728,7 @@ mod tests {
     /// Returns (world, mm_cfg) for further setup.
     fn world_with_resting_bid(now: chrono::DateTime<Utc>, bid_price: Decimal) -> World {
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         let mut world = World::new(markets);
         // Spawn a chubby MM whose bid sits where we want it. Push
         // reference well above bid_price so the ask is also far
@@ -739,8 +739,8 @@ mod tests {
             spread: dec!(0.40),
             size: dec!(50.0), // huge so it absorbs many fires
             price_noise: dec!(0),
-            ..MarketMakerConfig::de_lu_default(
-                Area::eic("10Y1001A1001A82H"),
+            ..MarketMakerConfig::default_for(
+                Area::eic("10YDE-EON------1"),
                 DeliveryPeriod {
                     start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                     duration: DeliveryDuration::DeliveryDuration15,
@@ -762,8 +762,8 @@ mod tests {
         let ag_cfg = AggressorConfig {
             side_bias: 0.0, // always sell — crosses the resting bid
             size: dec!(0.5),
-            ..AggressorConfig::de_lu_default(
-                Area::eic("10Y1001A1001A82H"),
+            ..AggressorConfig::default_for(
+                Area::eic("10YDE-EON------1"),
                 DeliveryPeriod {
                     start: gate,
                     duration: DeliveryDuration::DeliveryDuration15,

@@ -3,7 +3,7 @@
 //! scenario tick interpret UTC instants through. The gRPC wire
 //! boundary stays UTC; everything below it reasons in local civil
 //! time so a "13:00 belly" stage actually fires at 13:00 in the
-//! configured zone (Europe/Berlin by default, matching DE-LU).
+//! configured zone (Europe/Berlin by default, matching the configured intraday zones).
 //!
 //! The tz is mutable behind an [`RwLock`] so `config.lisp` can call
 //! `(set-timezone "Europe/Berlin")` to redirect a sim aimed at a
@@ -15,7 +15,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use parking_lot::RwLock;
 
-/// Default zone for the canonical DE-LU sim. CET in winter, CEST in
+/// Default zone for the canonical European intraday sim. CET in winter, CEST in
 /// summer; DST transitions follow the IANA database.
 pub const DEFAULT_TZ: Tz = chrono_tz::Europe::Berlin;
 

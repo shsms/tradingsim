@@ -29,7 +29,6 @@
 ;; --- TSO regions ----------------------------------------------------------
 ;;
 ;; Four German TSO control zones treated as separate delivery areas.
-;; In reality such markets trade them as one DE-LU bidding zone; here we split
 ;; them so per-region liquidity profiles are observable. Volume share
 ;; is roughly TenneT ~40% > Amprion ~30% > 50Hertz ~20% > TransnetBW
 ;; ~10%, and the size tables below track that.

@@ -1529,9 +1529,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use rust_decimal::dec;
 
-    fn de_lu_hour() -> ContractKey {
+    fn test_hour() -> ContractKey {
         ContractKey {
-            area: Area::eic("10Y1001A1001A82H"),
+            area: Area::eic("10YDE-EON------1"),
             period: DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                 duration: DeliveryDuration::DeliveryDuration15,
@@ -1550,7 +1550,7 @@ mod tests {
     #[test]
     fn book_mut_auto_creates_then_persists() {
         let mut w = World::new(MarketRegistry::new());
-        let k = de_lu_hour();
+        let k = test_hour();
         assert!(w.book(&k).is_none());
         w.book_mut(k.clone()).insert(
             Side::Buy,
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn register_and_lookup_gridpool() {
         let mut w = World::new(MarketRegistry::new());
-        let area = Area::eic("10Y1001A1001A82H");
+        let area = Area::eic("10YDE-EON------1");
         w.register_gridpool(Gridpool::new(
             GridpoolId(1),
             "battery-arb",
@@ -1594,9 +1594,9 @@ mod tests {
         // Allow here to keep those tests exercising the matcher
         // mechanics they were written for.
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         let mut w = World::new(markets);
-        let area = Area::eic("10Y1001A1001A82H");
+        let area = Area::eic("10YDE-EON------1");
         w.register_gridpool(
             Gridpool::new(GridpoolId(1), "test", vec![area])
                 .with_self_trade_policy(crate::sim::gridpool::SelfTradePolicy::Allow),
@@ -1606,7 +1606,7 @@ mod tests {
 
     fn sample_buy(qty: Decimal, price: Decimal) -> Order {
         Order {
-            area: Area::eic("10Y1001A1001A82H"),
+            area: Area::eic("10YDE-EON------1"),
             period: DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                 duration: DeliveryDuration::DeliveryDuration15,
@@ -1648,7 +1648,7 @@ mod tests {
         assert_eq!(d.open_quantity, dec!(1.0));
         assert_eq!(d.filled_quantity, dec!(0));
         assert_eq!(w.owner_of(d.id), Some(gp));
-        assert_eq!(w.book(&de_lu_hour()).unwrap().best_bid(), Some(dec!(85.0)));
+        assert_eq!(w.book(&test_hour()).unwrap().best_bid(), Some(dec!(85.0)));
     }
 
     #[test]
@@ -1678,7 +1678,7 @@ mod tests {
         assert_eq!(trades[0].id, trades[1].id);
 
         // Book empty + binding cleared.
-        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+        assert!(w.book(&test_hour()).unwrap().is_empty());
         assert!(w.owner_of(buy.id).is_none());
     }
 
@@ -1981,7 +1981,7 @@ mod tests {
         let post = w.gridpools().get(gp).unwrap().get_order(d.id).unwrap();
         assert_eq!(post.state.state, OrderState::Expired);
         assert_eq!(post.state.actor, MarketActor::System);
-        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+        assert!(w.book(&test_hour()).unwrap().is_empty());
     }
 
     #[test]
@@ -1998,7 +1998,7 @@ mod tests {
             .unwrap();
         // Drain the ADD events.
         while book_rx.try_recv().is_ok() {}
-        assert_eq!(w.book(&de_lu_hour()).unwrap().len(), 2);
+        assert_eq!(w.book(&test_hour()).unwrap().len(), 2);
 
         // Cross past the delivery start — gate is closed.
         let after_gate =
@@ -2007,7 +2007,7 @@ mod tests {
         assert_eq!(n, 2);
 
         // Both rests gone; gridpool order flipped to Expired.
-        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+        assert!(w.book(&test_hour()).unwrap().is_empty());
         let post = w
             .gridpools()
             .get(gp)
@@ -2038,13 +2038,13 @@ mod tests {
     #[test]
     fn cross_area_match_emits_split_public_trade() {
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         markets.insert(MarketRules::for_area(
             Area::eic("10YFR-RTE------C"),
             Currency::Eur,
         ));
         let mut w = World::new(markets);
-        let de = Area::eic("10Y1001A1001A82H");
+        let de = Area::eic("10YDE-EON------1");
         let fr = Area::eic("10YFR-RTE------C");
         w.add_coupling(de.clone(), fr.clone(), std::time::Duration::ZERO, None);
         w.register_gridpool(Gridpool::new(GridpoolId(1), "de", vec![de.clone()]));
@@ -2076,13 +2076,13 @@ mod tests {
         // Same setup as cross_area_match_emits_split_public_trade
         // but the coupling carries a 60-minute gate offset.
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         markets.insert(MarketRules::for_area(
             Area::eic("10YFR-RTE------C"),
             Currency::Eur,
         ));
         let mut w = World::new(markets);
-        let de = Area::eic("10Y1001A1001A82H");
+        let de = Area::eic("10YDE-EON------1");
         let fr = Area::eic("10YFR-RTE------C");
         w.add_coupling(
             de.clone(),
@@ -2127,13 +2127,13 @@ mod tests {
         // After ~0.5 MW has crossed, further DE buys can't reach
         // the FR sell and rest in DE instead.
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         markets.insert(MarketRules::for_area(
             Area::eic("10YFR-RTE------C"),
             Currency::Eur,
         ));
         let mut w = World::new(markets);
-        let de = Area::eic("10Y1001A1001A82H");
+        let de = Area::eic("10YDE-EON------1");
         let fr = Area::eic("10YFR-RTE------C");
         w.add_coupling(
             de.clone(),
@@ -2203,7 +2203,7 @@ mod tests {
         assert_eq!(d.state.reason, StateReason::Reject);
         assert_eq!(d.filled_quantity, dec!(0));
         // Resting 0.5 sell is untouched.
-        assert_eq!(w.book(&de_lu_hour()).unwrap().best_ask(), Some(dec!(85.0)));
+        assert_eq!(w.book(&test_hour()).unwrap().best_ask(), Some(dec!(85.0)));
     }
 
     #[test]
@@ -2234,7 +2234,7 @@ mod tests {
         assert_eq!(d.state.reason, StateReason::PartialExecution);
         assert_eq!(d.filled_quantity, dec!(0.4));
         // No leftover on the book.
-        assert_eq!(w.book(&de_lu_hour()).unwrap().best_bid(), None);
+        assert_eq!(w.book(&test_hour()).unwrap().best_bid(), None);
     }
 
     #[test]
@@ -2247,7 +2247,7 @@ mod tests {
         assert_eq!(cancelled.state.state, OrderState::Canceled);
         assert_eq!(cancelled.state.reason, StateReason::Delete);
         assert!(w.owner_of(d.id).is_none());
-        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+        assert!(w.book(&test_hour()).unwrap().is_empty());
     }
 
     #[test]
@@ -2277,10 +2277,10 @@ mod tests {
     #[test]
     fn match_limit_in_routes_to_right_contract() {
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         let mut w = World::new(markets);
 
-        let k = de_lu_hour();
+        let k = test_hour();
         let id1 = w.next_id();
         w.match_limit_in(
             k.clone(),
@@ -2311,9 +2311,9 @@ mod tests {
 
     fn setup_world_with_reject_pool() -> (World, GridpoolId) {
         let mut markets = MarketRegistry::new();
-        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::default_for_tests());
         let mut w = World::new(markets);
-        let area = Area::eic("10Y1001A1001A82H");
+        let area = Area::eic("10YDE-EON------1");
         w.register_gridpool(
             Gridpool::new(GridpoolId(1), "reject-pool", vec![area])
                 .with_self_trade_policy(SelfTradePolicy::Reject),
@@ -2333,7 +2333,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, SubmitError::SelfTradeRejected);
         // Resting sell still on the book; no trades recorded.
-        assert_eq!(w.book(&de_lu_hour()).unwrap().best_ask(), Some(dec!(85.0)));
+        assert_eq!(w.book(&test_hour()).unwrap().best_ask(), Some(dec!(85.0)));
         assert!(w.gridpools().get(gp).unwrap().trades().is_empty());
     }
 
@@ -2360,7 +2360,7 @@ mod tests {
         // consume only B's level, never touch A's, and therefore
         // not trigger the self-trade reject.
         let (mut w, _gp_a) = setup_world_with_reject_pool();
-        let area = Area::eic("10Y1001A1001A82H");
+        let area = Area::eic("10YDE-EON------1");
         w.register_gridpool(Gridpool::new(GridpoolId(2), "other", vec![area]));
         let gp_a = GridpoolId(1);
         let gp_b = GridpoolId(2);

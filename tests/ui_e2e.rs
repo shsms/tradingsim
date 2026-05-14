@@ -45,7 +45,7 @@ fn populated_weather() -> SharedWeather {
         // Use a distinct lat/lon so upsert allocates a new slot
         // rather than overwriting the default one — gives the
         // /api/weather endpoint two rows to return.
-        let mut loc = WeatherLocation::de_lu_typical();
+        let mut loc = WeatherLocation::default_for_tests();
         loc.name = "tn".into();
         loc.lat = 50.4;
         loc.lon = 11.6;

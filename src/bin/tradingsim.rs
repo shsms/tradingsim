@@ -1,6 +1,5 @@
 //! Headless tradingsim simulator. Loads `config.lisp` if present
 //! (registers the gridpool, builds market-makers, ...); otherwise
-//! falls back to a single hard-coded DE-LU gridpool + four hours of
 //! default-shaped market-maker liquidity so `tsctl place` has
 //! something to trade against on a fresh checkout.
 
@@ -152,10 +151,10 @@ async fn main() {
             markets.insert(rules);
         }
     } else {
-        log::info!("No markets in lisp config — registering default DE-LU");
-        markets.insert(MarketRules::de_lu());
+        log::info!("No markets in lisp config — registering default fallback market");
+        markets.insert(MarketRules::default_for_tests());
     }
-    let area = Area::eic("10Y1001A1001A82H");
+    let area = Area::eic("10YDE-EON------1");
     let mut world = World::new(markets);
 
     // Apply lisp-declared SIDC couplings before any orders flow.
@@ -202,7 +201,7 @@ async fn main() {
             );
         }
     } else {
-        log::info!("No gridpools in lisp config — registering hardcoded gridpool 1 (DE-LU)");
+        log::info!("No gridpools in lisp config — registering hardcoded gridpool 1 (single test area)");
         world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
     }
 
@@ -258,7 +257,7 @@ async fn main() {
                 start,
                 duration: DeliveryDuration::DeliveryDuration15,
             };
-            let cfg = MarketMakerConfig::de_lu_default(area.clone(), period);
+            let cfg = MarketMakerConfig::default_for(area.clone(), period);
             log::info!(
                 "Market-maker quoting {} hour @ ref {} EUR/MWh (spread {})",
                 start.format("%Y-%m-%dT%H:%M:%SZ"),

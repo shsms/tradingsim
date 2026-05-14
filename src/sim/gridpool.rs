@@ -165,7 +165,7 @@ mod tests {
         OrderDetail {
             id: OrderId(id),
             order: Order {
-                area: Area::eic("10Y1001A1001A82H"),
+                area: Area::eic("10YDE-EON------1"),
                 period: DeliveryPeriod {
                     start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                     duration: DeliveryDuration::DeliveryDuration15,
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn record_then_get() {
-        let mut gp = Gridpool::new(GridpoolId(1), "test", vec![Area::eic("10Y1001A1001A82H")]);
+        let mut gp = Gridpool::new(GridpoolId(1), "test", vec![Area::eic("10YDE-EON------1")]);
         assert!(gp.record_order(sample_detail(7, OrderState::Active)));
         assert!(gp.get_order(OrderId(7)).is_some());
         assert!(gp.get_order(OrderId(99)).is_none());
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn allows_area_membership() {
-        let de = Area::eic("10Y1001A1001A82H");
+        let de = Area::eic("10YDE-EON------1");
         let fr = Area::eic("10YFR-RTE------C");
         let gp = Gridpool::new(GridpoolId(1), "test", vec![de.clone()]);
         assert!(gp.allows_area(&de));

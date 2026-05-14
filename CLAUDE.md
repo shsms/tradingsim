@@ -1,10 +1,11 @@
 # tradingsim
 
 Simulator of a continuous intraday electricity exchange, exposing the
-Frequenz Electricity Trading gRPC API. Reference behaviour is 
-SPOT's intraday platform for the DE-LU bidding zone, but every market knob
-is data-driven so the same binary can stand in for FR / AT / NL / BE
-or a synthetic zone.
+Frequenz Electricity Trading gRPC API. Ships configured for the four
+German TSO control zones (TN / AM / HZ / BW) with four neighbouring
+international zones (FR / NL / BE / AT) for cross-border tests, but
+every market knob is data-driven so the same binary can stand in for
+any zone set or a synthetic configuration.
 
 Sibling project to [`../switchyard`](../switchyard); same operating
 model: Rust owns deterministic machinery, tulisp wires + animates the
@@ -54,7 +55,8 @@ LIMIT orders only, 15-min delivery duration only.
   `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`,
   plus tulisp-async's `(run-with-timer …)` + sugar `(every …)`
   from `sim/common.lisp`. `spawn_timer_loop` drives the firing
-- `config.lisp` — sample top-level config (DE-LU + 4 hour-contracts)
+- `config.lisp` — sample top-level config (4 TSO zones + 4 neighbours,
+  cross-border couplings, weather locations, canned scenarios)
 - `src/bin/tradingsim.rs` — loads `config.lisp` if present (registers
   MMs from it); falls back to a 4-hour hardcoded MM set otherwise;
   serves the gRPC API on the configured socket addr

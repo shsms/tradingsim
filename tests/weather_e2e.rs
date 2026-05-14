@@ -45,7 +45,7 @@ async fn spawn_with(setup: impl FnOnce(&mut WeatherRegistry)) -> String {
 
 #[tokio::test]
 async fn live_stream_emits_24_hour_forecast() {
-    let addr = spawn_server(WeatherLocation::de_lu_typical()).await;
+    let addr = spawn_server(WeatherLocation::default_for_tests()).await;
     let mut client = WeatherForecastServiceClient::connect(addr).await.unwrap();
     let mut stream = client
         .receive_live_weather_forecast(ReceiveLiveWeatherForecastRequest {
@@ -75,7 +75,7 @@ async fn live_stream_emits_24_hour_forecast() {
 
 #[tokio::test]
 async fn historical_stream_replays_past_emissions() {
-    let addr = spawn_server(WeatherLocation::de_lu_typical()).await;
+    let addr = spawn_server(WeatherLocation::default_for_tests()).await;
 
     // First subscriber triggers the initial emit which gets pushed
     // onto the server-side history ring.
@@ -116,7 +116,7 @@ async fn forecast_noise_scales_with_horizon() {
         lat: 50.0,
         lon: 10.0,
         cloud_cover: 0.0,
-        ..WeatherLocation::de_lu_typical()
+        ..WeatherLocation::default_for_tests()
     })
     .await;
     let mut client = WeatherForecastServiceClient::connect(addr).await.unwrap();
@@ -177,14 +177,14 @@ async fn cloud_cover_attenuates_solar_feature() {
         lat: 50.0,
         lon: 10.0,
         cloud_cover: 0.0,
-        ..WeatherLocation::de_lu_typical()
+        ..WeatherLocation::default_for_tests()
     };
     let overcast = WeatherLocation {
         name: "test".to_string(),
         lat: 50.0,
         lon: 10.0,
         cloud_cover: 0.9,
-        ..WeatherLocation::de_lu_typical()
+        ..WeatherLocation::default_for_tests()
     };
 
     // Collect the first frame from each and compare solar at the
@@ -256,7 +256,7 @@ async fn scenario_date_pins_day_of_year_in_forecast() {
         lat: 52.5,
         lon: 13.4,
         cloud_cover: 0.0,
-        ..WeatherLocation::de_lu_typical()
+        ..WeatherLocation::default_for_tests()
     };
     let summer_addr = spawn_with(|reg| {
         *reg.default_mut() = mk_state();
@@ -298,7 +298,7 @@ async fn stage_overrides_propagate_to_stream() {
             lon: 13.4,
             cloud_cover: 0.0,
             baseline_cloud_cover: 0.0,
-            ..WeatherLocation::de_lu_typical()
+            ..WeatherLocation::default_for_tests()
         };
         g.active_day_of_year = Some(172);
     }
@@ -337,13 +337,13 @@ async fn forecast_per_registered_location() {
             name: "berlin".into(),
             lat: 52.5,
             lon: 13.4,
-            ..WeatherLocation::de_lu_typical()
+            ..WeatherLocation::default_for_tests()
         };
         reg.upsert(WeatherLocation {
             name: "munich".into(),
             lat: 48.1,
             lon: 11.6,
-            ..WeatherLocation::de_lu_typical()
+            ..WeatherLocation::default_for_tests()
         });
     })
     .await;
@@ -379,13 +379,13 @@ async fn requested_latlon_returns_one_forecast_at_request_point() {
             name: "berlin".into(),
             lat: 52.5,
             lon: 13.4,
-            ..WeatherLocation::de_lu_typical()
+            ..WeatherLocation::default_for_tests()
         };
         reg.upsert(WeatherLocation {
             name: "munich".into(),
             lat: 48.1,
             lon: 11.6,
-            ..WeatherLocation::de_lu_typical()
+            ..WeatherLocation::default_for_tests()
         });
     })
     .await;

@@ -1258,7 +1258,7 @@ mod tests {
             r#"
             (%make-market-maker
               :name "q0"
-              :area "10Y1001A1001A82H"
+              :area "10YDE-EON------1"
               :quarter-offset 0
               :reference 90.00
               :spread 0.50
@@ -1285,7 +1285,7 @@ mod tests {
     async fn set_mm_demand_after_make_takes_effect_on_shared() {
         let f = write_tmp(
             r#"
-            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (%make-market-maker :name "h0" :area "10YDE-EON------1")
             (set-mm-demand "h0" 0.20)
             (set-mm-surplus "h0" 0.05)
             "#,
@@ -1311,7 +1311,7 @@ mod tests {
     async fn make_gridpool_registers_spec() {
         let f = write_tmp(
             r#"
-            (%make-gridpool :id 1 :name "default" :areas '("10Y1001A1001A82H"))
+            (%make-gridpool :id 1 :name "default" :areas '("10YDE-EON------1"))
             (%make-gridpool :id 2 :areas '("10YFR-RTE------C" "10YBE----------2"))
             "#,
         );
@@ -1320,7 +1320,7 @@ mod tests {
         assert_eq!(gps.len(), 2);
         assert_eq!(gps[0].id, 1);
         assert_eq!(gps[0].name, "default");
-        assert_eq!(gps[0].area_codes, vec!["10Y1001A1001A82H"]);
+        assert_eq!(gps[0].area_codes, vec!["10YDE-EON------1"]);
         assert_eq!(gps[1].id, 2);
         assert_eq!(gps[1].name, "gridpool-2");
         assert_eq!(gps[1].area_codes.len(), 2);
@@ -1331,8 +1331,8 @@ mod tests {
         use crate::sim::gridpool::SelfTradePolicy;
         let f = write_tmp(
             r#"
-            (%make-gridpool :id 1 :areas '("10Y1001A1001A82H"))
-            (%make-gridpool :id 2 :areas '("10Y1001A1001A82H")
+            (%make-gridpool :id 1 :areas '("10YDE-EON------1"))
+            (%make-gridpool :id 2 :areas '("10YDE-EON------1")
                             :self-trade-policy "allow")
             "#,
         );
@@ -1348,7 +1348,7 @@ mod tests {
     #[tokio::test]
     async fn make_gridpool_rejects_unknown_self_trade_policy() {
         let f = write_tmp(
-            r#"(%make-gridpool :id 1 :areas '("10Y1001A1001A82H")
+            r#"(%make-gridpool :id 1 :areas '("10YDE-EON------1")
                                 :self-trade-policy "nope")"#,
         );
         let path = f.path().to_str().unwrap().to_string();
@@ -1420,7 +1420,7 @@ mod tests {
         // reversion.
         let f = write_tmp(
             r#"
-            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (%make-market-maker :name "h0" :area "10YDE-EON------1")
             (set-mm-reference "h0" 100.0)
             "#,
         );
@@ -1435,7 +1435,7 @@ mod tests {
     async fn mm_setters_update_each_field() {
         let f = write_tmp(
             r#"
-            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (%make-market-maker :name "h0" :area "10YDE-EON------1")
             (set-mm-spread "h0" 0.80)
             (set-mm-size "h0" 3.5)
             (set-mm-noise "h0" 0.25)
@@ -1455,7 +1455,7 @@ mod tests {
     async fn set_mm_follow_clamps_to_unit_range() {
         let f = write_tmp(
             r#"
-            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (%make-market-maker :name "h0" :area "10YDE-EON------1")
             (set-mm-follow-last-trade "h0" 1.50)
             "#,
         );
@@ -1552,7 +1552,7 @@ mod tests {
         // sim/common.lisp (not loaded in tests).
         let f = write_tmp(
             r#"
-            (%make-market-maker :name "h0" :area "10Y1001A1001A82H")
+            (%make-market-maker :name "h0" :area "10YDE-EON------1")
             (setq counter 0)
             (run-with-timer 0.001 0.001
               (lambda ()

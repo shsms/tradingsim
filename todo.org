@@ -142,7 +142,7 @@ on the proto types via newtype.
 
 *** TODO Generalize =weather.rs= diurnal assumptions
 =temperature_at= hardcodes hour-15 as the daily peak (northern
-hemisphere). Fine for DE-LU; add a hemisphere flag if non-EU zones
+hemisphere). Fine for the four shipped zones; add a hemisphere flag if non-EU zones
 ever land.
 
 * Carried over from plan.org

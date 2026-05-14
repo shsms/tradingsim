@@ -6,7 +6,7 @@
 //!
 //! Backwards compat: the legacy `(set-weather-*)` setters mutate
 //! the registry's default location (index 0); a freshly-constructed
-//! registry pre-populates that default with the DE-LU typical
+//! registry pre-populates the default slot with typical
 //! values so callers that never register an explicit location keep
 //! working.
 
@@ -70,9 +70,9 @@ pub struct WeatherLocation {
 }
 
 impl WeatherLocation {
-    /// Default DE-LU midpoint (~Frankfurt). Light cloud cover,
+    /// Default location (~Frankfurt) (~Frankfurt). Light cloud cover,
     /// westerly wind, 290 K (~17 °C) midpoint.
-    pub fn de_lu_typical() -> Self {
+    pub fn default_for_tests() -> Self {
         Self {
             name: "default".into(),
             lat: 50.1,
@@ -165,7 +165,7 @@ pub struct WeatherRegistry {
 
 impl Default for WeatherRegistry {
     fn default() -> Self {
-        let default_loc = WeatherLocation::de_lu_typical();
+        let default_loc = WeatherLocation::default_for_tests();
         let key = LocationKey::from_latlon(default_loc.lat, default_loc.lon);
         let mut by_key = HashMap::new();
         by_key.insert(key, 0);
@@ -257,7 +257,7 @@ impl WeatherRegistry {
             return loc.clone();
         }
         if self.locations.is_empty() {
-            return WeatherLocation::de_lu_typical();
+            return WeatherLocation::default_for_tests();
         }
         if self.locations.len() == 1 {
             let mut loc = self.locations[0].clone();
@@ -340,7 +340,7 @@ mod tests {
     use super::*;
 
     fn default_loc() -> WeatherLocation {
-        WeatherLocation::de_lu_typical()
+        WeatherLocation::default_for_tests()
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_default_has_de_lu_typical() {
+    fn registry_default_has_default_for_tests() {
         let r = WeatherRegistry::default();
         assert_eq!(r.locations().len(), 1);
         assert_eq!(r.default_location().cloud_cover, 0.30);

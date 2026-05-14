@@ -32,7 +32,7 @@ use tradingsim::sim::world::World;
 
 async fn spawn_server() -> String {
     let mut markets = MarketRegistry::new();
-    markets.insert(MarketRules::de_lu());
+    markets.insert(MarketRules::default_for_tests());
     let mut world = World::new(markets);
     // Several tests cross a buy + sell from the same pool to
     // exercise the matcher / trade streams. The runtime default
@@ -42,7 +42,7 @@ async fn spawn_server() -> String {
         Gridpool::new(
             GridpoolId(1),
             "test",
-            vec![Area::eic("10Y1001A1001A82H")],
+            vec![Area::eic("10YDE-EON------1")],
         )
         .with_self_trade_policy(tradingsim::sim::gridpool::SelfTradePolicy::Allow),
     );
@@ -84,9 +84,9 @@ fn power(amount: &str) -> Power {
     }
 }
 
-fn de_lu() -> DeliveryArea {
+fn default_area() -> DeliveryArea {
     DeliveryArea {
-        code: "10Y1001A1001A82H".into(),
+        code: "10YDE-EON------1".into(),
         code_type: EnergyMarketCodeType::EuropeEic as i32,
     }
 }
@@ -105,7 +105,7 @@ fn hour_at_noon() -> DeliveryPeriod {
 
 fn limit_order(side: MarketSide, p: &str, qty: &str) -> Order {
     Order {
-        delivery_area: Some(de_lu()),
+        delivery_area: Some(default_area()),
         delivery_period: Some(hour_at_noon()),
         r#type: OrderType::Limit as i32,
         side: side as i32,

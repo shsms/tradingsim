@@ -94,7 +94,7 @@ impl DeliveryPeriod {
     }
 }
 
-/// Per-area knobs. Defaults reproduce DE-LU as of 2026: 0.01
+/// Per-area knobs. Defaults are calibrated to typical European intraday markets as of 2026: 0.01
 /// EUR/MWh tick, 0.1 MW step, 60-min only (the wider product mix
 /// arrives in Phase 7).
 #[derive(Clone, Debug)]
@@ -107,8 +107,8 @@ pub struct MarketRules {
 }
 
 impl MarketRules {
-    pub fn de_lu() -> Self {
-        Self::for_area(Area::eic("10Y1001A1001A82H"), Currency::Eur)
+    pub fn default_for_tests() -> Self {
+        Self::for_area(Area::eic("10YDE-EON------1"), Currency::Eur)
     }
 
     /// Generic constructor — same defaults across EU bidding zones:
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn registry_round_trips_rules() {
         let mut reg = MarketRegistry::new();
-        let rules = MarketRules::de_lu();
+        let rules = MarketRules::default_for_tests();
         let area = rules.area.clone();
         reg.insert(rules);
         let got = reg.get(&area).unwrap();

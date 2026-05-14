@@ -21,7 +21,7 @@ simplelog = "0.12.2"
 rand = { version = "0.8.5", features = ["small_rng"] }
 rust_decimal = { version = "1", features = ["serde", "macros"] }
 chrono = { version = "0.4.42", features = ["serde"] }
-# Configurable simulation timezone (DE-LU defaults to Europe/Berlin)
+# Configurable simulation timezone (defaults to Europe/Berlin)
 # — physics + scenario stage hours interpret UTC as local civil time
 # through this. gRPC remains UTC at the wire boundary.
 chrono-tz = "0.10"

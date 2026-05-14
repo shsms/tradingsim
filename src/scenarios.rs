@@ -641,7 +641,7 @@ mod tests {
         let make_mm = |quarter_offset: i64| -> MmView {
             let cfg = MarketMakerConfig {
                 area: crate::sim::market::Area::eic("10YDE-EON------1"),
-                ..MarketMakerConfig::de_lu_default(
+                ..MarketMakerConfig::default_for(
                     crate::sim::market::Area::eic("10YDE-EON------1"),
                     DeliveryPeriod {
                         start: next_quarter_boundary(now)
@@ -684,7 +684,7 @@ mod tests {
         // Strong buy-side bias should push the q0 MM's demand
         // positive and surplus negative (mirrored).
         let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
-        let cfg = MarketMakerConfig::de_lu_default(
+        let cfg = MarketMakerConfig::default_for(
             crate::sim::market::Area::eic("10YDE-EON------1"),
             DeliveryPeriod {
                 start: next_quarter_boundary(now),
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn apply_biases_writes_aggressor_side_bias() {
         let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
-        let ag_cfg = AggressorConfig::de_lu_default(
+        let ag_cfg = AggressorConfig::default_for(
             crate::sim::market::Area::eic("10YDE-EON------1"),
             DeliveryPeriod {
                 start: next_quarter_boundary(now),
@@ -844,7 +844,7 @@ mod tests {
         let weather = new_state();
         {
             let mut reg = weather.write();
-            *reg.default_mut() = WeatherLocation::de_lu_typical();
+            *reg.default_mut() = WeatherLocation::default_for_tests();
             let idx = reg.upsert(WeatherLocation {
                 name: "tn".into(),
                 lat: 50.4,

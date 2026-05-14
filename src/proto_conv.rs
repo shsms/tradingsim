@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn area_round_trip() {
-        let sim = Area::eic("10Y1001A1001A82H");
+        let sim = Area::eic("10YDE-EON------1");
         let p: proto_grid::DeliveryArea = (&sim).into();
         assert_eq!(p.code, sim.code);
         assert_eq!(p.code_type, CodeType::EuropeEic as i32);
@@ -608,7 +608,7 @@ mod tests {
 
     fn sample_order() -> Order {
         Order {
-            area: Area::eic("10Y1001A1001A82H"),
+            area: Area::eic("10YDE-EON------1"),
             period: DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                 duration: DeliveryDuration::DeliveryDuration60,
