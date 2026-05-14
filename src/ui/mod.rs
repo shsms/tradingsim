@@ -25,14 +25,20 @@ use crate::sim::world::World;
 struct UiState {
     world: Arc<Mutex<World>>,
     scenarios: Option<SharedScenarios>,
+    weather: Option<crate::sim::weather::SharedWeather>,
 }
 
 pub async fn serve(
     addr: SocketAddr,
     world: Arc<Mutex<World>>,
     scenarios: Option<SharedScenarios>,
+    weather: Option<crate::sim::weather::SharedWeather>,
 ) -> std::io::Result<()> {
-    let state = UiState { world, scenarios };
+    let state = UiState {
+        world,
+        scenarios,
+        weather,
+    };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/info", get(api_info))
@@ -43,6 +49,7 @@ pub async fn serve(
         .route("/api/scenarios/{name}/prev", post(api_scenario_prev))
         .route("/api/scenarios/{name}/jump/{idx}", post(api_scenario_jump))
         .route("/api/scenarios/{name}/stop", post(api_scenario_stop))
+        .route("/api/weather", get(api_weather))
         .route("/ws/public-trades", get(ws_public_trades))
         .route("/ws/public-book", get(ws_public_book))
         .with_state(state);
@@ -275,6 +282,47 @@ fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
         started_at: e.runtime.started_at.map(|t| t.to_rfc3339()),
         stage_entered_at: e.runtime.stage_entered_at.map(|t| t.to_rfc3339()),
     }
+}
+
+#[derive(Serialize)]
+struct WeatherLocJson {
+    name: String,
+    lat: f64,
+    lon: f64,
+    cloud_cover: f64,
+    mean_wind: f64,
+    wind_direction: f64,
+    /// Solar irradiance (W/m²) at the current UTC hour.
+    solar_now: f64,
+    /// Wind speed at 100 m (m/s) at the current UTC hour.
+    wind_now: f64,
+    /// Air temperature in degrees Celsius at the current UTC hour.
+    temp_c_now: f64,
+}
+
+async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
+    let Some(handle) = s.weather.as_ref() else {
+        return Json(Vec::new());
+    };
+    let now = chrono::Utc::now();
+    let hour = wallclock_hour(now);
+    let reg = handle.read();
+    let out: Vec<WeatherLocJson> = reg
+        .locations()
+        .iter()
+        .map(|l| WeatherLocJson {
+            name: l.name.clone(),
+            lat: l.lat,
+            lon: l.lon,
+            cloud_cover: l.cloud_cover,
+            mean_wind: l.mean_wind,
+            wind_direction: l.wind_direction,
+            solar_now: l.solar_at(hour),
+            wind_now: l.wind_at(hour),
+            temp_c_now: l.temperature_at(hour) - 273.15,
+        })
+        .collect();
+    Json(out)
 }
 
 async fn api_scenarios(State(s): State<UiState>) -> Json<Vec<ScenarioJson>> {

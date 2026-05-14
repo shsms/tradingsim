@@ -100,6 +100,40 @@
                      (mapcar 'car international-areas)
                      :gate-offset-seconds 3600)
 
+;; --- Per-area weather locations ------------------------------------------
+;;
+;; Each delivery area gets its own atmospheric anchor (0.1°
+;; lat/lon granularity). Bias tick reads weather via
+;; weather.for_area(area_code); WeatherForecastService streams one
+;; LocationForecast per registered slot. Trading apps that ask the
+;; weather API for a specific lat/lon get the nearest registered
+;; entry.
+
+(%make-weather-location :name "tn" :area "10YDE-EON------1"
+                        :lat 50.4 :lon 11.6
+                        :cloud-cover 0.35 :mean-wind 5.0)
+(%make-weather-location :name "am" :area "10YDE-RWENET---I"
+                        :lat 51.2 :lon  7.0
+                        :cloud-cover 0.40 :mean-wind 5.0)
+(%make-weather-location :name "hz" :area "10YDE-VE-------2"
+                        :lat 52.5 :lon 13.4
+                        :cloud-cover 0.25 :mean-wind 6.5)
+(%make-weather-location :name "bw" :area "10YDE-ENBW-----N"
+                        :lat 48.8 :lon  9.2
+                        :cloud-cover 0.30 :mean-wind 4.5)
+(%make-weather-location :name "fr" :area "10YFR-RTE------C"
+                        :lat 48.9 :lon  2.3
+                        :cloud-cover 0.35 :mean-wind 5.5)
+(%make-weather-location :name "nl" :area "10YNL----------L"
+                        :lat 52.4 :lon  4.9
+                        :cloud-cover 0.55 :mean-wind 7.0)
+(%make-weather-location :name "be" :area "10YBE----------2"
+                        :lat 50.8 :lon  4.4
+                        :cloud-cover 0.45 :mean-wind 6.0)
+(%make-weather-location :name "at" :area "10YAT-APG------L"
+                        :lat 48.2 :lon 16.4
+                        :cloud-cover 0.30 :mean-wind 4.0)
+
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
 ;; Uncomment to skew an individual MM's quoting:

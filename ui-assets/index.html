@@ -113,6 +113,29 @@ td { padding: 2px 6px; }
     <h2>Scenarios</h2>
     <div id="scenarios" class="muted">loading…</div>
   </div>
+
+  <div class="panel" style="grid-column: span 2">
+    <h2>Weather (now)</h2>
+    <div class="muted" style="margin-bottom:6px">
+      One row per registered location (0.1° lat/lon grid). Solar /
+      wind / temperature are the current-hour truth that the bias
+      tick reads to push MM demand and surplus.
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>name</th><th>lat</th><th>lon</th>
+          <th title="Cloud cover (0=clear, 1=overcast)">cloud</th>
+          <th title="Mean wind speed at 100 m, m/s">wind̄</th>
+          <th title="Wind direction, degrees from north">dir°</th>
+          <th title="Solar irradiance, W/m²">solar↓</th>
+          <th title="Wind speed at the current hour, m/s">wind</th>
+          <th title="Air temperature at 2 m, °C">temp</th>
+        </tr></thead>
+        <tbody id="weather"></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -192,6 +215,29 @@ function renderScenario(s) {
 async function scenarioJump(name, idx) {
   await fetch(`/api/scenarios/${name}/jump/${idx}`, { method: 'POST' });
   loadScenarios();
+}
+
+async function loadWeather() {
+  const r = await fetch('/api/weather');
+  if (!r.ok) return;
+  const list = await r.json();
+  const tbody = document.getElementById('weather');
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="muted"><i>no weather locations registered</i></td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(l => `
+    <tr>
+      <td>${escapeHtml(l.name)}</td>
+      <td class="muted">${l.lat.toFixed(1)}</td>
+      <td class="muted">${l.lon.toFixed(1)}</td>
+      <td>${l.cloud_cover.toFixed(2)}</td>
+      <td>${l.mean_wind.toFixed(1)}</td>
+      <td class="muted">${Math.round(l.wind_direction)}</td>
+      <td>${Math.round(l.solar_now)}</td>
+      <td>${l.wind_now.toFixed(1)}</td>
+      <td>${l.temp_c_now.toFixed(1)}</td>
+    </tr>`).join('');
 }
 
 async function loadScenarios() {
@@ -344,9 +390,10 @@ setInterval(() => {
 }, 200);
 
 (async () => {
-  await Promise.all([loadInfo(), loadGridpools(), loadScenarios()]);
+  await Promise.all([loadInfo(), loadGridpools(), loadScenarios(), loadWeather()]);
   setInterval(loadGridpools, 5000);
   setInterval(loadScenarios, 2000);
+  setInterval(loadWeather, 10000);
   openTradesWs();
   openBookWs();
 })();
