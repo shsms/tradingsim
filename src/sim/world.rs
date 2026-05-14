@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use tokio::sync::broadcast;
 
 use crate::sim::book::OrderBook;
 use crate::sim::decimal::is_multiple_of;
@@ -19,6 +20,12 @@ use crate::sim::order::{
 };
 use crate::sim::trade::{Trade, TradeId, TradeState};
 
+/// Per-gridpool order-update fan-out. Capacity is enough to keep the
+/// "lagged" failure mode rare under normal load; a stream consumer
+/// that genuinely can't keep up still recovers (with a Lagged error
+/// that the gRPC stream task swallows).
+const ORDER_BROADCAST_CAPACITY: usize = 256;
+
 /// (delivery area, delivery period) — the identity of a contract.
 /// Cheap to clone; the area code is short and the period is `Copy`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -30,6 +37,9 @@ pub struct ContractKey {
 pub struct World {
     markets: MarketRegistry,
     gridpools: GridpoolRegistry,
+    /// Per-gridpool fan-out for OrderDetail updates. ReceiveGridpoolOrdersStream
+    /// subscribes once and applies the request filter per item.
+    gridpool_order_tx: HashMap<GridpoolId, broadcast::Sender<OrderDetail>>,
     books: HashMap<ContractKey, OrderBook>,
     /// Reverse index from a resting OrderId to the gridpool that owns
     /// it. Populated when an order rests on the book; cleared on full
@@ -75,6 +85,7 @@ impl World {
         Self {
             markets,
             gridpools: GridpoolRegistry::new(),
+            gridpool_order_tx: HashMap::new(),
             books: HashMap::new(),
             order_to_gridpool: HashMap::new(),
             next_order_id: 1,
@@ -95,7 +106,26 @@ impl World {
     }
 
     pub fn register_gridpool(&mut self, gp: Gridpool) {
+        let id = gp.id;
         self.gridpools.insert(gp);
+        let (tx, _rx) = broadcast::channel(ORDER_BROADCAST_CAPACITY);
+        self.gridpool_order_tx.insert(id, tx);
+    }
+
+    /// Subscribe to a gridpool's order-update fan-out. Returns None
+    /// if the gridpool isn't registered; the caller turns that into
+    /// gRPC NOT_FOUND.
+    pub fn subscribe_orders(&self, gridpool_id: GridpoolId) -> Option<broadcast::Receiver<OrderDetail>> {
+        self.gridpool_order_tx.get(&gridpool_id).map(|tx| tx.subscribe())
+    }
+
+    /// Publish an OrderDetail update for `gridpool_id`. No-op if no
+    /// subscribers — broadcast::Sender::send returning Err means the
+    /// receiver count was zero, which is fine for the sim.
+    fn publish_order_update(&self, gridpool_id: GridpoolId, detail: OrderDetail) {
+        if let Some(tx) = self.gridpool_order_tx.get(&gridpool_id) {
+            let _ = tx.send(detail);
+        }
     }
 
     /// Record that `order_id` is now resting on the book and belongs
@@ -296,6 +326,15 @@ impl World {
             if maker_fully_filled {
                 self.unbind_resting_order(maker_id);
             }
+            // Fan-out the maker-side update to that gridpool's subscribers.
+            let maker_detail = self
+                .gridpools
+                .get(maker_gridpool)
+                .and_then(|g| g.get_order(maker_id))
+                .cloned();
+            if let Some(d) = maker_detail {
+                self.publish_order_update(maker_gridpool, d);
+            }
         }
 
         // 8. Build the taker's OrderDetail.
@@ -320,7 +359,7 @@ impl World {
             modification_time: now,
         };
 
-        // 9. Record on taker's gridpool; bind if it rests.
+        // 9. Record on taker's gridpool; bind if it rests; fan out.
         self.gridpools
             .get_mut(gridpool_id)
             .expect("gridpool still exists")
@@ -328,6 +367,7 @@ impl World {
         if outcome.rested.is_some() {
             self.bind_resting_order(taker_id, gridpool_id);
         }
+        self.publish_order_update(gridpool_id, detail.clone());
 
         Ok(detail)
     }
@@ -373,7 +413,9 @@ impl World {
             d.state.actor = MarketActor::User;
             d.modification_time = now;
         });
-        Ok(gp.get_order(order_id).cloned().unwrap())
+        let detail = gp.get_order(order_id).cloned().unwrap();
+        self.publish_order_update(gridpool_id, detail.clone());
+        Ok(detail)
     }
 }
 
@@ -598,6 +640,30 @@ mod tests {
             .submit_order(GridpoolId(99), sample_buy(dec!(1.0), dec!(85.0)), t0())
             .unwrap_err();
         assert_eq!(err, SubmitError::UnknownGridpool);
+    }
+
+    #[test]
+    fn submit_publishes_order_update() {
+        let (mut w, gp) = setup_world_with_pool();
+        let mut rx = w.subscribe_orders(gp).unwrap();
+        let d = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.id, d.id);
+        assert_eq!(received.state.state, OrderState::Active);
+    }
+
+    #[test]
+    fn cancel_publishes_order_update() {
+        let (mut w, gp) = setup_world_with_pool();
+        let d = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let mut rx = w.subscribe_orders(gp).unwrap();
+        w.cancel_order(gp, d.id, t0()).unwrap();
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.state.state, OrderState::Canceled);
     }
 
     #[test]
