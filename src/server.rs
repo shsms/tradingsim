@@ -27,10 +27,11 @@ use crate::proto::trading::{
     ReceivePublicTradesStreamRequest, ReceivePublicTradesStreamResponse, UpdateGridpoolOrderRequest,
     UpdateGridpoolOrderResponse, electricity_trading_service_server::ElectricityTradingService,
 };
-use crate::proto_conv::{ConvError, timestamp_from_proto};
+use crate::proto_conv::{ConvError, power_from_proto, price_from_proto, timestamp_from_proto};
 use crate::sim::market::DeliveryPeriod;
 use crate::sim::order::{GridpoolId, Order, OrderDetail, OrderId};
 use crate::sim::trade::{PublicTrade, Trade};
+use crate::sim::world::OrderUpdate;
 use crate::sim::world::{SubmitError, World};
 
 /// Cap and default for page sizes. Clients can ask for less, but
@@ -252,9 +253,42 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
     async fn update_gridpool_order(
         &self,
-        _request: Request<UpdateGridpoolOrderRequest>,
+        request: Request<UpdateGridpoolOrderRequest>,
     ) -> Result<Response<UpdateGridpoolOrderResponse>, Status> {
-        Err(Status::unimplemented("update_gridpool_order: Phase 6"))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let order_id = OrderId(req.order_id);
+        let fields = req
+            .update_order_fields
+            .ok_or_else(|| Status::invalid_argument("missing update_order_fields"))?;
+
+        // For Phase 6.1: ignore update_mask and just apply whatever
+        // fields are Some. Tri-state "clear" semantics (mask present
+        // + payload absent) come later.
+        let mut update = OrderUpdate::default();
+        if let Some(p) = fields.price.as_ref() {
+            let (amount, _currency) = price_from_proto(p).map_err(conv_err_to_status)?;
+            update.price = Some(amount);
+        }
+        if let Some(q) = fields.quantity.as_ref() {
+            update.quantity = Some(power_from_proto(q).map_err(conv_err_to_status)?);
+        }
+        if let Some(ts) = fields.valid_until.as_ref() {
+            update.valid_until = Some(timestamp_from_proto(ts).map_err(conv_err_to_status)?);
+        }
+        if let Some(tag) = fields.tag.clone() {
+            update.tag = Some(tag);
+        }
+
+        let detail = {
+            let mut w = self.world.lock().await;
+            w.modify_order(gridpool_id, order_id, update, Utc::now())
+                .map_err(submit_err_to_status)?
+        };
+        Ok(Response::new(UpdateGridpoolOrderResponse {
+            gridpool_id: gridpool_id.0,
+            order_detail: Some((&detail).into()),
+        }))
     }
 
     async fn cancel_gridpool_order(

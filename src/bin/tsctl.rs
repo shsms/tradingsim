@@ -18,8 +18,9 @@ use tradingsim::proto::trading::{
     GetGridpoolOrderRequest, GridpoolOrderFilter, GridpoolTradeFilter, ListGridpoolOrdersRequest,
     ListGridpoolTradesRequest, MarketSide, Order, OrderState, OrderType, PublicTradeFilter,
     ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolTradesStreamRequest,
-    ReceivePublicTradesStreamRequest, TradeState,
+    ReceivePublicTradesStreamRequest, TradeState, UpdateGridpoolOrderRequest,
     electricity_trading_service_client::ElectricityTradingServiceClient,
+    update_gridpool_order_request::UpdateOrder,
 };
 
 #[derive(Parser, Debug)]
@@ -65,6 +66,18 @@ enum Cmd {
         #[arg(long)]
         pool: u64,
         order: u64,
+    },
+    /// Modify a resting order's price / quantity / tag.
+    Modify {
+        #[arg(long)]
+        pool: u64,
+        order: u64,
+        #[arg(long)]
+        price: Option<String>,
+        #[arg(long)]
+        qty: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Cancel a single order.
     Cancel {
@@ -343,6 +356,43 @@ async fn cmd_get(
     Ok(())
 }
 
+async fn cmd_modify(
+    client: &mut ElectricityTradingServiceClient<Channel>,
+    pool: u64,
+    order: u64,
+    price: Option<String>,
+    qty: Option<String>,
+    tag: Option<String>,
+) -> Result<(), String> {
+    let mut update = UpdateOrder::default();
+    if let Some(p) = price {
+        update.price = Some(Price {
+            amount: Some(decimal_proto(&p)?),
+            currency: PrCurrency::Eur as i32,
+        });
+    }
+    if let Some(q) = qty {
+        update.quantity = Some(Power {
+            mw: Some(decimal_proto(&q)?),
+        });
+    }
+    if let Some(t) = tag {
+        update.tag = Some(t);
+    }
+    let resp = client
+        .update_gridpool_order(UpdateGridpoolOrderRequest {
+            gridpool_id: pool,
+            order_id: order,
+            update_mask: None,
+            update_order_fields: Some(update),
+        })
+        .await
+        .map_err(|e| format!("modify: {e}"))?
+        .into_inner();
+    println!("{}", render_order_line(resp.order_detail.as_ref().unwrap()));
+    Ok(())
+}
+
 async fn cmd_cancel(
     client: &mut ElectricityTradingServiceClient<Channel>,
     pool: u64,
@@ -534,6 +584,13 @@ async fn main() {
                         .await
                     }
                     Cmd::Get { pool, order } => cmd_get(&mut client, pool, order).await,
+                    Cmd::Modify {
+                        pool,
+                        order,
+                        price,
+                        qty,
+                        tag,
+                    } => cmd_modify(&mut client, pool, order, price, qty, tag).await,
                     Cmd::Cancel { pool, order } => cmd_cancel(&mut client, pool, order).await,
                     Cmd::CancelAll { pool } => cmd_cancel_all(&mut client, pool).await,
                     Cmd::Orders {
