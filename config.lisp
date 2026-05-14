@@ -77,3 +77,10 @@
 (load "scenarios/sunny-summer-holiday.lisp")
 (load "scenarios/winter-weekday.lisp")
 (load "scenarios/windy-winter-night.lisp")
+(load "scenarios/scarcity-spike.lisp")
+(load "scenarios/buy-only-flow.lisp")
+
+;; Load-time edge cases (not in the UI scenarios panel). Uncomment
+;; to activate at boot:
+;; (load "scenarios/weather-shift.lisp")
+;; (load "scenarios/day-ahead-print.lisp")
