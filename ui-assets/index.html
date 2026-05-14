@@ -48,6 +48,7 @@ td { padding: 2px 6px; }
 .scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .status { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; background: var(--panel); }
 .status.live { color: var(--buy); }
+.status.offline { color: var(--sell); }
 </style>
 </head>
 <body>
@@ -121,9 +122,22 @@ async function loadGridpools() {
     ? lines.join('<br>') : '<i>no gridpools registered</i>';
 }
 
+// Connection heartbeat — both WebSockets must be open for the
+// status pill to read "live". Either dropping flips it to offline
+// + red, so a dead server is visible at a glance.
+const wsState = { trades: false, book: false };
+function updateStatus() {
+  const el = document.getElementById('status');
+  const live = wsState.trades && wsState.book;
+  el.textContent = live ? 'live' : 'offline';
+  el.classList.toggle('live', live);
+  el.classList.toggle('offline', !live);
+}
+
 function openTradesWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-trades`);
+  ws.onopen = () => { wsState.trades = true; updateStatus(); };
   ws.onmessage = (e) => {
     const t = JSON.parse(e.data);
     const tbody = document.getElementById('trades');
@@ -138,7 +152,11 @@ function openTradesWs() {
     tbody.insertBefore(row, tbody.firstChild);
     while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
   };
-  ws.onclose = () => setTimeout(openTradesWs, 1000);
+  ws.onclose = () => {
+    wsState.trades = false;
+    updateStatus();
+    setTimeout(openTradesWs, 1000);
+  };
 }
 
 // Client-side book state: Map<orderId, {area, period, side, price, qty}>.
@@ -197,6 +215,7 @@ function rerenderBook() {
 function openBookWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/public-book`);
+  ws.onopen = () => { wsState.book = true; updateStatus(); };
   ws.onmessage = (e) => {
     const r = JSON.parse(e.data);
     const qty = parseFloat(r.quantity || '0');
@@ -213,7 +232,11 @@ function openBookWs() {
     }
     bookDirty = true;
   };
-  ws.onclose = () => setTimeout(openBookWs, 1000);
+  ws.onclose = () => {
+    wsState.book = false;
+    updateStatus();
+    setTimeout(openBookWs, 1000);
+  };
 }
 
 // Re-render at most ~5 times/sec; the MM refreshes generate enough
@@ -227,7 +250,6 @@ setInterval(() => {
 
 (async () => {
   await Promise.all([loadInfo(), loadGridpools()]);
-  document.getElementById('status').textContent = 'live';
   setInterval(loadGridpools, 5000);
   openTradesWs();
   openBookWs();
