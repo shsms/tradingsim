@@ -1,5 +1,6 @@
 pub mod book;
 pub mod counterparty;
+pub mod curve;
 pub mod decimal;
 pub mod gridpool;
 pub mod market;
