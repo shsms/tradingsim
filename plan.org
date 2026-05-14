@@ -778,29 +778,67 @@ Estimated 6–8 commits.
 
 ** [X] Phase 4 — gridpools + minimum viable gRPC
 
-** [P] Phase 5 — lisp config (in progress)
+** [P] Phase 5 — lisp config
 
-Done so far:
+Done:
 - =lisp::Config::new(path)= evaluates a tulisp file against runtime
-  defuns; `MarketMakerSpec`s registered via `(%make-market-maker …)`
-  carry `Arc<RwLock<MarketMakerConfig>>` handles the MM tasks
-  consume.
+  defuns; spec objects (MarketMakerSpec, GridpoolSpec, MarketSpec)
+  collected during eval are read by the binary at startup.
+- `(set-socket-addr STR)`, `(set-physics-tick-ms N)` for Metadata.
+- `(%make-market :area :currency)` builds MarketRules; defaults to
+  EUR + all four delivery durations (5/15/30/60 min).
+- `(%make-gridpool :id :name :areas)` registers a gridpool with one
+  or more delivery areas.
+- `(%make-market-maker :name :area :hour-offset :reference :spread
+  :size :demand :surplus :noise :seed)` registers a MarketMakerSpec
+  carrying an `Arc<RwLock<MarketMakerConfig>>` the MM tasks share.
 - `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`
   mutate the named MM's shared config; writes take effect on the
   next refresh tick.
-- `(set-socket-addr STR)`, `(set-physics-tick-ms N)` shape the
-  Metadata block the binary reads.
-- bin/tradingsim picks up the parsed config when `config.lisp` is
-  present; falls back to hardcoded defaults otherwise.
-- Sample `config.lisp` ships four DE-LU hour-contracts with varied
-  reference prices.
+- tulisp-async wired: `(run-with-timer …)` is built in;
+  `sim/common.lisp` provides an `(every :milliseconds N :call FN)`
+  sugar wrapper. The binary spawns a 100 ms drain task that ticks
+  the tulisp-async timer queue, so scheduled callbacks actually
+  fire.
+- Sample `config.lisp` ships four DE-LU hour-contracts at varied
+  reference prices plus a commented-out (every) ramp example.
 
-Still to come on Phase 5:
-- `(make-gridpool …)` so the gridpool itself is config-driven.
-- tulisp-async `(every …)` / `(run-with-timer …)` so demand/surplus
-  can drift on a scenario timeline instead of only via top-level
-  setq.
+Still deferred:
 - `(watch-file …)` + notify-rs for hot reload.
+
+** [P] Phase 6 — execution options / Update RPC / valid_until
+
+Done:
+- =UpdateGridpoolOrder= RPC + =World::modify_order= (price / qty /
+  valid_until / tag). Quantity-below-already-filled rejects; all
+  modifies cancel from the book and re-insert at the new (side,
+  price) tail; the matcher re-runs against the new price so a
+  modify that crosses the spread fills.
+- =ExecMode= in the matcher: Resting / IOC / FOK. FOK pre-checks
+  marketable depth and bails atomically without state mutation.
+  AON is still rejected at validation pending the right semantics.
+- =valid_until= expiry: a 1 s server task scans gridpool orders and
+  transitions any past-deadline non-terminal order to Expired,
+  removing from the book as needed.
+- tsctl gains `modify` and `place --exec fok|ioc`.
+
+Still deferred to Phase 6:
+- ICEBERG slicing (display_quantity + peak_price_delta + slice add).
+- STOP_LIMIT activation (stop_price watchlist + trigger on last
+  public trade).
+- AON proper semantics (resting AON + take-or-leave).
+
+** [P] Phase 7 — multi-area + multi-duration
+
+Done:
+- =MarketRules::for_area= constructor + all four delivery durations
+  (5/15/30/60) admissible by default.
+- `(%make-market …)` lisp defun so additional zones (FR/AT/NL/BE)
+  can be registered without a rebuild.
+
+Still deferred:
+- Cross-area (SIDC) coupled matches — public trades with
+  buy_delivery_area ≠ sell_delivery_area.
 
 ** [P] Out-of-order pull: streaming + synthetic liquidity
 

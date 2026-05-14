@@ -50,8 +50,11 @@ to come.
   hot-mutate demand/surplus/reference between refreshes
 - `src/lisp/mod.rs` — `Config::new(path)` evaluates a tulisp file
   against runtime defuns: `(set-socket-addr STR)`,
-  `(set-physics-tick-ms N)`, `(%make-market-maker …)`,
-  `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`
+  `(set-physics-tick-ms N)`, `(%make-market …)`,
+  `(%make-gridpool …)`, `(%make-market-maker …)`,
+  `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`,
+  plus tulisp-async's `(run-with-timer …)` + sugar `(every …)`
+  from `sim/common.lisp`. `spawn_timer_loop` drives the firing
 - `config.lisp` — sample top-level config (DE-LU + 4 hour-contracts)
 - `src/bin/tradingsim.rs` — loads `config.lisp` if present (registers
   MMs from it); falls back to a 4-hour hardcoded MM set otherwise;
