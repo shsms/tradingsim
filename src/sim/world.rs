@@ -1605,25 +1605,17 @@ mod tests {
     }
 
     fn sample_buy(qty: Decimal, price: Decimal) -> Order {
-        Order {
-            area: Area::eic("10YDE-EON------1"),
-            period: DeliveryPeriod {
+        Order::limit(
+            Area::eic("10YDE-EON------1"),
+            DeliveryPeriod {
                 start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                 duration: DeliveryDuration::DeliveryDuration15,
             },
-            order_type: OrderType::Limit,
-            side: Side::Buy,
+            Side::Buy,
             price,
-            currency: Currency::Eur,
-            quantity: qty,
-            stop_price: None,
-            peak_price_delta: None,
-            display_quantity: None,
-            execution_option: None,
-            valid_until: None,
-            payload: None,
-            tag: None,
-        }
+            qty,
+            Currency::Eur,
+        )
     }
 
     fn sample_sell(qty: Decimal, price: Decimal) -> Order {

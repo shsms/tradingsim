@@ -20,7 +20,7 @@ use rust_decimal::dec;
 
 use crate::sim::decimal::snap_to_tick;
 use crate::sim::market::{Area, Currency, DeliveryPeriod};
-use crate::sim::order::{Order, OrderId, OrderType, Side};
+use crate::sim::order::{Order, OrderId, Side};
 use crate::sim::world::World;
 
 /// Knobs the binary (and later, lisp) sets per market-maker.
@@ -364,47 +364,34 @@ impl Aggressor {
             crate::sim::decimal::DEFAULT_QTY_STEP,
         )
         .max(crate::sim::decimal::DEFAULT_QTY_STEP);
+        // IOC — take what crosses at the slippage-bounded limit;
+        // kill the rest. Stops aggressors from accumulating
+        // resting residuals on the book that distort the bid/ask
+        // shape on subsequent fires.
         let order = Order {
-            area: cfg.area.clone(),
-            period: cfg.period,
-            order_type: OrderType::Limit,
-            side,
-            price: target_price,
-            currency: cfg.currency,
-            quantity: scaled_size,
-            stop_price: None,
-            peak_price_delta: None,
-            display_quantity: None,
-            // IOC — take what crosses at the slippage-bounded
-            // limit; kill the rest. Stops aggressors from
-            // accumulating resting residuals on the book that
-            // distort the bid/ask shape on subsequent fires.
             execution_option: Some(crate::sim::order::ExecutionOption::Ioc),
-            valid_until: None,
-            payload: None,
-            tag: None,
+            ..Order::limit(
+                cfg.area.clone(),
+                cfg.period,
+                side,
+                target_price,
+                scaled_size,
+                cfg.currency,
+            )
         };
         let _ = world.submit_counterparty_order(order, now);
     }
 }
 
 fn build(cfg: &MarketMakerConfig, side: Side, price: Decimal) -> Order {
-    Order {
-        area: cfg.area.clone(),
-        period: cfg.period,
-        order_type: OrderType::Limit,
+    Order::limit(
+        cfg.area.clone(),
+        cfg.period,
         side,
         price,
-        currency: cfg.currency,
-        quantity: cfg.size,
-        stop_price: None,
-        peak_price_delta: None,
-        display_quantity: None,
-        execution_option: None,
-        valid_until: None,
-        payload: None,
-        tag: None,
-    }
+        cfg.size,
+        cfg.currency,
+    )
 }
 
 #[cfg(test)]
@@ -564,22 +551,14 @@ mod tests {
         };
         // Seed a far-off-market sell. Two crossing counterparty
         // orders place it without anyone immediately taking it.
-        let stale_sell = Order {
-            area: mm_cfg.area.clone(),
-            period: mm_cfg.period,
-            order_type: OrderType::Limit,
-            side: Side::Sell,
-            price: dec!(173.00),
-            currency: Currency::Eur,
-            quantity: dec!(10.0),
-            stop_price: None,
-            peak_price_delta: None,
-            display_quantity: None,
-            execution_option: None,
-            valid_until: None,
-            payload: None,
-            tag: None,
-        };
+        let stale_sell = Order::limit(
+            mm_cfg.area.clone(),
+            mm_cfg.period,
+            Side::Sell,
+            dec!(173.00),
+            dec!(10.0),
+            Currency::Eur,
+        );
         world
             .submit_counterparty_order(stale_sell, t0())
             .expect("place stale sell");
@@ -627,21 +606,8 @@ mod tests {
         // Pre-seed a public trade at 90 on this contract — two
         // crossing counterparty orders on an empty book (no MM
         // resting yet to interfere with the match).
-        let mk = |side, price| Order {
-            area: cfg.area.clone(),
-            period: cfg.period,
-            order_type: OrderType::Limit,
-            side,
-            price,
-            currency: Currency::Eur,
-            quantity: dec!(0.1),
-            stop_price: None,
-            peak_price_delta: None,
-            display_quantity: None,
-            execution_option: None,
-            valid_until: None,
-            payload: None,
-            tag: None,
+        let mk = |side, price| {
+            Order::limit(cfg.area.clone(), cfg.period, side, price, dec!(0.1), Currency::Eur)
         };
         world
             .submit_counterparty_order(mk(Side::Sell, dec!(90.0)), t0())

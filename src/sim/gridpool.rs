@@ -156,7 +156,7 @@ mod tests {
     use super::*;
     use crate::sim::market::{Currency, DeliveryDuration, DeliveryPeriod};
     use crate::sim::order::{
-        MarketActor, Order, OrderState, OrderType, Side, StateDetail, StateReason,
+        MarketActor, Order, OrderState, Side, StateDetail, StateReason,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal::dec;
@@ -164,25 +164,17 @@ mod tests {
     fn sample_detail(id: u64, state: OrderState) -> OrderDetail {
         OrderDetail {
             id: OrderId(id),
-            order: Order {
-                area: Area::eic("10YDE-EON------1"),
-                period: DeliveryPeriod {
+            order: Order::limit(
+                Area::eic("10YDE-EON------1"),
+                DeliveryPeriod {
                     start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
                     duration: DeliveryDuration::DeliveryDuration15,
                 },
-                order_type: OrderType::Limit,
-                side: Side::Buy,
-                price: dec!(85.0),
-                currency: Currency::Eur,
-                quantity: dec!(1.0),
-                stop_price: None,
-                peak_price_delta: None,
-                display_quantity: None,
-                execution_option: None,
-                valid_until: None,
-                payload: None,
-                tag: None,
-            },
+                Side::Buy,
+                dec!(85.0),
+                dec!(1.0),
+                Currency::Eur,
+            ),
             state: StateDetail {
                 state,
                 reason: StateReason::Add,

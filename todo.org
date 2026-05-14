@@ -59,10 +59,14 @@ closure that captures =curve=, =weather=, =period_hour_for=, and
 demand / surplus, write fields". Also folded the MM's redundant
 =imbalance= temporary into the =shift= computation.
 
-*** TODO =Order::limit= constructor
-Both =MarketMaker::refresh=, =Aggressor::fire=, and a dozen tests
-build =Order { ... order_type: Limit, ... None, None, ..., tag: None }=
-by hand. Add a small constructor.
+*** DONE =Order::limit= constructor
+Added =Order::limit(area, period, side, price, quantity, currency)=
+that returns a LIMIT order with the optional fields left None.
+Counterparty MM `build`, the aggressor IOC submission (via struct
+update syntax), the slippage regression test, and the world / gridpool
+sample fixtures all collapsed onto it. The submit-error test cases that
+override one field via =..sample_buy(...)= keep their struct-update form;
+no need to break that pattern.
 
 *** TODO Merge =World::submit_order= + =submit_counterparty_order= core
 90% overlap. Shared core (validate → mint id → match → record

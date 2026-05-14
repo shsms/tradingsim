@@ -92,6 +92,39 @@ pub struct Order {
     pub tag: Option<String>,
 }
 
+impl Order {
+    /// LIMIT-order constructor with the optional fields left None.
+    /// The dozen `Order { ... order_type: Limit, ... stop_price:
+    /// None, peak_price_delta: None, ... tag: None }` literals
+    /// scattered across the MM / aggressor / world / test layers
+    /// reduced to one line each.
+    pub fn limit(
+        area: Area,
+        period: DeliveryPeriod,
+        side: Side,
+        price: Decimal,
+        quantity: Decimal,
+        currency: Currency,
+    ) -> Self {
+        Self {
+            area,
+            period,
+            order_type: OrderType::Limit,
+            side,
+            price,
+            currency,
+            quantity,
+            stop_price: None,
+            peak_price_delta: None,
+            display_quantity: None,
+            execution_option: None,
+            valid_until: None,
+            payload: None,
+            tag: None,
+        }
+    }
+}
+
 /// The server-augmented view — `OrderDetail` in the proto. Combines
 /// the user-submitted `Order` with id, fills, state, and timestamps.
 #[derive(Clone, Debug)]
