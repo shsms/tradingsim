@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::sync::Mutex;
-use tokio_stream::Stream;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use crate::proto::common::pagination::{
@@ -306,11 +307,31 @@ impl ElectricityTradingService for ElectricityTradingServer {
 
     async fn receive_gridpool_orders_stream(
         &self,
-        _request: Request<ReceiveGridpoolOrdersStreamRequest>,
+        request: Request<ReceiveGridpoolOrdersStreamRequest>,
     ) -> Result<Response<Self::ReceiveGridpoolOrdersStreamStream>, Status> {
-        Err(Status::unimplemented(
-            "receive_gridpool_orders_stream: Phase 4.4d",
-        ))
+        let req = request.into_inner();
+        let gridpool_id = GridpoolId(req.gridpool_id);
+        let filter = req.filter.unwrap_or_default();
+
+        // Subscribe under the lock; release before consuming the stream
+        // so other RPCs aren't held up by long-lived subscribers.
+        let receiver = {
+            let w = self.world.lock().await;
+            w.subscribe_orders(gridpool_id)
+                .ok_or_else(|| Status::not_found("unknown gridpool"))?
+        };
+
+        let stream = BroadcastStream::new(receiver).filter_map(move |item| match item {
+            Ok(detail) if matches_order_filter(&detail, &filter) => {
+                Some(Ok(ReceiveGridpoolOrdersStreamResponse {
+                    order_detail: Some((&detail).into()),
+                }))
+            }
+            // Drop both non-matching items and Lagged errors silently —
+            // the stream contract is best-effort.
+            _ => None,
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn list_gridpool_trades(
