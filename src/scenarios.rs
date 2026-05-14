@@ -432,7 +432,11 @@ fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::counterparty::{AggressorConfig, MarketMakerConfig};
+    use crate::sim::market::{DeliveryDuration, DeliveryPeriod};
     use crate::sim::weather::{WeatherLocation, new_state};
+    use chrono::Timelike;
+    use rust_decimal::dec;
 
     fn stage(name: &str, h_from: f64, h_to: f64, cloud: Option<f64>) -> Stage {
         Stage {
@@ -445,6 +449,378 @@ mod tests {
             mean_wind: None,
             temperature_base: None,
         }
+    }
+
+    fn stage_with_bias(h_from: f64, h_to: f64, bias_from: f64, bias_to: f64) -> Stage {
+        Stage {
+            name: "test".into(),
+            hour_from: h_from,
+            hour_to: h_to,
+            bias_from,
+            bias_to,
+            cloud_cover: None,
+            mean_wind: None,
+            temperature_base: None,
+        }
+    }
+
+    fn def_with_stages(stages: Vec<Stage>) -> ScenarioDef {
+        ScenarioDef {
+            name: "test".into(),
+            description: String::new(),
+            date: None,
+            stages,
+        }
+    }
+
+    #[test]
+    fn natural_duck_bias_known_hours() {
+        // Overnight: balanced. Morning ramp: rising. Solar belly:
+        // bid-heavy (cheap power, lots of selling). Evening peak:
+        // buy-heavy.
+        assert!((natural_duck_bias(2.0) - 0.50).abs() < 1e-9);
+        assert!((natural_duck_bias(5.0) - 0.50).abs() < 1e-9);
+        assert!((natural_duck_bias(7.0) - 0.56).abs() < 0.01);
+        assert!((natural_duck_bias(9.5) - 0.55).abs() < 1e-9);
+        assert!((natural_duck_bias(12.0) - 0.35).abs() < 1e-9);
+        assert!((natural_duck_bias(18.0) - 0.72).abs() < 1e-9);
+        assert!((natural_duck_bias(22.0) - 0.60).abs() < 1e-9);
+    }
+
+    #[test]
+    fn natural_duck_bias_wraps_negative_hours() {
+        // rem_euclid handles negatives — wallclock_hour never goes
+        // negative in practice, but be defensive.
+        assert_eq!(natural_duck_bias(-23.0), natural_duck_bias(1.0));
+        assert_eq!(natural_duck_bias(25.0), natural_duck_bias(1.0));
+    }
+
+    #[test]
+    fn decay_weight_matches_design_curve() {
+        // q0: full weight, q12 (3h): ~37%, q24 (6h): ~14%,
+        // q47 (~12h): ~2%, q-N (impossible but guarded): 1.0.
+        assert!((decay_weight(0) - 1.0).abs() < 1e-9);
+        assert!((decay_weight(12) - 0.367).abs() < 0.01);
+        assert!((decay_weight(24) - 0.135).abs() < 0.01);
+        assert!((decay_weight(47) - 0.020).abs() < 0.01);
+        assert_eq!(decay_weight(-5), 1.0);
+    }
+
+    #[test]
+    fn lerp_endpoints_and_midpoint() {
+        assert_eq!(lerp(0.0, 10.0, 0.0), 0.0);
+        assert_eq!(lerp(0.0, 10.0, 1.0), 10.0);
+        assert_eq!(lerp(0.0, 10.0, 0.5), 5.0);
+    }
+
+    #[test]
+    fn wallclock_stage_finds_containing_stage() {
+        let def = def_with_stages(vec![
+            stage("a", 0.0, 6.0, None),
+            stage("b", 6.0, 12.0, None),
+            stage("c", 12.0, 24.0, None),
+        ]);
+        assert_eq!(wallclock_stage(&def, 0.0), Some(0));
+        assert_eq!(wallclock_stage(&def, 5.999), Some(0));
+        assert_eq!(wallclock_stage(&def, 6.0), Some(1));
+        assert_eq!(wallclock_stage(&def, 23.9), Some(2));
+    }
+
+    #[test]
+    fn wallclock_stage_returns_none_outside_any_stage() {
+        let def = def_with_stages(vec![stage("morning", 6.0, 9.0, None)]);
+        assert_eq!(wallclock_stage(&def, 5.0), None);
+        assert_eq!(wallclock_stage(&def, 9.0), None);
+    }
+
+    #[test]
+    fn stage_bias_now_auto_interpolates_across_window() {
+        let s = stage_with_bias(10.0, 14.0, 0.30, 0.70);
+        let rt = ScenarioRuntime {
+            current_stage: Some(0),
+            manual_override: false,
+            ..Default::default()
+        };
+        let clock = Clock::default();
+        // 10:00 utc = 12:00 CEST in May → t = 0.5 → 0.50 bias
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let bias = stage_bias_now(&s, &rt, &clock, now);
+        assert!((bias - 0.50).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stage_bias_now_manual_uses_elapsed_time_against_entered() {
+        let s = stage_with_bias(10.0, 14.0, 0.30, 0.70);
+        let entered = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let rt = ScenarioRuntime {
+            current_stage: Some(0),
+            manual_override: true,
+            stage_entered_at: Some(entered),
+            ..Default::default()
+        };
+        let clock = Clock::default();
+        // Halfway through a 4-hour stage = +2h elapsed → 0.5 → 0.50
+        let now = entered + chrono::Duration::hours(2);
+        let bias = stage_bias_now(&s, &rt, &clock, now);
+        assert!((bias - 0.50).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stage_bias_now_clamps_outside_window() {
+        let s = stage_with_bias(10.0, 14.0, 0.30, 0.70);
+        let rt = ScenarioRuntime {
+            current_stage: Some(0),
+            manual_override: false,
+            ..Default::default()
+        };
+        let clock = Clock::default();
+        // 06:00 UTC = 08:00 CEST → before the stage in local. t<0,
+        // clamped to 0 → returns bias_from.
+        let early = Utc.with_ymd_and_hms(2026, 5, 14, 6, 0, 0).unwrap();
+        assert!((stage_bias_now(&s, &rt, &clock, early) - 0.30).abs() < 1e-6);
+        // 16:00 UTC = 18:00 CEST → past the stage. Clamped to 1 →
+        // bias_to.
+        let late = Utc.with_ymd_and_hms(2026, 5, 14, 16, 0, 0).unwrap();
+        assert!((stage_bias_now(&s, &rt, &clock, late) - 0.70).abs() < 1e-6);
+    }
+
+    #[test]
+    fn next_quarter_boundary_rounds_up() {
+        let t = Utc.with_ymd_and_hms(2026, 5, 14, 10, 7, 30).unwrap();
+        let b = next_quarter_boundary(t);
+        assert_eq!(b, Utc.with_ymd_and_hms(2026, 5, 14, 10, 15, 0).unwrap());
+        // Boundary itself rolls to the *next* one — never returns
+        // the current instant.
+        let on = Utc.with_ymd_and_hms(2026, 5, 14, 10, 15, 0).unwrap();
+        assert_eq!(
+            next_quarter_boundary(on),
+            Utc.with_ymd_and_hms(2026, 5, 14, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn today_at_builds_utc_from_local_hour_in_dst() {
+        // May → Europe/Berlin is CEST (UTC+2). Local 13:00 → UTC 11:00.
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        let tz = chrono_tz::Europe::Berlin;
+        let result = today_at(tz, 13.0, now);
+        assert_eq!(result.hour(), 11);
+        assert_eq!(result.minute(), 0);
+    }
+
+    #[test]
+    fn today_at_builds_utc_from_local_hour_in_winter() {
+        // Jan → CET (UTC+1). Local 13:00 → UTC 12:00.
+        let now = Utc.with_ymd_and_hms(2026, 1, 15, 10, 0, 0).unwrap();
+        let tz = chrono_tz::Europe::Berlin;
+        let result = today_at(tz, 13.0, now);
+        assert_eq!(result.hour(), 12);
+    }
+
+    #[test]
+    fn apply_biases_writes_per_quarter_reference_baseline() {
+        // One MM at q0, one MM at q8 (2 h later). Bias tick should
+        // write a curve+weather-derived baseline that differs
+        // between them (different local hour ⇒ different curve
+        // value).
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let make_mm = |quarter_offset: i64| -> MmView {
+            let cfg = MarketMakerConfig {
+                area: crate::sim::market::Area::eic("10YDE-EON------1"),
+                ..MarketMakerConfig::de_lu_default(
+                    crate::sim::market::Area::eic("10YDE-EON------1"),
+                    DeliveryPeriod {
+                        start: next_quarter_boundary(now)
+                            + chrono::Duration::minutes(15 * quarter_offset),
+                        duration: DeliveryDuration::DeliveryDuration15,
+                    },
+                )
+            };
+            MmView {
+                quarter_offset,
+                shared_config: Arc::new(RwLock::new(cfg)),
+            }
+        };
+        let q0 = make_mm(0);
+        let q8 = make_mm(8); // 2 hours later
+
+        let curve = ForwardCurve::default();
+        let weather = WeatherRegistry::default();
+        let clock = Clock::default();
+        apply_biases(
+            &[],
+            &[q0.clone(), q8.clone()],
+            None,
+            25.0,
+            &curve,
+            &weather,
+            &clock,
+            134, /* day_of_year */
+            now,
+        );
+        let ref_q0 = q0.shared_config.read().reference_baseline;
+        let ref_q8 = q8.shared_config.read().reference_baseline;
+        // Different quarters → curve hits different forward hours →
+        // baselines diverge.
+        assert_ne!(ref_q0, ref_q8);
+    }
+
+    #[test]
+    fn apply_biases_with_lopsided_scenario_writes_demand_or_surplus() {
+        // Strong buy-side bias should push the q0 MM's demand
+        // positive and surplus negative (mirrored).
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let cfg = MarketMakerConfig::de_lu_default(
+            crate::sim::market::Area::eic("10YDE-EON------1"),
+            DeliveryPeriod {
+                start: next_quarter_boundary(now),
+                duration: DeliveryDuration::DeliveryDuration15,
+            },
+        );
+        let view = MmView {
+            quarter_offset: 0,
+            shared_config: Arc::new(RwLock::new(cfg)),
+        };
+        apply_biases(
+            &[],
+            &[view.clone()],
+            Some(0.90), // strong buy bias
+            25.0,
+            &ForwardCurve::default(),
+            &WeatherRegistry::default(),
+            &Clock::default(),
+            134,
+            now,
+        );
+        let cfg = view.shared_config.read();
+        assert!(cfg.demand > dec!(0));
+        assert!(cfg.surplus < dec!(0));
+        // Mirror within rounding.
+        assert!((cfg.demand + cfg.surplus).abs() < dec!(0.001));
+    }
+
+    #[test]
+    fn apply_biases_writes_aggressor_side_bias() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
+        let ag_cfg = AggressorConfig::de_lu_default(
+            crate::sim::market::Area::eic("10YDE-EON------1"),
+            DeliveryPeriod {
+                start: next_quarter_boundary(now),
+                duration: DeliveryDuration::DeliveryDuration15,
+            },
+        );
+        let view = AggressorView {
+            quarter_offset: 0,
+            shared_config: Arc::new(RwLock::new(ag_cfg)),
+        };
+        apply_biases(
+            &[view.clone()],
+            &[],
+            Some(0.80),
+            25.0,
+            &ForwardCurve::default(),
+            &WeatherRegistry::default(),
+            &Clock::default(),
+            134,
+            now,
+        );
+        // With q0 and a 0.80 stage bias, decay_weight is 1 so the
+        // aggressor's side_bias should land near 0.80 — clamped to
+        // [0,1] in any case.
+        let sb = view.shared_config.read().side_bias;
+        assert!(sb > 0.6 && sb <= 1.0, "side_bias {sb}");
+    }
+
+    #[test]
+    fn pick_active_stage_returns_running_stage() {
+        let scenarios = new_registry();
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        // Local 14:00 CEST → inside the 12–24 stage.
+        scenarios.lock().insert(
+            "alpha".into(),
+            ScenarioEntry {
+                def: def_with_stages(vec![
+                    stage("a", 0.0, 12.0, None),
+                    stage("b", 12.0, 24.0, None),
+                ]),
+                runtime: ScenarioRuntime {
+                    current_stage: Some(1),
+                    manual_override: true, // skip auto-advance
+                    ..Default::default()
+                },
+            },
+        );
+        let active = pick_active_stage(&scenarios, &Clock::default(), now);
+        let (stage, _, _) = active.expect("active stage");
+        assert_eq!(stage.name, "b");
+    }
+
+    #[test]
+    fn pick_active_stage_auto_advances_when_wallclock_moves() {
+        let scenarios = new_registry();
+        // Local 14:00 CEST (= UTC 12) is inside the 12–24 stage,
+        // but the runtime still points at stage 0. Auto-advance
+        // should bump it to 1 and update stage_entered_at.
+        scenarios.lock().insert(
+            "alpha".into(),
+            ScenarioEntry {
+                def: def_with_stages(vec![
+                    stage("a", 0.0, 12.0, None),
+                    stage("b", 12.0, 24.0, None),
+                ]),
+                runtime: ScenarioRuntime {
+                    current_stage: Some(0),
+                    manual_override: false,
+                    ..Default::default()
+                },
+            },
+        );
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        pick_active_stage(&scenarios, &Clock::default(), now);
+        let g = scenarios.lock();
+        let rt = &g.get("alpha").unwrap().runtime;
+        assert_eq!(rt.current_stage, Some(1));
+        assert!(rt.stage_entered_at.is_some());
+    }
+
+    #[test]
+    fn pick_active_stage_respects_manual_override() {
+        let scenarios = new_registry();
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        scenarios.lock().insert(
+            "alpha".into(),
+            ScenarioEntry {
+                def: def_with_stages(vec![
+                    stage("a", 0.0, 12.0, None),
+                    stage("b", 12.0, 24.0, None),
+                ]),
+                runtime: ScenarioRuntime {
+                    current_stage: Some(0),
+                    manual_override: true,
+                    ..Default::default()
+                },
+            },
+        );
+        pick_active_stage(&scenarios, &Clock::default(), now);
+        let g = scenarios.lock();
+        // Manual override keeps the runtime stage even though
+        // wallclock would auto-advance to 1.
+        assert_eq!(g.get("alpha").unwrap().runtime.current_stage, Some(0));
+    }
+
+    #[test]
+    fn pick_active_stage_returns_none_when_no_scenario_running() {
+        let scenarios = new_registry();
+        let now = Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap();
+        scenarios.lock().insert(
+            "alpha".into(),
+            ScenarioEntry {
+                def: def_with_stages(vec![stage("a", 0.0, 24.0, None)]),
+                runtime: ScenarioRuntime::default(),
+            },
+        );
+        let active = pick_active_stage(&scenarios, &Clock::default(), now);
+        assert!(active.is_none());
     }
 
     #[test]
