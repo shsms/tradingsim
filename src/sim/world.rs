@@ -18,13 +18,19 @@ use crate::sim::order::{
     ExecutionOption, GridpoolId, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType,
     StateDetail, StateReason,
 };
-use crate::sim::trade::{Trade, TradeId, TradeState};
+use crate::sim::trade::{PublicTrade, Trade, TradeId, TradeState};
 
 /// Per-gridpool order-update fan-out. Capacity is enough to keep the
 /// "lagged" failure mode rare under normal load; a stream consumer
 /// that genuinely can't keep up still recovers (with a Lagged error
 /// that the gRPC stream task swallows).
 const ORDER_BROADCAST_CAPACITY: usize = 256;
+
+/// Global public-trade fan-out + per-gridpool trade fan-out share
+/// the same capacity. PublicTrade events are emitted globally (one
+/// per fill); Trade events are per-gridpool (two per fill, one per
+/// side of the match).
+const TRADE_BROADCAST_CAPACITY: usize = 512;
 
 /// (delivery area, delivery period) — the identity of a contract.
 /// Cheap to clone; the area code is short and the period is `Copy`.
@@ -40,6 +46,15 @@ pub struct World {
     /// Per-gridpool fan-out for OrderDetail updates. ReceiveGridpoolOrdersStream
     /// subscribes once and applies the request filter per item.
     gridpool_order_tx: HashMap<GridpoolId, broadcast::Sender<OrderDetail>>,
+    /// Per-gridpool fan-out for the maker- and taker-side Trade
+    /// records produced by every fill. ReceiveGridpoolTradesStream
+    /// subscribes once and applies the request filter.
+    gridpool_trade_tx: HashMap<GridpoolId, broadcast::Sender<Trade>>,
+    /// Global public-trade tape — one event per fill. The taker
+    /// gridpool's submit path emits the public trade; counterparty
+    /// fills go through the same path so the tape is the
+    /// authoritative match log regardless of who initiated.
+    public_trade_tx: broadcast::Sender<PublicTrade>,
     books: HashMap<ContractKey, OrderBook>,
     /// Reverse index from a resting OrderId to the gridpool that owns
     /// it. Populated when an order rests on the book; cleared on full
@@ -82,10 +97,13 @@ pub enum SubmitError {
 
 impl World {
     pub fn new(markets: MarketRegistry) -> Self {
+        let (public_trade_tx, _rx) = broadcast::channel(TRADE_BROADCAST_CAPACITY);
         Self {
             markets,
             gridpools: GridpoolRegistry::new(),
             gridpool_order_tx: HashMap::new(),
+            gridpool_trade_tx: HashMap::new(),
+            public_trade_tx,
             books: HashMap::new(),
             order_to_gridpool: HashMap::new(),
             next_order_id: 1,
@@ -108,8 +126,10 @@ impl World {
     pub fn register_gridpool(&mut self, gp: Gridpool) {
         let id = gp.id;
         self.gridpools.insert(gp);
-        let (tx, _rx) = broadcast::channel(ORDER_BROADCAST_CAPACITY);
-        self.gridpool_order_tx.insert(id, tx);
+        let (order_tx, _) = broadcast::channel(ORDER_BROADCAST_CAPACITY);
+        self.gridpool_order_tx.insert(id, order_tx);
+        let (trade_tx, _) = broadcast::channel(TRADE_BROADCAST_CAPACITY);
+        self.gridpool_trade_tx.insert(id, trade_tx);
     }
 
     /// Subscribe to a gridpool's order-update fan-out. Returns None
@@ -119,6 +139,19 @@ impl World {
         self.gridpool_order_tx.get(&gridpool_id).map(|tx| tx.subscribe())
     }
 
+    /// Subscribe to a gridpool's private trade tape.
+    pub fn subscribe_gridpool_trades(
+        &self,
+        gridpool_id: GridpoolId,
+    ) -> Option<broadcast::Receiver<Trade>> {
+        self.gridpool_trade_tx.get(&gridpool_id).map(|tx| tx.subscribe())
+    }
+
+    /// Subscribe to the global public trade tape.
+    pub fn subscribe_public_trades(&self) -> broadcast::Receiver<PublicTrade> {
+        self.public_trade_tx.subscribe()
+    }
+
     /// Publish an OrderDetail update for `gridpool_id`. No-op if no
     /// subscribers — broadcast::Sender::send returning Err means the
     /// receiver count was zero, which is fine for the sim.
@@ -126,6 +159,16 @@ impl World {
         if let Some(tx) = self.gridpool_order_tx.get(&gridpool_id) {
             let _ = tx.send(detail);
         }
+    }
+
+    fn publish_gridpool_trade(&self, gridpool_id: GridpoolId, trade: Trade) {
+        if let Some(tx) = self.gridpool_trade_tx.get(&gridpool_id) {
+            let _ = tx.send(trade);
+        }
+    }
+
+    fn publish_public_trade(&self, trade: PublicTrade) {
+        let _ = self.public_trade_tx.send(trade);
     }
 
     /// Record that `order_id` is now resting on the book and belongs
@@ -267,34 +310,34 @@ impl World {
         );
 
         // 7. Record trades on both sides + update maker order state.
+        // Each statement scopes its &mut gridpools borrow tightly so
+        // self.publish_* calls (which take & self) can interleave.
         for fill in &outcome.fills {
             let trade_id = self.next_trade_id();
             let maker_id = fill.maker_id;
-            // Taker-side trade for *this* gridpool.
-            self.gridpools
-                .get_mut(gridpool_id)
-                .expect("gridpool existed at start of submit")
-                .record_trade(Trade {
-                    id: trade_id,
-                    order_id: taker_id,
-                    side: taker_side,
-                    area: order.area.clone(),
-                    period: order.period,
-                    execution_time: now,
-                    price: fill.price,
-                    currency: taker_currency,
-                    quantity: fill.quantity,
-                    state: TradeState::Active,
-                });
-            // Maker-side trade + open_qty decrement on the maker's gridpool.
             let maker_gridpool = self
                 .owner_of(maker_id)
                 .expect("resting order had no gridpool binding");
-            let gp = self
-                .gridpools
-                .get_mut(maker_gridpool)
-                .expect("bound gridpool exists");
-            gp.record_trade(Trade {
+
+            let taker_trade = Trade {
+                id: trade_id,
+                order_id: taker_id,
+                side: taker_side,
+                area: order.area.clone(),
+                period: order.period,
+                execution_time: now,
+                price: fill.price,
+                currency: taker_currency,
+                quantity: fill.quantity,
+                state: TradeState::Active,
+            };
+            self.gridpools
+                .get_mut(gridpool_id)
+                .expect("gridpool existed at start of submit")
+                .record_trade(taker_trade.clone());
+            self.publish_gridpool_trade(gridpool_id, taker_trade);
+
+            let maker_trade = Trade {
                 id: trade_id,
                 order_id: maker_id,
                 side: taker_side.opposite(),
@@ -305,28 +348,48 @@ impl World {
                 currency: taker_currency,
                 quantity: fill.quantity,
                 state: TradeState::Active,
+            };
+            self.gridpools
+                .get_mut(maker_gridpool)
+                .expect("bound gridpool exists")
+                .record_trade(maker_trade.clone());
+            self.publish_gridpool_trade(maker_gridpool, maker_trade);
+
+            // Public tape: one event per fill. Both areas equal in the
+            // single-area case Phase 4 supports; cross-area SIDC
+            // matches in Phase 7 will fork them.
+            self.publish_public_trade(PublicTrade {
+                id: trade_id,
+                buy_area: order.area.clone(),
+                sell_area: order.area.clone(),
+                period: order.period,
+                execution_time: now,
+                price: fill.price,
+                currency: taker_currency,
+                quantity: fill.quantity,
+                state: TradeState::Active,
             });
+
             let mut maker_fully_filled = false;
-            gp.update_order(maker_id, |d| {
-                d.filled_quantity += fill.quantity;
-                d.open_quantity -= fill.quantity;
-                d.modification_time = now;
-                d.state.actor = MarketActor::System;
-                if d.open_quantity.is_zero() {
-                    d.state.state = OrderState::Filled;
-                    d.state.reason = StateReason::FullExecution;
-                    maker_fully_filled = true;
-                } else {
-                    d.state.reason = StateReason::PartialExecution;
-                }
-            });
-            // Drop the gridpool binding once the maker is off the book.
-            // For LIMIT-only the matcher already popped it from the book;
-            // we just clear the reverse index here.
+            self.gridpools
+                .get_mut(maker_gridpool)
+                .expect("bound gridpool exists")
+                .update_order(maker_id, |d| {
+                    d.filled_quantity += fill.quantity;
+                    d.open_quantity -= fill.quantity;
+                    d.modification_time = now;
+                    d.state.actor = MarketActor::System;
+                    if d.open_quantity.is_zero() {
+                        d.state.state = OrderState::Filled;
+                        d.state.reason = StateReason::FullExecution;
+                        maker_fully_filled = true;
+                    } else {
+                        d.state.reason = StateReason::PartialExecution;
+                    }
+                });
             if maker_fully_filled {
                 self.unbind_resting_order(maker_id);
             }
-            // Fan-out the maker-side update to that gridpool's subscribers.
             let maker_detail = self
                 .gridpools
                 .get(maker_gridpool)
@@ -640,6 +703,32 @@ mod tests {
             .submit_order(GridpoolId(99), sample_buy(dec!(1.0), dec!(85.0)), t0())
             .unwrap_err();
         assert_eq!(err, SubmitError::UnknownGridpool);
+    }
+
+    #[test]
+    fn cross_match_emits_public_trade_and_per_gridpool_trades() {
+        let (mut w, gp) = setup_world_with_pool();
+        let mut public_rx = w.subscribe_public_trades();
+        let mut gridpool_rx = w.subscribe_gridpool_trades(gp).unwrap();
+        let _buy = w
+            .submit_order(gp, sample_buy(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+        let _sell = w
+            .submit_order(gp, sample_sell(dec!(1.0), dec!(85.0)), t0())
+            .unwrap();
+
+        // Public tape: one event per fill, here one fill.
+        let pt = public_rx.try_recv().unwrap();
+        assert_eq!(pt.price, dec!(85.0));
+        assert_eq!(pt.quantity, dec!(1.0));
+        assert!(public_rx.try_recv().is_err());
+
+        // Private tape on the (self-traded) gridpool: two events per
+        // fill (one per side of the match).
+        let t1 = gridpool_rx.try_recv().unwrap();
+        let t2 = gridpool_rx.try_recv().unwrap();
+        assert_eq!(t1.id, t2.id);
+        assert_ne!(t1.side, t2.side);
     }
 
     #[test]
