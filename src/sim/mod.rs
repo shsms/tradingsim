@@ -3,6 +3,7 @@ pub mod clock;
 pub mod counterparty;
 pub mod curve;
 pub mod decimal;
+pub mod demand;
 pub mod gridpool;
 pub mod market;
 pub mod matching;

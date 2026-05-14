@@ -128,10 +128,11 @@ fair-value reference, a price/size policy, and submit via
 =submit_counterparty_order=. A small trait sharing the spawn
 pattern would deduplicate =spawn_mm_task= / =spawn_aggressor_task=.
 
-*** TODO Move duck curve out of =scenarios.rs=
-=natural_duck_bias= + =decay_weight= + =effective_ref= are market
-mechanics, not scenarios. New module =sim::demand= (or extend
-=sim::curve=).
+*** DONE Move duck curve out of =scenarios.rs=
+=natural_duck_bias=, =decay_weight=, =lerp= now live in
+=sim::demand=. =scenarios.rs= re-exports them so the bias-tick
+call sites still work. =effective_ref= stays in =scenarios.rs= —
+it's tightly coupled to the bias tick's curve + weather lookup.
 
 *** TODO =Config::with_defaults()= to kill =bin/tradingsim.rs= branching
 Every section in the binary branches "if let Some(c) = lisp_config
