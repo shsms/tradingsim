@@ -17,12 +17,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
+use chrono_tz::Tz;
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
 use rust_decimal::Decimal;
 
+use crate::sim::clock::{Clock, SharedClock};
 use crate::sim::counterparty::{SharedAggressorConfig, SharedConfig};
 use crate::sim::curve::ForwardCurve;
 use crate::sim::weather::{SharedWeather, WeatherLocation, WeatherRegistry};
@@ -123,10 +125,16 @@ pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
 
 /// Interpolated bias for a scenario's current stage, given the runtime
 /// state and wallclock. In auto mode (`manual_override == false`) the
-/// bias tracks wallclock progress through [hour_from, hour_to). In
-/// manual mode it tracks elapsed time since the operator clicked,
-/// scaled by the stage's duration.
-pub fn stage_bias_now(stage: &Stage, runtime: &ScenarioRuntime, now: DateTime<Utc>) -> f64 {
+/// bias tracks local-civil-time progress through [hour_from, hour_to);
+/// in manual mode it tracks elapsed wallclock seconds since the
+/// operator clicked, scaled by the stage's duration. Stage hours
+/// are user-specified in the configured timezone.
+pub fn stage_bias_now(
+    stage: &Stage,
+    runtime: &ScenarioRuntime,
+    clock: &Clock,
+    now: DateTime<Utc>,
+) -> f64 {
     let duration_hours = (stage.hour_to - stage.hour_from).max(0.001);
     let t = if runtime.manual_override {
         runtime
@@ -137,14 +145,10 @@ pub fn stage_bias_now(stage: &Stage, runtime: &ScenarioRuntime, now: DateTime<Ut
             })
             .unwrap_or(0.0)
     } else {
-        let h = wallclock_hour(now);
+        let h = clock.local_hour(now);
         (h - stage.hour_from) / duration_hours
     };
     lerp(stage.bias_from, stage.bias_to, t.clamp(0.0, 1.0))
-}
-
-pub fn wallclock_hour(now: DateTime<Utc>) -> f64 {
-    now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0
 }
 
 pub fn wallclock_stage(def: &ScenarioDef, hour: f64) -> Option<usize> {
@@ -153,14 +157,22 @@ pub fn wallclock_stage(def: &ScenarioDef, hour: f64) -> Option<usize> {
         .position(|s| s.hour_from <= hour && hour < s.hour_to)
 }
 
-/// UTC datetime for today's start of the given fractional hour.
-fn today_at(hour: f64, now: DateTime<Utc>) -> DateTime<Utc> {
+/// UTC datetime for *today's local civil date* at `hour` (a local
+/// fractional hour). Used to seed `stage_entered_at` so the manual-
+/// override interpolation has a wallclock anchor to measure elapsed
+/// time against. DST spring-forward edge: `.earliest()` picks the
+/// first valid instant if `hour` falls in the skipped window.
+fn today_at(tz: Tz, hour: f64, now: DateTime<Utc>) -> DateTime<Utc> {
+    let local_date = now.with_timezone(&tz).date_naive();
     let total_seconds = (hour * 3600.0) as i64;
-    let date = now.date_naive();
-    let h = (total_seconds / 3600) as u32;
-    let m = ((total_seconds % 3600) / 60) as u32;
-    let s = (total_seconds % 60) as u32;
-    Utc.from_utc_datetime(&date.and_hms_opt(h, m, s).unwrap_or_default())
+    let h = ((total_seconds / 3600).rem_euclid(24)) as u32;
+    let m = ((total_seconds % 3600) / 60).rem_euclid(60) as u32;
+    let s = (total_seconds % 60).rem_euclid(60) as u32;
+    let naive = local_date.and_hms_opt(h, m, s).unwrap_or_default();
+    tz.from_local_datetime(&naive)
+        .earliest()
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or(now)
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +235,7 @@ pub fn spawn_bias_tick(
     bias_scale: SharedBiasScale,
     curve: SharedCurve,
     weather: SharedWeather,
+    clock: SharedClock,
     cadence: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -230,7 +243,11 @@ pub fn spawn_bias_tick(
         loop {
             tick.tick().await;
             let now = Utc::now();
-            let active = pick_active_stage(&scenarios, now);
+            // Snapshot the clock once per tick — Tz is Copy and
+            // Clock is tiny, so a quick clone is cheaper than
+            // holding the read guard across the body.
+            let clock_snap = clock.read().clone();
+            let active = pick_active_stage(&scenarios, &clock_snap, now);
             let scale = *bias_scale.read();
             let curve_snap = curve.read().clone();
 
@@ -239,10 +256,13 @@ pub fn spawn_bias_tick(
             // year drives both MM pricing here and the gRPC
             // weather forecast — keeping the simulated atmosphere
             // consistent with what a trading app's subscribed
-            // weather stream is being told.
+            // weather stream is being told. Wallclock-day fallback
+            // uses *local* date, so a scenario starting at 23:30
+            // local doesn't silently roll into the next ordinal
+            // because UTC has already crossed midnight.
             let scenario_date = active.as_ref().and_then(|(_, _, d)| *d);
             let day_of_year = scenario_date
-                .unwrap_or_else(|| now.date_naive())
+                .unwrap_or_else(|| clock_snap.local_date(now))
                 .ordinal();
 
             // Reset every registered location to its baseline and
@@ -281,7 +301,9 @@ pub fn spawn_bias_tick(
             }
 
             let weather_snap = weather.read().clone();
-            let scenario_bias = active.as_ref().map(|(s, rt, _)| stage_bias_now(s, rt, now));
+            let scenario_bias = active
+                .as_ref()
+                .map(|(s, rt, _)| stage_bias_now(s, rt, &clock_snap, now));
             apply_biases(
                 &aggressors,
                 &mms,
@@ -289,6 +311,7 @@ pub fn spawn_bias_tick(
                 scale,
                 &curve_snap,
                 &weather_snap,
+                &clock_snap,
                 day_of_year,
                 now,
             );
@@ -303,20 +326,25 @@ pub fn spawn_bias_tick(
 /// iteration yields.
 fn pick_active_stage(
     scenarios: &SharedScenarios,
+    clock: &Clock,
     now: DateTime<Utc>,
 ) -> Option<(Stage, ScenarioRuntime, Option<NaiveDate>)> {
     let mut guard = scenarios.lock();
-    let wallclock_h = wallclock_hour(now);
+    let local_h = clock.local_hour(now);
     for entry in guard.values_mut() {
         if entry.runtime.current_stage.is_none() {
             continue;
         }
         if !entry.runtime.manual_override
-            && let Some(idx) = wallclock_stage(&entry.def, wallclock_h)
+            && let Some(idx) = wallclock_stage(&entry.def, local_h)
             && entry.runtime.current_stage != Some(idx)
         {
             entry.runtime.current_stage = Some(idx);
-            entry.runtime.stage_entered_at = Some(today_at(entry.def.stages[idx].hour_from, now));
+            entry.runtime.stage_entered_at = Some(today_at(
+                clock.tz,
+                entry.def.stages[idx].hour_from,
+                now,
+            ));
         }
         if let Some(idx) = entry.runtime.current_stage
             && let Some(stage) = entry.def.stages.get(idx)
@@ -334,13 +362,14 @@ fn apply_biases(
     bias_scale: f64,
     curve: &ForwardCurve,
     weather: &WeatherRegistry,
+    clock: &Clock,
     day_of_year: u32,
     now: DateTime<Utc>,
 ) {
     let base_boundary = next_quarter_boundary(now);
     let period_hour_for = |offset: i64| -> f64 {
         let period_start = base_boundary + chrono::Duration::minutes(15 * offset);
-        wallclock_hour(period_start)
+        clock.local_hour(period_start)
     };
     let effective_for = |offset: i64| -> f64 {
         let natural = natural_duck_bias(period_hour_for(offset));

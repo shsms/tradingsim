@@ -130,6 +130,7 @@ pub struct Config {
     curve: crate::scenarios::SharedCurve,
     weather: crate::sim::weather::SharedWeather,
     weather_cadence: crate::sim::weather::SharedWeatherCadence,
+    clock: crate::sim::clock::SharedClock,
     market_suspended: Arc<RwLock<bool>>,
     recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     /// Extra paths registered via `(watch-file PATH)`; the notify
@@ -164,6 +165,7 @@ impl Config {
         let curve = crate::scenarios::new_curve();
         let weather = crate::sim::weather::new_state();
         let weather_cadence = crate::sim::weather::new_cadence();
+        let clock = crate::sim::clock::new_clock();
         let market_suspended = Arc::new(RwLock::new(false));
         let recall_queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
@@ -189,6 +191,7 @@ impl Config {
             curve.clone(),
             weather.clone(),
             weather_cadence.clone(),
+            clock.clone(),
             market_suspended.clone(),
             recall_queue.clone(),
             extra_watches.clone(),
@@ -222,6 +225,7 @@ impl Config {
             curve,
             weather,
             weather_cadence,
+            clock,
             market_suspended,
             recall_queue,
             extra_watches,
@@ -407,6 +411,14 @@ impl Config {
         self.weather_cadence.clone()
     }
 
+    /// Shared simulation clock — owns the Tz the physics and the UI
+    /// interpret UTC instants through. `(set-timezone "Europe/Paris")`
+    /// in config.lisp redirects a sim aimed at a different bidding
+    /// zone without recompiling.
+    pub fn clock(&self) -> crate::sim::clock::SharedClock {
+        self.clock.clone()
+    }
+
     /// Shared market-suspended flag. Set via `(suspend-market)`,
     /// cleared via `(resume-market)`. The bin hands the clone to
     /// the World so validate_common can short-circuit submissions.
@@ -448,6 +460,7 @@ fn register_runtime(
     curve: crate::scenarios::SharedCurve,
     weather: crate::sim::weather::SharedWeather,
     weather_cadence: crate::sim::weather::SharedWeatherCadence,
+    clock: crate::sim::clock::SharedClock,
     market_suspended: Arc<RwLock<bool>>,
     recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
@@ -466,6 +479,7 @@ fn register_runtime(
     register_bias_scale(ctx, bias_scale);
     register_curve(ctx, curve);
     register_weather(ctx, weather, weather_cadence);
+    register_clock(ctx, clock);
     register_market_controls(ctx, market_suspended, recall_queue);
     register_watches(ctx, extra_watches, load_dir);
 }
@@ -493,6 +507,23 @@ fn register_market_controls(
         recall_queue.lock().push_back(id as u64);
         Ok(id)
     });
+}
+
+fn register_clock(ctx: &mut TulispContext, clock: crate::sim::clock::SharedClock) {
+    // (set-timezone STR) — accepts any IANA zone name chrono-tz
+    // knows about (e.g. "Europe/Berlin", "Europe/Paris",
+    // "America/New_York"). Anything else returns a lisp error so
+    // config typos fail fast instead of silently defaulting.
+    ctx.defun(
+        "set-timezone",
+        move |name: String| -> Result<String, Error> {
+            let tz: chrono_tz::Tz = name
+                .parse()
+                .map_err(|_| Error::os_error(format!("unknown timezone: {name:?}")))?;
+            clock.write().tz = tz;
+            Ok(name)
+        },
+    );
 }
 
 fn register_weather(

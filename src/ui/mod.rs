@@ -26,6 +26,7 @@ struct UiState {
     world: Arc<RwLock<World>>,
     scenarios: Option<SharedScenarios>,
     weather: Option<crate::sim::weather::SharedWeather>,
+    clock: crate::sim::clock::SharedClock,
 }
 
 pub async fn serve(
@@ -33,15 +34,18 @@ pub async fn serve(
     world: Arc<RwLock<World>>,
     scenarios: Option<SharedScenarios>,
     weather: Option<crate::sim::weather::SharedWeather>,
+    clock: crate::sim::clock::SharedClock,
 ) -> std::io::Result<()> {
     let state = UiState {
         world,
         scenarios,
         weather,
+        clock,
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/info", get(api_info))
+        .route("/api/clock", get(api_clock))
         .route("/api/gridpools", get(api_gridpools))
         .route("/api/scenarios", get(api_scenarios))
         .route("/api/scenarios/{name}/start", post(api_scenario_start))
@@ -286,9 +290,9 @@ struct ScenarioJson {
     stage_entered_at: Option<String>,
 }
 
-fn scenario_to_json(e: &ScenarioEntry) -> ScenarioJson {
+fn scenario_to_json(e: &ScenarioEntry, clock: &crate::sim::clock::Clock) -> ScenarioJson {
     let now = chrono::Utc::now();
-    let h = wallclock_hour(now);
+    let h = clock.local_hour(now);
     ScenarioJson {
         name: e.def.name.clone(),
         description: e.def.description.clone(),
@@ -341,16 +345,18 @@ async fn api_weather(State(s): State<UiState>) -> Json<Vec<WeatherLocJson>> {
         return Json(Vec::new());
     };
     let now = chrono::Utc::now();
+    let clock = s.clock.read().clone();
     let reg = handle.read();
     // active_hour pins the panel to the active stage's midpoint
     // (e.g. 14.5 for a 13:00–16:00 "deep belly"), so a user
     // picking that stage at 2 AM still sees midday solar /
     // temperature. With no scenario running, fall back to the
-    // wallclock hour.
-    let hour = reg.active_hour.unwrap_or_else(|| wallclock_hour(now));
+    // configured-tz local hour — wallclock would be UTC, which
+    // doesn't match the physics that uses local civil time.
+    let hour = reg.active_hour.unwrap_or_else(|| clock.local_hour(now));
     let day = reg
         .active_day_of_year
-        .unwrap_or_else(|| chrono::Datelike::ordinal(&now.date_naive()));
+        .unwrap_or_else(|| clock.local_day_of_year(now));
     let out: Vec<WeatherLocJson> = reg
         .locations()
         .iter()
@@ -375,21 +381,43 @@ async fn api_scenarios(State(s): State<UiState>) -> Json<Vec<ScenarioJson>> {
     let Some(reg) = s.scenarios.as_ref() else {
         return Json(Vec::new());
     };
-    let mut out: Vec<ScenarioJson> = reg.lock().values().map(scenario_to_json).collect();
+    let clock = s.clock.read().clone();
+    let mut out: Vec<ScenarioJson> = reg
+        .lock()
+        .values()
+        .map(|e| scenario_to_json(e, &clock))
+        .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Json(out)
+}
+
+#[derive(Serialize)]
+struct ClockJson {
+    /// IANA timezone name the physics / scenarios / UI all use.
+    /// Lets the browser format ISO timestamps in the right zone
+    /// instead of falling back to whatever the user's OS reports —
+    /// remote operators looking at a Berlin-anchored sim still see
+    /// the hours scenarios expect.
+    tz: &'static str,
+}
+
+async fn api_clock(State(s): State<UiState>) -> Json<ClockJson> {
+    Json(ClockJson {
+        tz: s.clock.read().tz_name(),
+    })
 }
 
 async fn api_scenario_start(
     State(s): State<UiState>,
     Path(name): Path<String>,
 ) -> Result<Json<ScenarioJson>, StatusCode> {
+    let clock = s.clock.read().clone();
     mutate_scenario(&s, &name, |def, rt| {
         if def.stages.is_empty() {
             return Err(StatusCode::BAD_REQUEST);
         }
         let now = chrono::Utc::now();
-        let hour = wallclock_hour(now);
+        let hour = clock.local_hour(now);
         let idx = wallclock_stage(def, hour).unwrap_or(0);
         rt.current_stage = Some(idx);
         rt.started_at = Some(now);
@@ -417,6 +445,7 @@ async fn api_scenario_jump(
     State(s): State<UiState>,
     Path((name, idx)): Path<(String, usize)>,
 ) -> Result<Json<ScenarioJson>, StatusCode> {
+    let clock = s.clock.read().clone();
     mutate_scenario(&s, &name, |def, rt| {
         if idx >= def.stages.len() {
             return Err(StatusCode::BAD_REQUEST);
@@ -426,7 +455,7 @@ async fn api_scenario_jump(
         rt.stage_entered_at = Some(now);
         // Manual unless the operator just clicked the wallclock-matching
         // stage — that's "resume auto", not "freeze here".
-        rt.manual_override = wallclock_stage(def, wallclock_hour(now)) != Some(idx);
+        rt.manual_override = wallclock_stage(def, clock.local_hour(now)) != Some(idx);
         Ok(())
     })
 }
@@ -442,6 +471,7 @@ async fn api_scenario_stop(
 }
 
 fn jump_relative(s: &UiState, name: &str, delta: i64) -> Result<Json<ScenarioJson>, StatusCode> {
+    let clock = s.clock.read().clone();
     mutate_scenario(s, name, |def, rt| {
         let cur = rt.current_stage.ok_or(StatusCode::BAD_REQUEST)? as i64;
         let target = cur + delta;
@@ -452,7 +482,7 @@ fn jump_relative(s: &UiState, name: &str, delta: i64) -> Result<Json<ScenarioJso
         let now = chrono::Utc::now();
         rt.current_stage = Some(idx);
         rt.stage_entered_at = Some(now);
-        rt.manual_override = wallclock_stage(def, wallclock_hour(now)) != Some(idx);
+        rt.manual_override = wallclock_stage(def, clock.local_hour(now)) != Some(idx);
         Ok(())
     })
 }
@@ -462,10 +492,11 @@ where
     F: FnOnce(&crate::scenarios::ScenarioDef, &mut ScenarioRuntime) -> Result<(), StatusCode>,
 {
     let reg = s.scenarios.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let clock = s.clock.read().clone();
     let mut guard = reg.lock();
     let entry = guard.get_mut(name).ok_or(StatusCode::NOT_FOUND)?;
     f(&entry.def, &mut entry.runtime)?;
-    Ok(Json(scenario_to_json(entry)))
+    Ok(Json(scenario_to_json(entry, &clock)))
 }
 
-use crate::scenarios::{wallclock_hour, wallclock_stage};
+use crate::scenarios::wallclock_stage;

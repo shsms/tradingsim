@@ -298,18 +298,24 @@ async fn main() {
         // already on-curve, ahead of the first bias tick a few
         // seconds later.
         {
-            use chrono::{Datelike, Timelike};
             let curve_handle = c.curve();
             let weather_handle = c.weather();
+            let clock_handle = c.clock();
             let curve = curve_handle.read();
             let weather = weather_handle.read();
+            let clock = clock_handle.read().clone();
             for view in &mm_views {
                 let cfg_snap = view.shared_config.read();
                 let period_start = cfg_snap.period.start;
                 let area_code = cfg_snap.area.code.clone();
                 drop(cfg_snap);
-                let hour = period_start.hour() as f64 + period_start.minute() as f64 / 60.0;
-                let day = period_start.ordinal();
+                // Period start in the configured *local* zone so the
+                // curve lookup (peak/belly hours are local) and the
+                // solar-elevation day-of-year both land on the right
+                // value at boot — straight UTC was peaking around
+                // CEST 14:00 in summer.
+                let hour = clock.local_hour(period_start);
+                let day = clock.local_day_of_year(period_start);
                 let loc = weather.for_area(&area_code);
                 // Seed both baseline (the bias tick's target) and
                 // the live price so the first refresh quotes
@@ -329,6 +335,7 @@ async fn main() {
                 c.bias_scale(),
                 c.curve(),
                 c.weather(),
+                c.clock(),
                 Duration::from_secs(5),
             );
         }
@@ -388,9 +395,17 @@ async fn main() {
         let world_for_ui = Arc::clone(&world);
         let scenarios = lisp_config_arc.as_ref().map(|c| c.scenarios());
         let weather = lisp_config_arc.as_ref().map(|c| c.weather());
+        // If no lisp config loaded, use a default Berlin clock so the
+        // UI's /api/clock endpoint still has something to hand back.
+        let clock = lisp_config_arc
+            .as_ref()
+            .map(|c| c.clock())
+            .unwrap_or_else(tradingsim::sim::clock::new_clock);
         let ui_addr: std::net::SocketAddr = "127.0.0.1:8811".parse().unwrap();
         tokio::spawn(async move {
-            if let Err(e) = ui_server::serve(ui_addr, world_for_ui, scenarios, weather).await {
+            if let Err(e) =
+                ui_server::serve(ui_addr, world_for_ui, scenarios, weather, clock).await
+            {
                 log::error!("UI server exited: {e}");
             }
         });
