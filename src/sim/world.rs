@@ -256,6 +256,13 @@ impl World {
             .unwrap_or_default()
     }
 
+    /// Number of distinct undirected coupling edges. Each edge is
+    /// stored twice in the inner maps (A→B + B→A), so half the total
+    /// is the unique-pair count.
+    pub fn coupling_count(&self) -> usize {
+        self.couplings.values().map(|m| m.len()).sum::<usize>() / 2
+    }
+
     /// MWh remaining on the (a, b) edge for the given contract.
     /// Returns `None` when the edge is uncapped.
     pub fn remaining_capacity(

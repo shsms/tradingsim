@@ -92,13 +92,7 @@ async fn api_info(State(s): State<UiState>) -> Json<InfoResp> {
         version: env!("CARGO_PKG_VERSION"),
         gridpools: w.gridpools().len(),
         markets: w.markets().len(),
-        couplings: w
-            .gridpools()
-            .iter()
-            .flat_map(|g| g.areas.iter())
-            .flat_map(|a| w.coupled_areas(a))
-            .count()
-            / 2,
+        couplings: w.coupling_count(),
     })
 }
 

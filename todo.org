@@ -17,10 +17,11 @@ Outcome of the exhaustive review. Tier ordering = bang-for-buck.
 inside =handle_book_ws=. Both imports were genuinely unused — dropped
 the stubs and the imports.
 
-*** TODO Fix =/api/info= coupling undercount
-Walks =gridpools().areas= so couplings on markets without a pool
-are invisible. Walk =markets()= directly. The =/ 2= dedup is also
-brittle — drop it once de-duplication is explicit.
+*** DONE Fix =/api/info= coupling undercount
+Added =World::coupling_count()= which walks the actual couplings
+map (every edge stored as A→B + B→A, halved for the unique count).
+=/api/info= calls it directly. Removed the gridpool-area indirection
+and the inline =/ 2= dedup.
 
 *** TODO MM goes silent on spread collapse
 =MarketMaker::refresh= cancels both quotes unconditionally then
