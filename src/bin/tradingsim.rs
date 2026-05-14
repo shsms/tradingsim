@@ -168,7 +168,7 @@ async fn main() {
             let start = first_hour + chrono::Duration::hours(hour_offset);
             let period = DeliveryPeriod {
                 start,
-                duration: DeliveryDuration::DeliveryDuration60,
+                duration: DeliveryDuration::DeliveryDuration15,
             };
             let cfg = MarketMakerConfig::de_lu_default(area.clone(), period);
             log::info!(

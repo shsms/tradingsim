@@ -85,8 +85,8 @@ pub struct Config {
     /// stay pending forever.
     timer_handle: tulisp_async::Handle,
     /// Anchor time for relative period offsets. Set at Config::new
-    /// so that `(make-market-maker :hour-offset N …)` always builds
-    /// the same absolute period within one config-load.
+    /// so that `(make-market-maker :quarter-offset N …)` always
+    /// builds the same absolute period within one config-load.
     anchor: DateTime<Utc>,
 }
 
@@ -288,9 +288,9 @@ AsPlist! {
     pub struct MakeMmArgs {
         name: String,
         area<":area">: String,
-        /// Hours after the next hour boundary on or after Config::anchor.
-        /// 0 = next hour; 1 = the one after that.
-        hour_offset<":hour-offset">: Option<i64> {= None},
+        /// Quarter-hours after the next 15-min boundary on or after
+        /// Config::anchor. 0 = the next quarter; 4 = one hour later.
+        quarter_offset<":quarter-offset">: Option<i64> {= None},
         reference<":reference">: Option<f64> {= None},
         spread<":spread">: Option<f64> {= None},
         size<":size">: Option<f64> {= None},
@@ -301,9 +301,9 @@ AsPlist! {
     }
 }
 
-fn next_hour_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
+fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
     let secs = now.timestamp();
-    let bucket = (secs / 3600 + 1) * 3600;
+    let bucket = (secs / 900 + 1) * 900;
     DateTime::from_timestamp(bucket, 0).unwrap()
 }
 
@@ -323,9 +323,9 @@ fn register_market_makers(
             let a = args.into_inner();
             let area = Area::eic(&a.area);
             let period = DeliveryPeriod {
-                start: next_hour_boundary(anchor)
-                    + chrono::Duration::hours(a.hour_offset.unwrap_or(0)),
-                duration: DeliveryDuration::DeliveryDuration60,
+                start: next_quarter_boundary(anchor)
+                    + chrono::Duration::minutes(15 * a.quarter_offset.unwrap_or(0)),
+                duration: DeliveryDuration::DeliveryDuration15,
             };
             let mut cfg = MarketMakerConfig {
                 area,
@@ -468,9 +468,9 @@ mod tests {
         let f = write_tmp(
             r#"
             (%make-market-maker
-              :name "h0"
+              :name "q0"
               :area "10Y1001A1001A82H"
-              :hour-offset 0
+              :quarter-offset 0
               :reference 90.00
               :spread 0.50
               :size 2.0
@@ -481,15 +481,15 @@ mod tests {
         let mms = cfg.market_makers();
         assert_eq!(mms.len(), 1);
         let mm = &mms[0];
-        assert_eq!(mm.name, "h0");
+        assert_eq!(mm.name, "q0");
         assert_eq!(mm.seed, 7);
         let inner = mm.shared_config.read();
         assert_eq!(inner.reference_price, rust_decimal::dec!(90.00));
         assert_eq!(inner.spread, rust_decimal::dec!(0.50));
         assert_eq!(inner.size, rust_decimal::dec!(2.0));
-        // Next hour boundary after `anchor`.
+        // Next 15-min boundary after `anchor`.
         assert!(inner.period.start > cfg.anchor());
-        assert_eq!(inner.period.duration, DeliveryDuration::DeliveryDuration60);
+        assert_eq!(inner.period.duration, DeliveryDuration::DeliveryDuration15);
     }
 
     #[tokio::test]

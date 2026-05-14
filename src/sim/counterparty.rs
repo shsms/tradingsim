@@ -174,7 +174,7 @@ mod tests {
                 Area::eic("10Y1001A1001A82H"),
                 DeliveryPeriod {
                     start: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-                    duration: DeliveryDuration::DeliveryDuration60,
+                    duration: DeliveryDuration::DeliveryDuration15,
                 },
             )
         };

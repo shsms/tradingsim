@@ -24,14 +24,14 @@
  :name "default"
  :areas '("10Y1001A1001A82H"))
 
-;; Four hour-contracts of synthetic liquidity in DE-LU, starting at
-;; the next hour boundary. Each MM holds a SharedConfig the
+;; Eight 15-min contracts of synthetic liquidity in DE-LU, starting
+;; at the next 15-min boundary. Each MM holds a SharedConfig the
 ;; (set-mm-* …) defuns mutate in place.
 
 (%make-market-maker
- :name "de-lu-h0"
+ :name "de-lu-q0"
  :area "10Y1001A1001A82H"
- :hour-offset 0
+ :quarter-offset 0
  :reference 85.00
  :spread 0.40
  :size 1.0
@@ -39,30 +39,30 @@
  :seed 1)
 
 (%make-market-maker
- :name "de-lu-h1"
+ :name "de-lu-q1"
  :area "10Y1001A1001A82H"
- :hour-offset 1
- :reference 86.00          ;; peak hour: slightly elevated
- :spread 0.50
- :size 1.0
- :noise 0.15
- :seed 2)
-
-(%make-market-maker
- :name "de-lu-h2"
- :area "10Y1001A1001A82H"
- :hour-offset 2
- :reference 84.00
+ :quarter-offset 1
+ :reference 85.50
  :spread 0.40
  :size 1.0
  :noise 0.10
+ :seed 2)
+
+(%make-market-maker
+ :name "de-lu-q2"
+ :area "10Y1001A1001A82H"
+ :quarter-offset 2
+ :reference 86.00          ;; ramp into peak quarter
+ :spread 0.50
+ :size 1.0
+ :noise 0.15
  :seed 3)
 
 (%make-market-maker
- :name "de-lu-h3"
+ :name "de-lu-q3"
  :area "10Y1001A1001A82H"
- :hour-offset 3
- :reference 83.00
+ :quarter-offset 3
+ :reference 85.00
  :spread 0.40
  :size 1.0
  :noise 0.10
@@ -74,8 +74,8 @@
 ;; shifts the ask down (the MM wants to sell harder). Uncomment to
 ;; bias the simulated market.
 ;;
-;; (set-mm-demand "de-lu-h1" 0.20)   ;; peak hour: aggressive procurement
-;; (set-mm-surplus "de-lu-h2" 0.30)  ;; midday solar dump
+;; (set-mm-demand "de-lu-q2" 0.20)   ;; peak quarter: aggressive procurement
+;; (set-mm-surplus "de-lu-q3" 0.30)  ;; midday solar dump
 
 ;; --- Scheduled callbacks ---------------------------------------------------
 ;;
@@ -87,4 +87,4 @@
 ;;    :milliseconds 5000
 ;;    :call (lambda ()
 ;;            (setq step (min 12 (+ step 1)))
-;;            (set-mm-demand "de-lu-h0" (* step 0.033)))))
+;;            (set-mm-demand "de-lu-q0" (* step 0.033)))))

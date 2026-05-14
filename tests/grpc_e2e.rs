@@ -86,7 +86,7 @@ fn hour_at_noon() -> DeliveryPeriod {
             seconds: 1778587200, // 2026-05-13T12:00:00Z
             nanos: 0,
         }),
-        duration: DeliveryDuration::DeliveryDuration60 as i32,
+        duration: DeliveryDuration::DeliveryDuration15 as i32,
     }
 }
 
