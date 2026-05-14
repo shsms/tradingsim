@@ -234,24 +234,57 @@ td { padding: 2px 6px; }
   flex-direction: column;
   gap: 1px;
   margin-top: 8px;
-  max-height: 160px;
+  max-height: 180px;
   overflow-y: auto;
+  /* Always reserve scrollbar gutter so the header (sticky at the
+     top of this same container) stays aligned with the rows
+     beneath whether scrolling kicks in or not. Without this, the
+     scrollbar covers the "C" of "14 °C" in the weather column. */
+  scrollbar-gutter: stable;
   font-size: var(--fs-small);
   font-variant-numeric: tabular-nums;
 }
-.stage-list-row {
+.stage-list-row,
+.stage-list-header {
   display: grid;
-  /* Name shrinks to its content, weather gets the room — the
-     scenario stage names are usually short ("overnight", "deep
-     belly") so a fixed 120 px is plenty, and the weather chips
-     ("☁ 0.10 · 3.0 m/s · 14 °C") want >= 160 px to avoid the
-     row scrolling sideways. */
-  grid-template-columns: 14px 14px 120px 92px 86px minmax(0, 1fr);
+  /* Time + bias widened to 100 px each so the comfortable-mode
+     font (up to ~13 px) doesn't wrap "00:00–05:00" / "0.50 →
+     0.50" inside its cell. Name kept at 120 px (stage names are
+     short post the "HH:MM " strip). Weather takes the remainder
+     with a clamp(0, 1fr) so it never forces overflow. */
+  grid-template-columns: 14px 14px 120px 115px 115px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   padding: 2px 4px;
-  border-radius: 3px;
-  cursor: pointer;
+}
+.stage-list-row { border-radius: 3px; cursor: pointer; }
+.stage-list-header {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: var(--fs-mini);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+  margin-bottom: 2px;
+  z-index: 1;
+}
+.stage-list-header .stage-name,
+.stage-list-header .stage-time,
+.stage-list-header .stage-bias,
+.stage-list-header .stage-weather {
+  font-size: var(--fs-mini);
+  color: var(--muted);
+}
+.stage-list-row .stage-name,
+.stage-list-row .stage-time,
+.stage-list-row .stage-bias,
+.stage-list-row .stage-weather {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .stage-list-row .stage-weather {
   color: var(--muted);
@@ -1147,7 +1180,17 @@ function renderScenarioActive(s, safe) {
         <div class="timeline-now" style="left:${nowPct}%"></div>
       </div>
       <div class="timeline-axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-      <div class="stage-list">${stageRows}</div>
+      <div class="stage-list">
+        <div class="stage-list-header">
+          <span></span>
+          <span></span>
+          <span class="stage-name">stage</span>
+          <span class="stage-time">time</span>
+          <span class="stage-bias">bias</span>
+          <span class="stage-weather">weather</span>
+        </div>
+        ${stageRows}
+      </div>
     </div>`;
 }
 
