@@ -713,9 +713,9 @@ impl World {
         if !order.period.is_aligned() {
             return Err(SubmitError::UnalignedDeliveryPeriod);
         }
-        if order.price <= Decimal::ZERO {
-            return Err(SubmitError::NonPositivePrice);
-        }
+        // Real intraday markets (continuous-trading etc.) admit negative prices
+        // under supply gluts. The sim follows suit; only the tick / grid
+        // checks remain on the price value itself.
         if !is_multiple_of(order.price, rules.price_tick) {
             return Err(SubmitError::PriceOffGrid);
         }
@@ -1099,9 +1099,6 @@ impl World {
         let new_valid_until = upd.valid_until.or(snapshot.order.valid_until);
         let new_tag = upd.tag.clone().or_else(|| snapshot.order.tag.clone());
 
-        if new_price <= Decimal::ZERO {
-            return Err(SubmitError::NonPositivePrice);
-        }
         if !is_multiple_of(new_price, rules.price_tick) {
             return Err(SubmitError::PriceOffGrid);
         }

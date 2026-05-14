@@ -138,7 +138,7 @@ impl MarketMaker {
         let bid_price = snap_to_tick(bid_raw, cfg.tick);
         let ask_price = snap_to_tick(ask_raw, cfg.tick);
 
-        if bid_price >= ask_price || bid_price <= Decimal::ZERO {
+        if bid_price >= ask_price {
             return;
         }
 

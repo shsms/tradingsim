@@ -21,7 +21,9 @@ use chrono::{DateTime, Timelike, TimeZone, Utc};
 use parking_lot::Mutex;
 use serde::Serialize;
 
-use crate::sim::counterparty::SharedAggressorConfig;
+use rust_decimal::Decimal;
+
+use crate::sim::counterparty::{SharedAggressorConfig, SharedConfig};
 
 #[derive(Clone, Debug)]
 pub struct Stage {
@@ -161,15 +163,36 @@ pub struct AggressorView {
     pub shared_config: SharedAggressorConfig,
 }
 
+/// Same shape as [`AggressorView`] but holding a market-maker's
+/// SharedConfig. The tick translates the effective bias into MM
+/// demand + surplus tilts so the quoted bid/ask shift symmetrically
+/// — the mechanism prices use to move quickly under load.
+#[derive(Clone)]
+pub struct MmView {
+    pub quarter_offset: i64,
+    pub shared_config: SharedConfig,
+}
+
+/// EUR per (bias - 0.5) unit added to the MM's demand / surplus
+/// tilt. With scale = 25 and a scenario bias of 0.18 the imbalance
+/// is -0.32; that becomes an 8-EUR shift on both bid and ask, so
+/// each trade pulls the MM reference down by ~0.8 EUR per MM tick.
+/// At one trade per 2 s on the imminent quarters, that's enough to
+/// push prices into negative territory within ~3 minutes of a
+/// deep-belly stage — matching real intraday behaviour.
+const MM_BIAS_SCALE: f64 = 25.0;
+
 /// Spawn a tokio task that, every `cadence`, walks `aggressors` and
-/// writes each one's effective side-bias to its SharedConfig. The
-/// scenarios registry is consulted on each tick: a running scenario's
-/// current stage gets auto-advanced to the wallclock-matching stage
-/// (unless the operator has set `manual_override`), and its stage
-/// bias is blended into the per-aggressor natural-curve bias by the
-/// quarter-offset decay weight.
+/// `mms` and writes their effective side-bias / demand / surplus to
+/// the SharedConfigs. The scenarios registry is consulted on each
+/// tick: a running scenario's current stage gets auto-advanced to
+/// the wallclock-matching stage (unless the operator has set
+/// `manual_override`), and its stage bias is blended into the
+/// per-contract natural-curve bias by the quarter-offset decay
+/// weight.
 pub fn spawn_bias_tick(
     aggressors: Vec<AggressorView>,
+    mms: Vec<MmView>,
     scenarios: SharedScenarios,
     cadence: Duration,
 ) -> tokio::task::JoinHandle<()> {
@@ -179,7 +202,7 @@ pub fn spawn_bias_tick(
             tick.tick().await;
             let now = Utc::now();
             let scenario_bias = pick_active_bias(&scenarios, now);
-            apply_biases(&aggressors, scenario_bias, now);
+            apply_biases(&aggressors, &mms, scenario_bias, now);
         }
     })
 }
@@ -220,6 +243,7 @@ fn pick_active_bias(scenarios: &SharedScenarios, now: DateTime<Utc>) -> Option<f
 
 fn apply_biases(
     aggressors: &[AggressorView],
+    mms: &[MmView],
     scenario_bias: Option<f64>,
     now: DateTime<Utc>,
 ) {
@@ -227,19 +251,30 @@ fn apply_biases(
     // when (now's nearest quarter boundary + offset*15min) crosses an
     // hour mark — slow enough that recomputing per-tick is cheap.
     let base_boundary = next_quarter_boundary(now);
-    for view in aggressors {
-        let period_start = base_boundary
-            + chrono::Duration::minutes(15 * view.quarter_offset);
-        let period_hour = wallclock_hour(period_start);
-        let natural = natural_duck_bias(period_hour);
-        let effective = match scenario_bias {
-            Some(stage_bias) => {
-                let w = decay_weight(view.quarter_offset);
-                lerp(natural, stage_bias, w)
-            }
+    let effective_for = |offset: i64| -> f64 {
+        let period_start = base_boundary + chrono::Duration::minutes(15 * offset);
+        let natural = natural_duck_bias(wallclock_hour(period_start));
+        match scenario_bias {
+            Some(stage_bias) => lerp(natural, stage_bias, decay_weight(offset)),
             None => natural,
-        };
-        view.shared_config.write().side_bias = effective.clamp(0.0, 1.0);
+        }
+        .clamp(0.0, 1.0)
+    };
+    for view in aggressors {
+        view.shared_config.write().side_bias = effective_for(view.quarter_offset);
+    }
+    for view in mms {
+        let bias = effective_for(view.quarter_offset);
+        // Translate flow imbalance into MM tilts so the quotes shift
+        // even before trades have a chance to drag the reference. A
+        // bias > 0.5 (buy pressure) pushes both bid and ask up via
+        // positive demand + negative surplus; bias < 0.5 does the
+        // mirror image.
+        let imbalance = bias - 0.5;
+        let shift = imbalance * MM_BIAS_SCALE;
+        let mut cfg = view.shared_config.write();
+        cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
+        cfg.surplus = Decimal::try_from(-shift).unwrap_or(Decimal::ZERO);
     }
 }
 

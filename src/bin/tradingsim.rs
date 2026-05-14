@@ -200,10 +200,15 @@ async fn main() {
 
     let world = Arc::new(Mutex::new(world));
 
+    let mut mm_views: Vec<tradingsim::scenarios::MmView> = Vec::new();
     if !mm_specs.is_empty() {
         log::info!("Spawning {} market-maker(s) from config.lisp", mm_specs.len());
         for spec in mm_specs {
             let offset = spec.quarter_offset;
+            mm_views.push(tradingsim::scenarios::MmView {
+                quarter_offset: offset,
+                shared_config: spec.shared_config.clone(),
+            });
             let mm = MarketMaker::with_shared_config(spec.shared_config, spec.seed);
             spawn_mm_task(Arc::clone(&world), mm, offset);
         }
@@ -259,12 +264,17 @@ async fn main() {
     }
 
     // Bias tick — applies the natural duck curve to every aggressor
-    // every 5 s, and blends in any active scenario's stage-bias on
-    // top of that (weighted by quarter-offset decay).
+    // (sets side_bias) and every MM (sets demand + surplus) every 5
+    // s. When a scenario is active, its stage bias blends in on top
+    // weighted by quarter-offset decay. The MM tilts give an
+    // immediate quote shift on top of the slower follow-last-trade
+    // drift, so visible price moves land within seconds rather than
+    // minutes.
     if let Some(scenarios) = lisp_config_arc.as_ref().map(|c| c.scenarios()) {
-        if !bias_views.is_empty() {
+        if !bias_views.is_empty() || !mm_views.is_empty() {
             tradingsim::scenarios::spawn_bias_tick(
                 bias_views,
+                mm_views,
                 scenarios,
                 Duration::from_secs(5),
             );
