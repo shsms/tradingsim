@@ -311,8 +311,13 @@ async fn main() {
                 let hour = period_start.hour() as f64 + period_start.minute() as f64 / 60.0;
                 let day = period_start.ordinal();
                 let loc = weather.for_area(&area_code);
-                view.shared_config.write().reference_price =
-                    tradingsim::scenarios::effective_ref(&curve, loc, hour, day);
+                // Seed both baseline (the bias tick's target) and
+                // the live price so the first refresh quotes
+                // on-curve before the first bias tick fires.
+                let seeded = tradingsim::scenarios::effective_ref(&curve, loc, hour, day);
+                let mut w = view.shared_config.write();
+                w.reference_baseline = seeded;
+                w.reference_price = seeded;
             }
         }
 

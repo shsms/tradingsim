@@ -29,7 +29,19 @@ pub struct MarketMakerConfig {
     pub area: Area,
     pub period: DeliveryPeriod,
     pub currency: Currency,
-    /// Mid-price reference, EUR/MWh.
+    /// Fundamentals target, EUR/MWh. The scenario bias tick rewrites
+    /// this every 5 s from `forward_curve + weather + stage_bias`;
+    /// the MM refresh mean-reverts `reference_price` toward it. The
+    /// split lets `follow_last_trade` actually accumulate over many
+    /// refreshes — previously the bias tick clobbered the drifted
+    /// reference straight back to the curve value 5 s later, so
+    /// quotes never moved without a stage change.
+    pub reference_baseline: Decimal,
+    /// Live mid-price, EUR/MWh. Walks each refresh: mean-reverts
+    /// toward `reference_baseline`, follows recent public trades at
+    /// `follow_last_trade`, plus a random step scaled by
+    /// `price_noise` × horizon-to-gate. Read by `quote_pair` for
+    /// posting bid/ask.
     pub reference_price: Decimal,
     /// Half-spread; bid is reference - spread, ask is reference + spread.
     pub spread: Decimal,
@@ -60,6 +72,7 @@ impl MarketMakerConfig {
             area,
             period,
             currency: Currency::Eur,
+            reference_baseline: dec!(85.00),
             reference_price: dec!(85.00),
             spread: dec!(0.40),
             size: dec!(1.0),
@@ -106,13 +119,14 @@ impl MarketMaker {
     }
 
     /// Cancel any outstanding quotes, then post a fresh bid + ask
-    /// around the (drift-walked) reference price.
+    /// around the live reference price.
     pub fn refresh(&mut self, world: &mut World, now: DateTime<Utc>) {
-        // Reference-drift pass — if follow_last_trade > 0, pull the
-        // shared reference toward the most recent public trade on
-        // this contract. Runs before the quote-cancel/repost so the
-        // new quotes reflect the drift.
-        self.drift_reference(world);
+        // Step the reference once per refresh — mean-revert toward
+        // the fundamentals baseline, follow the last public trade,
+        // and take one random-walk step whose amplitude grows as
+        // delivery approaches. Runs before cancel/repost so the new
+        // quotes reflect the just-stepped price.
+        self.step_reference(world, now);
 
         if let Some(id) = self.bid_id.take() {
             world.cancel_counterparty_order(id);
@@ -126,13 +140,7 @@ impl MarketMaker {
         // for this quote pair.
         let cfg = self.config.read().clone();
 
-        let noise = if cfg.price_noise.is_zero() {
-            Decimal::ZERO
-        } else {
-            let n: i64 = self.rng.gen_range(-100..=100);
-            Decimal::new(n, 2) * cfg.price_noise
-        };
-        let mid = cfg.reference_price + noise;
+        let mid = cfg.reference_price;
         let bid_raw = mid - cfg.spread + cfg.demand;
         let ask_raw = mid + cfg.spread - cfg.surplus;
         let bid_price = snap_to_tick(bid_raw, cfg.tick);
@@ -150,29 +158,75 @@ impl MarketMaker {
         }
     }
 
-    fn drift_reference(&mut self, world: &World) {
-        let (rate, area, period, current_ref) = {
+    /// Move `reference_price` one refresh forward. Three additive
+    /// components:
+    ///
+    /// 1. Mean-reversion toward `reference_baseline` at
+    ///    [`MEAN_REVERT_RATE`] per tick — half-life ≈ 35 refreshes
+    ///    (~70 s at the default 2 s cadence). Slow enough that
+    ///    follow-last-trade and walk can accumulate visible drift
+    ///    between scenario stage transitions; fast enough that the
+    ///    quote catches up to a new stage's fundamentals within
+    ///    about a minute.
+    /// 2. Follow-last-trade pull: a `follow_last_trade` × gap step
+    ///    toward the most recent public trade on this contract.
+    /// 3. Random-walk step of amplitude `price_noise`, multiplied
+    ///    by a horizon-to-gate scale (1× at ≥2 h to gate, ramping
+    ///    linearly to 3× at gate close). Real intraday markets'
+    ///    volatility increases as delivery approaches; this
+    ///    approximates that ramp.
+    fn step_reference(&mut self, world: &World, now: DateTime<Utc>) {
+        let (area, period, baseline, current, follow_rate, walk_amp) = {
             let c = self.config.read();
             (
-                c.follow_last_trade,
                 c.area.clone(),
                 c.period,
+                c.reference_baseline,
                 c.reference_price,
+                c.follow_last_trade,
+                c.price_noise,
             )
         };
-        if rate <= Decimal::ZERO {
-            return;
+
+        let mut new_ref = current + (baseline - current) * MEAN_REVERT_RATE;
+
+        if follow_rate > Decimal::ZERO {
+            let hist = world.public_trade_history();
+            let last = hist
+                .iter()
+                .rev()
+                .find(|t| t.period == period && (t.buy_area == area || t.sell_area == area));
+            if let Some(t) = last {
+                new_ref += (t.price - current) * follow_rate;
+            }
         }
-        let hist = world.public_trade_history();
-        let last = hist
-            .iter()
-            .rev()
-            .find(|t| t.period == period && (t.buy_area == area || t.sell_area == area));
-        if let Some(t) = last {
-            let new_ref = current_ref + (t.price - current_ref) * rate;
-            self.config.write().reference_price = new_ref;
+
+        if !walk_amp.is_zero() {
+            let n: i64 = self.rng.gen_range(-100..=100);
+            let scale = gate_close_scale(period.start, now);
+            let amp = walk_amp * Decimal::try_from(scale).unwrap_or(Decimal::ONE);
+            new_ref += Decimal::new(n, 2) * amp;
         }
+
+        self.config.write().reference_price = new_ref;
     }
+}
+
+/// Per-refresh fraction of the gap to `reference_baseline` that
+/// `step_reference` closes. Calibrated as a half-life: a value `r`
+/// gives half-life `ln(2) / r` refreshes, so 0.02 → 35 refreshes
+/// (~70 s at the default 2 s cadence).
+const MEAN_REVERT_RATE: Decimal = dec!(0.02);
+
+/// Scales `price_noise` as the contract approaches gate close
+/// (= `period.start`). 1.0 at ≥2 h to gate, linear ramp to 3.0
+/// right at gate. Past gate the MM shouldn't be quoting anyway,
+/// but for safety the value clamps non-negative.
+fn gate_close_scale(gate: DateTime<Utc>, now: DateTime<Utc>) -> f64 {
+    let secs = (gate - now).num_seconds().max(0) as f64;
+    let hours = secs / 3600.0;
+    let proximity = ((2.0 - hours) / 2.0).clamp(0.0, 1.0);
+    1.0 + 2.0 * proximity
 }
 
 // -----------------------------------------------------------------------------

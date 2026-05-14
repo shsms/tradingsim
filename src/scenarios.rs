@@ -369,7 +369,15 @@ fn apply_biases(
             day_of_year,
         );
         let mut cfg = view.shared_config.write();
-        cfg.reference_price = new_ref;
+        // Write the fundamentals target — the MM refresh
+        // (step_reference) mean-reverts the live reference_price
+        // toward this every 2 s. Bypassing the live field is
+        // deliberate: each refresh between bias ticks now gets to
+        // accumulate the follow-last-trade pull + random walk
+        // instead of being snapped back to the curve value every
+        // 5 s. Scenario stage transitions still propagate quickly —
+        // the mean-revert pulls visibly within a few refreshes.
+        cfg.reference_baseline = new_ref;
         cfg.demand = Decimal::try_from(shift).unwrap_or(Decimal::ZERO);
         cfg.surplus = Decimal::try_from(-shift).unwrap_or(Decimal::ZERO);
     }

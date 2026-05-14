@@ -1008,14 +1008,19 @@ fn register_market_makers(
                     + chrono::Duration::minutes(15 * a.quarter_offset.unwrap_or(0)),
                 duration: DeliveryDuration::DeliveryDuration15,
             };
+            let reference = a
+                .reference
+                .map(f64_to_dec)
+                .unwrap_or_else(|| f64_to_dec(85.00));
             let mut cfg = MarketMakerConfig {
                 area,
                 period,
                 currency: Currency::Eur,
-                reference_price: a
-                    .reference
-                    .map(f64_to_dec)
-                    .unwrap_or_else(|| f64_to_dec(85.00)),
+                // Seed baseline and live price together so the first
+                // refresh has nowhere to drift from until the bias
+                // tick computes a fundamentals-derived baseline.
+                reference_baseline: reference,
+                reference_price: reference,
                 spread: a.spread.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.40)),
                 size: a.size.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(1.0)),
                 demand: a.demand.map(f64_to_dec).unwrap_or(Decimal::ZERO),
@@ -1078,7 +1083,14 @@ fn register_market_makers(
     }
 
     mk_setter(ctx, "set-mm-reference", market_makers.clone(), |c, v| {
-        c.reference_price = f64_to_dec(v);
+        // (set-mm-reference NAME EUR) is the explicit-snap path —
+        // jumps the live price as well as the baseline so a lisp
+        // callback that wants to peg an MM doesn't have to wait for
+        // mean reversion. The scenario bias tick uses a different
+        // path that touches baseline only.
+        let d = f64_to_dec(v);
+        c.reference_baseline = d;
+        c.reference_price = d;
     });
     mk_setter(ctx, "set-mm-spread", market_makers.clone(), |c, v| {
         c.spread = f64_to_dec(v);
