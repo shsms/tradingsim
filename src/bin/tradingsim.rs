@@ -399,10 +399,12 @@ async fn main() {
         use tradingsim::proto::weather::weather_forecast_service_server::WeatherForecastServiceServer;
         use tradingsim::weather_server::WeatherForecastServer;
         let weather_handle = c.weather();
+        let cadence_handle = c.weather_cadence();
         let weather_addr: std::net::SocketAddr = "[::1]:8812".parse().unwrap();
         tokio::spawn(async move {
-            let service =
-                WeatherForecastServiceServer::new(WeatherForecastServer::new(weather_handle));
+            let service = WeatherForecastServiceServer::new(
+                WeatherForecastServer::new(weather_handle).with_cadence(cadence_handle),
+            );
             log::info!("WeatherForecast gRPC server listening on {weather_addr}");
             if let Err(e) = Server::builder()
                 .add_service(service)

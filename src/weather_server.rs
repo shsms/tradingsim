@@ -10,7 +10,6 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Timelike, Utc};
 use parking_lot::Mutex;
@@ -29,7 +28,9 @@ use crate::proto::weather::{
     location_forecast::{Forecasts, forecasts::FeatureForecast},
     weather_forecast_service_server::WeatherForecastService,
 };
-use crate::sim::weather::{SharedWeather, WeatherLocation, WeatherRegistry};
+use crate::sim::weather::{
+    SharedWeather, SharedWeatherCadence, WeatherLocation, WeatherRegistry, new_cadence,
+};
 
 /// Cap on past emissions kept in the ring. 24 h × 60 min = 1440 if
 /// we kept everything; 100 is plenty for typical client back-fills.
@@ -44,6 +45,7 @@ pub fn new_history() -> SharedWeatherHistory {
 pub struct WeatherForecastServer {
     weather: SharedWeather,
     history: SharedWeatherHistory,
+    cadence: SharedWeatherCadence,
 }
 
 impl WeatherForecastServer {
@@ -51,7 +53,16 @@ impl WeatherForecastServer {
         Self {
             weather,
             history: new_history(),
+            cadence: new_cadence(),
         }
+    }
+
+    /// Replace the default 1 h forecast cadence with a shared
+    /// handle the lisp layer can mutate at runtime via
+    /// `(set-weather-stream-cadence-seconds N)`.
+    pub fn with_cadence(mut self, cadence: SharedWeatherCadence) -> Self {
+        self.cadence = cadence;
+        self
     }
 }
 
@@ -81,9 +92,15 @@ impl WeatherForecastService for WeatherForecastServer {
         let (tx, rx) = mpsc::channel(8);
         let weather = self.weather.clone();
         let history = self.history.clone();
+        let cadence = self.cadence.clone();
         let push_and_emit = move |reg: &WeatherRegistry, now: DateTime<Utc>| {
-            let locs: Vec<&WeatherLocation> = if requested.is_empty() {
-                reg.locations().iter().collect()
+            // For a "no locations requested" frame, emit one per
+            // registered point. For a "locations requested" frame,
+            // run each request through at_latlon — that's where
+            // bilinear-style IDW interpolation happens for points
+            // between registered grid entries.
+            let locs: Vec<WeatherLocation> = if requested.is_empty() {
+                reg.locations().to_vec()
             } else {
                 requested
                     .iter()
@@ -93,7 +110,7 @@ impl WeatherForecastService for WeatherForecastServer {
             let day_override = reg.active_day_of_year;
             let mut frames = Vec::with_capacity(locs.len());
             for loc in locs {
-                let lf = build_forecast(loc, now, day_override);
+                let lf = build_forecast(&loc, now, day_override);
                 push_history(&history, lf.clone());
                 frames.push(lf);
             }
@@ -106,10 +123,13 @@ impl WeatherForecastService for WeatherForecastServer {
             if tx.send(Ok(initial)).await.is_err() {
                 return;
             }
-            let mut tick = tokio::time::interval(Duration::from_secs(60));
-            tick.tick().await;
             loop {
-                tick.tick().await;
+                // Re-read the cadence each cycle so lisp changes
+                // via (set-weather-stream-cadence-seconds N) take
+                // effect on the next emit without needing a
+                // restart or a stream reconnect.
+                let wait = *cadence.read();
+                tokio::time::sleep(wait).await;
                 let snap = weather.read().clone();
                 let resp = push_and_emit(&snap, Utc::now());
                 if tx.send(Ok(resp)).await.is_err() {

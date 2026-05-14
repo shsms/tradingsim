@@ -129,6 +129,7 @@ pub struct Config {
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
     weather: crate::sim::weather::SharedWeather,
+    weather_cadence: crate::sim::weather::SharedWeatherCadence,
     market_suspended: Arc<RwLock<bool>>,
     recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     /// Extra paths registered via `(watch-file PATH)`; the notify
@@ -162,6 +163,7 @@ impl Config {
         let bias_scale = crate::scenarios::new_bias_scale();
         let curve = crate::scenarios::new_curve();
         let weather = crate::sim::weather::new_state();
+        let weather_cadence = crate::sim::weather::new_cadence();
         let market_suspended = Arc::new(RwLock::new(false));
         let recall_queue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let extra_watches = Arc::new(Mutex::new(HashSet::new()));
@@ -186,6 +188,7 @@ impl Config {
             bias_scale.clone(),
             curve.clone(),
             weather.clone(),
+            weather_cadence.clone(),
             market_suspended.clone(),
             recall_queue.clone(),
             extra_watches.clone(),
@@ -218,6 +221,7 @@ impl Config {
             bias_scale,
             curve,
             weather,
+            weather_cadence,
             market_suspended,
             recall_queue,
             extra_watches,
@@ -395,6 +399,14 @@ impl Config {
         self.weather.clone()
     }
 
+    /// Shared forecast-emit cadence for the gRPC weather service.
+    /// Mutated by `(set-weather-stream-cadence-seconds N)`. The
+    /// bin hands the clone to WeatherForecastServer::with_cadence
+    /// so the next sleep cycle picks up the new value.
+    pub fn weather_cadence(&self) -> crate::sim::weather::SharedWeatherCadence {
+        self.weather_cadence.clone()
+    }
+
     /// Shared market-suspended flag. Set via `(suspend-market)`,
     /// cleared via `(resume-market)`. The bin hands the clone to
     /// the World so validate_common can short-circuit submissions.
@@ -435,6 +447,7 @@ fn register_runtime(
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
     weather: crate::sim::weather::SharedWeather,
+    weather_cadence: crate::sim::weather::SharedWeatherCadence,
     market_suspended: Arc<RwLock<bool>>,
     recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
@@ -452,7 +465,7 @@ fn register_runtime(
     register_scenarios(ctx, scenarios);
     register_bias_scale(ctx, bias_scale);
     register_curve(ctx, curve);
-    register_weather(ctx, weather);
+    register_weather(ctx, weather, weather_cadence);
     register_market_controls(ctx, market_suspended, recall_queue);
     register_watches(ctx, extra_watches, load_dir);
 }
@@ -482,8 +495,24 @@ fn register_market_controls(
     });
 }
 
-fn register_weather(ctx: &mut TulispContext, weather: crate::sim::weather::SharedWeather) {
+fn register_weather(
+    ctx: &mut TulispContext,
+    weather: crate::sim::weather::SharedWeather,
+    cadence: crate::sim::weather::SharedWeatherCadence,
+) {
     use crate::sim::weather::WeatherLocation;
+    let cad = cadence.clone();
+    ctx.defun(
+        "set-weather-stream-cadence-seconds",
+        move |value: f64| -> Result<f64, Error> {
+            let secs = value.max(1.0);
+            *cad.write() = std::time::Duration::from_secs_f64(secs);
+            Ok(secs)
+        },
+    );
+    // Keep the original handle alive for downstream code paths
+    // even though the defun owns its clone.
+    let _ = cadence;
     let w = weather.clone();
     ctx.defun(
         "set-weather-cloud-cover",

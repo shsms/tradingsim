@@ -237,14 +237,82 @@ impl WeatherRegistry {
             .unwrap_or(&self.locations[0])
     }
 
-    /// Look up the location at the given lat/lon, snapping to the
-    /// 0.1° grid. Falls back to the default when no entry exists at
-    /// that grid point.
-    pub fn at_latlon(&self, lat: f64, lon: f64) -> &WeatherLocation {
-        self.by_key
+    /// Weather snapshot for an arbitrary lat/lon. If the request
+    /// hits an exact 0.1°-grid entry, returns a clone of it.
+    /// Otherwise builds a new `WeatherLocation` by inverse-
+    /// distance-weighted blending of the 4 nearest registered
+    /// points: cloud cover + temperature are linearly blended,
+    /// wind is blended in u/v vector form so the direction
+    /// doesn't fold at 0/360°.
+    ///
+    /// Returned by value (cloned or freshly constructed) so the
+    /// caller has a self-contained location to feed into
+    /// `solar_at` / `wind_at` / `temperature_at`.
+    pub fn at_latlon(&self, lat: f64, lon: f64) -> WeatherLocation {
+        if let Some(loc) = self
+            .by_key
             .get(&LocationKey::from_latlon(lat, lon))
             .and_then(|i| self.locations.get(*i))
-            .unwrap_or(&self.locations[0])
+        {
+            return loc.clone();
+        }
+        if self.locations.is_empty() {
+            return WeatherLocation::de_lu_typical();
+        }
+        if self.locations.len() == 1 {
+            let mut loc = self.locations[0].clone();
+            loc.lat = lat;
+            loc.lon = lon;
+            return loc;
+        }
+
+        let mut by_dist: Vec<(f64, &WeatherLocation)> = self
+            .locations
+            .iter()
+            .map(|loc| {
+                let dlat = loc.lat - lat;
+                let dlon = loc.lon - lon;
+                let d2 = dlat * dlat + dlon * dlon;
+                (d2, loc)
+            })
+            .collect();
+        by_dist.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let k = by_dist.len().min(4);
+
+        let mut w_sum = 0.0;
+        let mut cloud = 0.0;
+        let mut u_wind = 0.0;
+        let mut v_wind = 0.0;
+        let mut temp = 0.0;
+        for (d2, loc) in by_dist.iter().take(k) {
+            let w = 1.0 / d2.max(1e-12);
+            w_sum += w;
+            cloud += w * loc.cloud_cover;
+            let dir = loc.wind_direction.to_radians();
+            u_wind += w * loc.mean_wind * dir.cos();
+            v_wind += w * loc.mean_wind * dir.sin();
+            temp += w * loc.temperature_base;
+        }
+        cloud /= w_sum;
+        u_wind /= w_sum;
+        v_wind /= w_sum;
+        temp /= w_sum;
+        let speed = (u_wind * u_wind + v_wind * v_wind).sqrt();
+        let direction = v_wind.atan2(u_wind).to_degrees().rem_euclid(360.0);
+        let cloud_clamped = cloud.clamp(0.0, 1.0);
+        let speed_clamped = speed.max(0.0);
+        WeatherLocation {
+            name: format!("interp-{:.1},{:.1}", lat, lon),
+            lat,
+            lon,
+            cloud_cover: cloud_clamped,
+            mean_wind: speed_clamped,
+            wind_direction: direction,
+            temperature_base: temp,
+            baseline_cloud_cover: cloud_clamped,
+            baseline_mean_wind: speed_clamped,
+            baseline_temperature_base: temp,
+        }
     }
 }
 
@@ -252,6 +320,19 @@ pub type SharedWeather = Arc<RwLock<WeatherRegistry>>;
 
 pub fn new_state() -> SharedWeather {
     Arc::new(RwLock::new(WeatherRegistry::default()))
+}
+
+/// Default forecast emit cadence for the gRPC weather service:
+/// one frame per hour. Real Frequenz weather forecasts publish at
+/// hourly cadence too, so trading apps testing against this sim
+/// see a stream shaped like production.
+pub const DEFAULT_WEATHER_CADENCE: std::time::Duration =
+    std::time::Duration::from_secs(3600);
+
+pub type SharedWeatherCadence = Arc<RwLock<std::time::Duration>>;
+
+pub fn new_cadence() -> SharedWeatherCadence {
+    Arc::new(RwLock::new(DEFAULT_WEATHER_CADENCE))
 }
 
 #[cfg(test)]
@@ -321,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn at_latlon_snaps_to_nearest_tenth() {
+    fn at_latlon_returns_exact_grid_match() {
         let mut r = WeatherRegistry::default();
         r.upsert(WeatherLocation {
             name: "munich".into(),
@@ -332,8 +413,43 @@ mod tests {
         });
         // 48.137 / 11.575 round to 48.1 / 11.6 → registered slot.
         assert_eq!(r.at_latlon(48.137, 11.575).cloud_cover, 0.55);
-        // Far-away lookup falls back to the default.
-        assert_eq!(r.at_latlon(60.0, 25.0).cloud_cover, 0.30);
+    }
+
+    #[test]
+    fn at_latlon_blends_when_no_exact_match() {
+        // Two registered points at opposite cloud cover; midpoint
+        // query should land between them via inverse-distance
+        // weighting (equal distance → equal weight → average).
+        let mut r = WeatherRegistry::default();
+        // Wipe the default Frankfurt slot so it doesn't bias the
+        // interpolation, replacing it with our first probe.
+        *r.default_mut() = WeatherLocation {
+            name: "a".into(),
+            lat: 50.0,
+            lon: 10.0,
+            cloud_cover: 0.0,
+            ..default_loc()
+        };
+        r.upsert(WeatherLocation {
+            name: "b".into(),
+            lat: 52.0,
+            lon: 10.0,
+            cloud_cover: 1.0,
+            ..default_loc()
+        });
+        // Midpoint lat 51.0 — between a (0.0) and b (1.0).
+        let mid = r.at_latlon(51.0, 10.0);
+        assert!(
+            (mid.cloud_cover - 0.5).abs() < 1e-6,
+            "expected 0.5, got {}",
+            mid.cloud_cover
+        );
+        // Closer to a than b → cloud cover below 0.5.
+        let near_a = r.at_latlon(50.2, 10.0);
+        assert!(near_a.cloud_cover < 0.5);
+        // Closer to b than a → cloud cover above 0.5.
+        let near_b = r.at_latlon(51.8, 10.0);
+        assert!(near_b.cloud_cover > 0.5);
     }
 
     // Summer + winter solstices for the solar-elevation tests.
