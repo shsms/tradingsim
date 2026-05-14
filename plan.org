@@ -1201,42 +1201,27 @@ pending.
     land later). =cancel-resting= variant deferred. (commit
     03b38f8)
 
-15. [ ] Scenario-driven weather gradients
-    Today scenarios only shift aggressor bias and (through that)
-    MM demand / surplus. The weather state attached to each area
-    is set once in =config.lisp= and stays flat for the run. For
-    a "rainy summer day" scenario to look like a rainy summer
-    day, the stage that owns "13:00 belly" should also override
-    =cloud-cover= upward, =mean-wind= toward the seasonal norm,
-    and =temperature-base= downward — and a "windy winter night"
-    stage should crank wind speed.
-    - Extend =Stage= with optional weather deltas (cloud, wind,
-      temp). A None field leaves the area's current value alone.
-    - The bias tick blends the deltas in the same way it blends
-      bias: full effect on the current quarter, fading out
-      =decay_weight= as horizon grows. Applied per-area so
-      "regional crisis" can hit one TSO zone without disturbing
-      neighbours.
-    - Calibrate the canned scenarios (=sunny-summer-day=,
-      =rainy-summer-day=, =windy-winter-night=, …) against a
-      plausible mean-monthly weather table.
-    - ~120 lines (Stage field + interpolation + per-scenario
-      calibration) + 1 e2e test that checks the weather state
-      moves when a stage activates.
+15. [X] Scenario stages override weather state. =Stage= picks up
+    optional =cloud_cover= / =mean_wind= / =temperature_base=
+    fields; the bias tick resets every registered location to
+    its baseline at the start of each cycle and then stamps the
+    active stage's values on top. Stopping a scenario implicitly
+    restores baselines — no explicit cleanup needed.
+    =WeatherLocation= gained paired =baseline_*= fields the
+    legacy setters write through. Calibrated sunny / rainy
+    summer, sunny holiday, winter weekday, and windy winter
+    night with plausible weather trajectories. Per-area scoping
+    (regional weather) is a future refinement; current step
+    applies globally. (commit f1d0bbb)
 
-16. [ ] Scenario stages as plists / alists, not positional tuples
-    =(define-scenario :stages '((name from to bias-from bias-to)
-    …))= today is positional; once weather deltas join, the
-    tuple gets long enough to be hard to read. Switch to
-    keyword-form lists per tulisp's plist support, e.g.
-      :stages '(((:name "06:00 ramp" :hours (5 . 9)
-                  :bias (0.50 . 0.62)
-                  :cloud-delta 0.10
-                  :wind-delta -0.5))) …
-    AsPlist! on the stage struct gives us free defaults +
-    runtime field validation; positional readers in
-    =register_scenarios= become a single Plist destructure.
-    ~80 lines, mostly mechanical.
+16. [X] Scenario stages as plists. =define-scenario= parses each
+    :stages entry via =StageArgs::from_plist=, with required
+    keys =:name / :hour-from / :hour-to / :bias-from / :bias-to=
+    and optional =:cloud-cover / :mean-wind /
+    :temperature-base= for the weather overrides step 15
+    introduced. Updated the seven canned scenario files;
+    day-ahead-print and weather-shift don't use stages and stay
+    as-is. (commit 431f963)
 
 17. Deferred: iceberg orders. Per user request 2026-05-14, this
     is parked; revisit once steps 15-16 are in.
@@ -1250,11 +1235,7 @@ shape into each bidding zone, cross-border gates close 60 min
 before delivery with capacity caps on the edges, and pools can
 opt into STPF-style self-trade prevention.
 
-Outstanding (in priority order):
-- Step 15: scenarios should also push weather deltas so a
-  "sunny summer day" actually looks sunny.
-- Step 16: scenarios stages as plists once 15 enlarges the
-  stage shape.
+Outstanding:
 - Step 17: iceberg orders, still parked per the 2026-05-14
   scope cut.
 
