@@ -100,6 +100,14 @@ async fn main() {
     let area = Area::eic("10Y1001A1001A82H");
     let mut world = World::new(markets);
 
+    // Apply lisp-declared SIDC couplings before any orders flow.
+    if let Some(c) = lisp_config.as_ref() {
+        for cs in c.couplings() {
+            log::info!("Coupling: {} <-> {}", cs.area_a, cs.area_b);
+            world.add_coupling(Area::eic(cs.area_a), Area::eic(cs.area_b));
+        }
+    }
+
     let gridpool_specs = lisp_config
         .as_ref()
         .map(|c| c.gridpools())

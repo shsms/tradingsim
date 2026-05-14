@@ -16,7 +16,7 @@ use crate::sim::market::{Area, DeliveryPeriod, MarketRegistry};
 use crate::sim::matching::{ExecMode, IncomingLimit, LimitMatchOutcome, match_limit};
 use crate::sim::order::{
     ExecutionOption, GridpoolId, MarketActor, Order, OrderDetail, OrderId, OrderState, OrderType,
-    StateDetail, StateReason,
+    Side, StateDetail, StateReason,
 };
 use crate::sim::trade::{PublicTrade, Trade, TradeId, TradeState};
 
@@ -43,6 +43,15 @@ pub struct ContractKey {
 pub struct World {
     markets: MarketRegistry,
     gridpools: GridpoolRegistry,
+    /// SIDC-style couplings between delivery areas. Symmetric set:
+    /// if A→B is here, B→A is too. An incoming order in area A
+    /// can match resting orders in any area in `couplings[A]` at
+    /// the same delivery period; the resulting PublicTrade carries
+    /// distinct buy_delivery_area / sell_delivery_area.
+    ///
+    /// Capacity tracking is deferred; today couplings are
+    /// effectively unbounded.
+    couplings: HashMap<Area, std::collections::HashSet<Area>>,
     /// Per-gridpool fan-out for OrderDetail updates. ReceiveGridpoolOrdersStream
     /// subscribes once and applies the request filter per item.
     gridpool_order_tx: HashMap<GridpoolId, broadcast::Sender<OrderDetail>>,
@@ -113,6 +122,7 @@ impl World {
         Self {
             markets,
             gridpools: GridpoolRegistry::new(),
+            couplings: HashMap::new(),
             gridpool_order_tx: HashMap::new(),
             gridpool_trade_tx: HashMap::new(),
             public_trade_tx,
@@ -121,6 +131,24 @@ impl World {
             next_order_id: 1,
             next_trade_id: 1,
         }
+    }
+
+    /// Register a symmetric SIDC-style coupling between two
+    /// delivery areas. Subsequent orders in either area can match
+    /// against the other at the same delivery period.
+    pub fn add_coupling(&mut self, a: Area, b: Area) {
+        if a == b {
+            return;
+        }
+        self.couplings.entry(a.clone()).or_default().insert(b.clone());
+        self.couplings.entry(b).or_default().insert(a);
+    }
+
+    pub fn coupled_areas(&self, area: &Area) -> Vec<Area> {
+        self.couplings
+            .get(area)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn markets(&self) -> &MarketRegistry {
@@ -243,6 +271,91 @@ impl World {
         match_limit(self.book_mut(key), incoming, mode)
     }
 
+    /// Cross-area variant: sweep the taker's own book plus all
+    /// coupled-area books in global price-time priority. Each fill
+    /// carries the maker area so the caller can emit a PublicTrade
+    /// with the right buy/sell area split. Resting leftover always
+    /// lands on the taker's own area book.
+    fn match_limit_across(
+        &mut self,
+        taker_key: ContractKey,
+        mut taker: IncomingLimit,
+        mode: ExecMode,
+    ) -> (Vec<(crate::sim::matching::Fill, Area)>, Option<crate::sim::book::Resting>) {
+        let mut keys: Vec<ContractKey> = vec![taker_key.clone()];
+        for other in self.coupled_areas(&taker_key.area) {
+            keys.push(ContractKey {
+                area: other,
+                period: taker_key.period,
+            });
+        }
+
+        // FOK pre-check across all candidate books.
+        if mode == ExecMode::FillOrKill {
+            let depth: Decimal = keys
+                .iter()
+                .filter_map(|k| self.books.get(k))
+                .map(|b| b.marketable_depth(taker.side, taker.price))
+                .sum();
+            if depth < taker.quantity {
+                return (Vec::new(), None);
+            }
+        }
+
+        let mut fills: Vec<(crate::sim::matching::Fill, Area)> = Vec::new();
+        loop {
+            // Find the (book_key, level_price) with the best
+            // marketable price across all candidate books.
+            let best = keys
+                .iter()
+                .filter_map(|k| {
+                    self.books
+                        .get(k)
+                        .and_then(|b| b.peek_opposite(taker.side).map(|p| (k.clone(), p)))
+                })
+                .filter(|(_, price)| match taker.side {
+                    Side::Buy => *price <= taker.price,
+                    Side::Sell => *price >= taker.price,
+                    _ => false,
+                })
+                .min_by(|(_, p1), (_, p2)| match taker.side {
+                    Side::Buy => p1.cmp(p2),
+                    Side::Sell => p2.cmp(p1),
+                    _ => std::cmp::Ordering::Equal,
+                });
+            let Some((book_key, _)) = best else { break };
+            let book = self.books.get_mut(&book_key).expect("found above");
+            let (price, maker_id, taken, _fully) = book
+                .consume_front(taker.side, taker.quantity)
+                .expect("peek said non-empty");
+            fills.push((
+                crate::sim::matching::Fill {
+                    taker_id: taker.id,
+                    maker_id,
+                    price,
+                    quantity: taken,
+                },
+                book_key.area.clone(),
+            ));
+            taker.quantity -= taken;
+            if taker.quantity.is_zero() {
+                break;
+            }
+        }
+
+        let rested = if mode == ExecMode::Resting && taker.quantity > Decimal::ZERO {
+            let r = crate::sim::book::Resting {
+                id: taker.id,
+                open_qty: taker.quantity,
+            };
+            self.book_mut(taker_key).insert(taker.side, taker.price, r);
+            Some(r)
+        } else {
+            None
+        };
+        (fills, rested)
+    }
+
     pub fn contracts(&self) -> impl Iterator<Item = &ContractKey> {
         self.books.keys()
     }
@@ -299,14 +412,15 @@ impl World {
         let taker_currency = order.currency;
         let total_qty = order.quantity;
 
-        // 6. Match — execution option picks the matcher mode.
+        // 6. Match across the taker's own area + any coupled areas.
+        // Execution option picks the matcher mode.
         let mode = match order.execution_option {
             Some(ExecutionOption::Fok) => ExecMode::FillOrKill,
             Some(ExecutionOption::Ioc) => ExecMode::ImmediateOrCancel,
             _ => ExecMode::Resting,
         };
-        let outcome = self.match_limit_in_with_mode(
-            key,
+        let (fills_with_areas, rested) = self.match_limit_across(
+            key.clone(),
             IncomingLimit {
                 id: taker_id,
                 side: taker_side,
@@ -315,12 +429,17 @@ impl World {
             },
             mode,
         );
+        let outcome = LimitMatchOutcome {
+            fills: fills_with_areas.iter().map(|(f, _)| *f).collect(),
+            rested,
+        };
 
         // 7. Record trades + update maker state. The taker is always
         // a gridpool order; the maker may be a gridpool order or an
         // unbound counterparty order — owner_of returns None for the
-        // latter, and we skip the gridpool-side bookkeeping then.
-        for fill in &outcome.fills {
+        // latter. Each fill carries the maker's area so the public
+        // tape can distinguish cross-area matches.
+        for (fill, maker_area) in &fills_with_areas {
             self.record_fill(
                 fill,
                 taker_id,
@@ -328,6 +447,7 @@ impl World {
                 taker_currency,
                 Some(gridpool_id),
                 order.area.clone(),
+                maker_area.clone(),
                 order.period,
                 now,
             );
@@ -434,6 +554,9 @@ impl World {
     /// Apply one fill: build + record trades, update maker state if
     /// any, emit the public-tape event. `taker_gridpool` is None for
     /// counterparty takers (no gridpool-side bookkeeping then).
+    /// `taker_area` is the taker's area; `maker_area` is the area
+    /// the matched order rested in (same as taker_area for non-
+    /// cross-area fills).
     #[allow(clippy::too_many_arguments)]
     fn record_fill(
         &mut self,
@@ -442,7 +565,8 @@ impl World {
         taker_side: crate::sim::order::Side,
         taker_currency: crate::sim::market::Currency,
         taker_gridpool: Option<GridpoolId>,
-        area: Area,
+        taker_area: Area,
+        maker_area: Area,
         period: DeliveryPeriod,
         now: DateTime<Utc>,
     ) {
@@ -456,7 +580,7 @@ impl World {
                 id: trade_id,
                 order_id: taker_id,
                 side: taker_side,
-                area: area.clone(),
+                area: taker_area.clone(),
                 period,
                 execution_time: now,
                 price: fill.price,
@@ -477,7 +601,7 @@ impl World {
                 id: trade_id,
                 order_id: maker_id,
                 side: taker_side.opposite(),
-                area: area.clone(),
+                area: maker_area.clone(),
                 period,
                 execution_time: now,
                 price: fill.price,
@@ -492,11 +616,17 @@ impl World {
             self.publish_gridpool_trade(mgp, trade);
         }
 
-        // Public tape: one event per fill, always.
+        // Public tape: one event per fill. buy_area / sell_area
+        // resolve from (taker_side, taker_area, maker_area).
+        let (buy_area, sell_area) = match taker_side {
+            Side::Buy => (taker_area.clone(), maker_area.clone()),
+            Side::Sell => (maker_area.clone(), taker_area.clone()),
+            Side::Unspecified => (taker_area.clone(), maker_area.clone()),
+        };
         self.publish_public_trade(PublicTrade {
             id: trade_id,
-            buy_area: area.clone(),
-            sell_area: area.clone(),
+            buy_area,
+            sell_area,
             period,
             execution_time: now,
             price: fill.price,
@@ -572,12 +702,16 @@ impl World {
             },
         );
         for fill in &outcome.fills {
+            // Counterparty submit currently doesn't go through the
+            // cross-area path — same-area only for now. maker_area
+            // = taker_area.
             self.record_fill(
                 fill,
                 taker_id,
                 taker_side,
                 taker_currency,
                 None,
+                order.area.clone(),
                 order.area.clone(),
                 order.period,
                 now,
@@ -774,12 +908,15 @@ impl World {
                 },
             );
             for fill in &outcome.fills {
+                // Modify's re-match runs single-area for now; cross-
+                // area on modify is a nice-to-have.
                 self.record_fill(
                     fill,
                     order_id,
                     taker_side,
                     taker_currency,
                     Some(gridpool_id),
+                    snapshot.order.area.clone(),
                     snapshot.order.area.clone(),
                     snapshot.order.period,
                     now,
@@ -1243,6 +1380,46 @@ mod tests {
         assert_eq!(post.state.state, OrderState::Expired);
         assert_eq!(post.state.actor, MarketActor::System);
         assert!(w.book(&de_lu_hour()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cross_area_match_emits_split_public_trade() {
+        let mut markets = MarketRegistry::new();
+        markets.insert(MarketRules::de_lu());
+        markets.insert(MarketRules::for_area(
+            Area::eic("10YFR-RTE------C"),
+            Currency::Eur,
+        ));
+        let mut w = World::new(markets);
+        let de = Area::eic("10Y1001A1001A82H");
+        let fr = Area::eic("10YFR-RTE------C");
+        w.add_coupling(de.clone(), fr.clone());
+        w.register_gridpool(Gridpool::new(
+            GridpoolId(1),
+            "de",
+            vec![de.clone()],
+        ));
+        w.register_gridpool(Gridpool::new(GridpoolId(2), "fr", vec![fr.clone()]));
+
+        let mut public_rx = w.subscribe_public_trades();
+
+        // FR gridpool rests a sell at 84.0 — cheaper than DE side.
+        let fr_sell = Order {
+            area: fr.clone(),
+            ..sample_sell(dec!(1.0), dec!(84.0))
+        };
+        w.submit_order(GridpoolId(2), fr_sell, t0()).unwrap();
+        // DE gridpool's buy at 85.0 should match the FR side.
+        let de_buy = sample_buy(dec!(1.0), dec!(85.0));
+        let d = w.submit_order(GridpoolId(1), de_buy, t0()).unwrap();
+
+        assert_eq!(d.state.state, OrderState::Filled);
+        assert_eq!(d.filled_quantity, dec!(1.0));
+
+        let pt = public_rx.try_recv().unwrap();
+        assert_eq!(pt.buy_area, de);
+        assert_eq!(pt.sell_area, fr);
+        assert_eq!(pt.price, dec!(84.0));
     }
 
     #[test]

@@ -70,6 +70,14 @@ pub struct MarketSpec {
     pub currency: Currency,
 }
 
+/// One SIDC-style coupling from `(%make-coupling …)`. The binary
+/// calls `World::add_coupling` for each entry.
+#[derive(Clone, Debug)]
+pub struct CouplingSpec {
+    pub area_a: String,
+    pub area_b: String,
+}
+
 #[derive(Clone)]
 pub struct Config {
     #[allow(dead_code)]
@@ -79,6 +87,7 @@ pub struct Config {
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
+    couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     /// tulisp-async timer queue. The binary calls `spawn_timer_loop`
     /// to drain it on a tokio interval; without that, `(every …)` /
     /// `(run-with-timer …)` registrations from config.lisp would
@@ -100,6 +109,7 @@ impl Config {
         let market_makers = Arc::new(Mutex::new(HashMap::new()));
         let gridpools = Arc::new(Mutex::new(Vec::new()));
         let markets = Arc::new(Mutex::new(Vec::new()));
+        let couplings = Arc::new(Mutex::new(Vec::new()));
         let anchor = Utc::now();
 
         let load_dir: PathBuf = match Path::new(filename).parent() {
@@ -115,6 +125,7 @@ impl Config {
             market_makers.clone(),
             gridpools.clone(),
             markets.clone(),
+            couplings.clone(),
             anchor,
         );
 
@@ -139,6 +150,7 @@ impl Config {
             market_makers,
             gridpools,
             markets,
+            couplings,
             timer_handle,
             anchor,
         })
@@ -185,6 +197,10 @@ impl Config {
         self.markets.lock().clone()
     }
 
+    pub fn couplings(&self) -> Vec<CouplingSpec> {
+        self.couplings.lock().clone()
+    }
+
     /// Resolve `markets()` into proper MarketRules. Currencies default
     /// to EUR for any area that wasn't explicitly configured.
     pub fn market_rules(&self) -> Vec<MarketRules> {
@@ -205,13 +221,43 @@ fn register_runtime(
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
+    couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     anchor: DateTime<Utc>,
 ) {
     add_log_functions(ctx);
     register_metadata(ctx, metadata);
     register_markets(ctx, markets);
+    register_couplings(ctx, couplings);
     register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
+}
+
+AsPlist! {
+    pub struct MakeCouplingArgs {
+        areas<":areas">: Vec<String>,
+    }
+}
+
+fn register_couplings(
+    ctx: &mut TulispContext,
+    couplings: Arc<Mutex<Vec<CouplingSpec>>>,
+) {
+    ctx.defun(
+        "%make-coupling",
+        move |args: Plist<MakeCouplingArgs>| -> Result<bool, Error> {
+            let a = args.into_inner();
+            if a.areas.len() != 2 {
+                return Err(Error::os_error(
+                    "make-coupling: :areas must list exactly two area codes",
+                ));
+            }
+            couplings.lock().push(CouplingSpec {
+                area_a: a.areas[0].clone(),
+                area_b: a.areas[1].clone(),
+            });
+            Ok(true)
+        },
+    );
 }
 
 AsPlist! {
