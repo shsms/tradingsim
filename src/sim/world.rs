@@ -607,6 +607,63 @@ impl World {
         found
     }
 
+    /// Walk every gridpool's order index and transition any
+    /// non-terminal order whose `valid_until` has lapsed to
+    /// `OrderState::Expired`. Returns the count of orders touched so
+    /// the caller can log expiry activity. The driver loop in the
+    /// binary calls this periodically; clients can also call it from
+    /// the lisp side via a future `(expire-lapsed-orders)` defun.
+    pub fn expire_lapsed_orders(&mut self, now: DateTime<Utc>) -> usize {
+        let mut expirables: Vec<(GridpoolId, OrderId, ContractKey)> = Vec::new();
+        for gp in self.gridpools.iter() {
+            for d in gp.orders() {
+                if d.state.state.is_terminal() {
+                    continue;
+                }
+                if let Some(vu) = d.order.valid_until {
+                    if vu <= now {
+                        expirables.push((
+                            gp.id,
+                            d.id,
+                            ContractKey {
+                                area: d.order.area.clone(),
+                                period: d.order.period,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        let count = expirables.len();
+        for (gp_id, order_id, key) in expirables {
+            // Remove from book if resting.
+            if self.owner_of(order_id) == Some(gp_id) {
+                self.unbind_resting_order(order_id);
+                if let Some(book) = self.books.get_mut(&key) {
+                    book.cancel(order_id);
+                }
+            }
+            self.gridpools
+                .get_mut(gp_id)
+                .expect("gridpool present")
+                .update_order(order_id, |d| {
+                    d.state.state = OrderState::Expired;
+                    d.state.reason = StateReason::Delete;
+                    d.state.actor = MarketActor::System;
+                    d.modification_time = now;
+                });
+            if let Some(d) = self
+                .gridpools
+                .get(gp_id)
+                .and_then(|g| g.get_order(order_id))
+                .cloned()
+            {
+                self.publish_order_update(gp_id, d);
+            }
+        }
+        count
+    }
+
     /// Modify a resting order's price / quantity / valid_until / tag.
     /// All four are tri-state via Option<…>: None on the OrderUpdate
     /// field leaves the underlying field untouched. Quantity-decrease
@@ -1156,6 +1213,35 @@ mod tests {
         w.cancel_order(gp, d.id, t0()).unwrap();
         let received = rx.try_recv().unwrap();
         assert_eq!(received.state.state, OrderState::Canceled);
+    }
+
+    #[test]
+    fn expire_lapsed_orders_transitions_active_to_expired() {
+        let (mut w, gp) = setup_world_with_pool();
+        let earlier = t0() + chrono::Duration::seconds(30);
+        let order = Order {
+            valid_until: Some(t0() + chrono::Duration::seconds(60)),
+            ..sample_buy(dec!(1.0), dec!(85.0))
+        };
+        let d = w.submit_order(gp, order, t0()).unwrap();
+        assert_eq!(d.state.state, OrderState::Active);
+
+        // Before lapse: no-op.
+        let n = w.expire_lapsed_orders(earlier);
+        assert_eq!(n, 0);
+        assert_eq!(
+            w.gridpools().get(gp).unwrap().get_order(d.id).unwrap().state.state,
+            OrderState::Active
+        );
+
+        // After lapse: expired + removed from the book.
+        let later = t0() + chrono::Duration::seconds(120);
+        let n = w.expire_lapsed_orders(later);
+        assert_eq!(n, 1);
+        let post = w.gridpools().get(gp).unwrap().get_order(d.id).unwrap();
+        assert_eq!(post.state.state, OrderState::Expired);
+        assert_eq!(post.state.actor, MarketActor::System);
+        assert!(w.book(&de_lu_hour()).unwrap().is_empty());
     }
 
     #[test]

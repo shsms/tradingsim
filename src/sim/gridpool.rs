@@ -112,6 +112,10 @@ impl GridpoolRegistry {
         self.by_id.get_mut(&id)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Gridpool> {
+        self.by_id.values()
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

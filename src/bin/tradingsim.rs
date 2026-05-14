@@ -170,6 +170,22 @@ async fn main() {
         }
     }
 
+    // Expire orders whose valid_until has lapsed. Once a second is
+    // generous given the proto's UTC-timestamp resolution.
+    {
+        let world_for_expiry = Arc::clone(&world);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let n = world_for_expiry.lock().await.expire_lapsed_orders(Utc::now());
+                if n > 0 {
+                    log::info!("Expired {n} order(s) on the valid_until deadline");
+                }
+            }
+        });
+    }
+
     let service =
         ElectricityTradingServiceServer::new(ElectricityTradingServer::new(Arc::clone(&world)));
 
