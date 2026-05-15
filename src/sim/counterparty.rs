@@ -102,6 +102,72 @@ impl MarketMakerConfig {
 /// take effect on the next refresh tick.
 pub type SharedConfig = Arc<RwLock<MarketMakerConfig>>;
 
+/// Mutable recipe shared across every per-contract MM in one fleet.
+/// `(%make-mm-fleet …)` writes one of these; each MM the FleetManager
+/// spawns holds an [`Arc<RwLock<MmFleetParams>>`] clone and re-reads
+/// it on every refresh to look up its band-effective size and spread
+/// for the contract's current offset to gate. Hot-reload updates the
+/// RwLock contents in place, preserving the Arc identity, so running
+/// MMs see new bands without being restarted.
+#[derive(Clone, Debug)]
+pub struct MmFleetParams {
+    /// Quote size per band, MW. Band for a contract at current
+    /// `offset` quarters and a fleet covering `window` quarters is
+    /// `(offset * bands.len() / window).min(bands.len() - 1)`, so
+    /// front-of-window contracts (small offset) get `bands[0]` —
+    /// the deeper, tighter quotes — and far-back contracts get the
+    /// last band.
+    pub size_bands: Vec<Decimal>,
+    /// Half-spread per band, EUR. Same indexing as `size_bands`.
+    pub spread_bands: Vec<Decimal>,
+    /// Per-refresh random walk magnitude on the reference, EUR/MWh.
+    pub price_noise: Decimal,
+    /// Follow-last-trade pull rate, [0, 1]. 0 = static, 1 = snap.
+    pub follow_last_trade: Decimal,
+    /// Refresh cadence in ms (floored at 100 ms by config setters).
+    pub refresh_ms: u64,
+    /// Price tick to snap quotes to.
+    pub tick: Decimal,
+}
+
+impl MmFleetParams {
+    /// Effective size for a contract at `offset` quarters from now in
+    /// a fleet covering `window_quarters` total. Clamps both arguments
+    /// non-negative; the `min(len-1)` keeps a slightly-overshot offset
+    /// (a contract whose period drifts past the window for a refresh
+    /// or two) from indexing out of bounds.
+    pub fn size_for(&self, offset: i64, window_quarters: i64) -> Decimal {
+        Self::band_for(&self.size_bands, offset, window_quarters)
+    }
+
+    pub fn spread_for(&self, offset: i64, window_quarters: i64) -> Decimal {
+        Self::band_for(&self.spread_bands, offset, window_quarters)
+    }
+
+    fn band_for(bands: &[Decimal], offset: i64, window_quarters: i64) -> Decimal {
+        debug_assert!(!bands.is_empty(), "MmFleetParams band table must not be empty");
+        let n = bands.len() as i64;
+        let w = window_quarters.max(1);
+        let idx = (offset.max(0) * n / w).clamp(0, n - 1);
+        bands[idx as usize]
+    }
+}
+
+impl Default for MmFleetParams {
+    fn default() -> Self {
+        Self {
+            size_bands: vec![dec!(1.0), dec!(0.7), dec!(0.5), dec!(0.3)],
+            spread_bands: vec![dec!(0.40), dec!(0.55), dec!(0.70), dec!(0.90)],
+            price_noise: dec!(0.10),
+            follow_last_trade: dec!(0.10),
+            refresh_ms: 2000,
+            tick: dec!(0.01),
+        }
+    }
+}
+
+pub type SharedFleetParams = Arc<RwLock<MmFleetParams>>;
+
 pub struct MarketMaker {
     config: SharedConfig,
     bid_id: Option<OrderId>,
@@ -824,5 +890,45 @@ mod tests {
         assert_eq!(trades[0].price, dec!(50.00));
         let book = world.book(&key).unwrap();
         assert_eq!(book.best_bid(), None);
+    }
+
+    #[test]
+    fn mm_fleet_params_size_for_buckets_offset_to_band() {
+        // 4 bands over 48 quarters → 12 quarters per band.
+        // offset 0-11 → band 0, 12-23 → band 1, …, 36-47 → band 3.
+        let p = MmFleetParams::default();
+        assert_eq!(p.size_for(0, 48), dec!(1.0));
+        assert_eq!(p.size_for(11, 48), dec!(1.0));
+        assert_eq!(p.size_for(12, 48), dec!(0.7));
+        assert_eq!(p.size_for(35, 48), dec!(0.5));
+        assert_eq!(p.size_for(36, 48), dec!(0.3));
+        assert_eq!(p.size_for(47, 48), dec!(0.3));
+        // Past the window clamps to the last band — defensive
+        // against a contract whose period briefly outruns the
+        // window before the manager retires it.
+        assert_eq!(p.size_for(99, 48), dec!(0.3));
+        // Negative offset clamps to the front band.
+        assert_eq!(p.size_for(-3, 48), dec!(1.0));
+    }
+
+    #[test]
+    fn mm_fleet_params_spread_for_uses_same_bucketing() {
+        let p = MmFleetParams::default();
+        assert_eq!(p.spread_for(0, 48), dec!(0.40));
+        assert_eq!(p.spread_for(36, 48), dec!(0.90));
+    }
+
+    #[test]
+    fn mm_fleet_params_single_band_returns_constant() {
+        // A one-band table — common in international fleets — should
+        // never index past 0 regardless of offset / window.
+        let p = MmFleetParams {
+            size_bands: vec![dec!(0.5)],
+            spread_bands: vec![dec!(0.40)],
+            ..MmFleetParams::default()
+        };
+        assert_eq!(p.size_for(0, 4), dec!(0.5));
+        assert_eq!(p.size_for(3, 4), dec!(0.5));
+        assert_eq!(p.size_for(100, 4), dec!(0.5));
     }
 }

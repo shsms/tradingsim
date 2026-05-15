@@ -24,7 +24,8 @@ use rust_decimal::Decimal;
 use tulisp::{AsPlist, Error, Plist, Plistable, SharedMut, TulispContext};
 
 use crate::sim::counterparty::{
-    AggressorConfig, MarketMakerConfig, SharedAggressorConfig, SharedConfig,
+    AggressorConfig, MarketMakerConfig, MmFleetParams, SharedAggressorConfig, SharedConfig,
+    SharedFleetParams,
 };
 use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod, MarketRules};
 
@@ -64,6 +65,26 @@ pub struct MarketMakerSpec {
     /// offset, so the MM always quotes the contract starting
     /// `quarter_offset` quarters from now.
     pub quarter_offset: i64,
+}
+
+/// One market-maker fleet as configured by `(%make-mm-fleet …)`.
+/// A fleet covers `window_quarters` rolling forward contracts in one
+/// area; the binary's FleetManager spawns one MM per contract in the
+/// window at startup, and one new MM at each quarter rotation while
+/// retiring the contract that just gated. `shared_params` carries
+/// the band tables + scalar knobs every MM in the fleet re-reads on
+/// its refresh; hot reload writes new values into the RwLock in
+/// place so running MMs pick them up without restart.
+#[derive(Clone)]
+pub struct MmFleetSpec {
+    pub name: String,
+    pub area: String,
+    pub window_quarters: i64,
+    pub shared_params: SharedFleetParams,
+    /// First seed in the per-MM seed range. The manager assigns
+    /// `seed_base + i` to the MM covering quarter offset `i`, so
+    /// each MM's RNG stream stays disjoint.
+    pub seed_base: u64,
 }
 
 /// One gridpool from `(make-gridpool …)`. Same shape the binary will
@@ -124,6 +145,7 @@ pub struct Config {
     pub(crate) ctx: SharedMut<TulispContext>,
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
+    mm_fleets: Arc<Mutex<HashMap<String, MmFleetSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
@@ -190,6 +212,7 @@ impl Config {
         let mut ctx = TulispContext::new();
         let metadata = Arc::new(RwLock::new(Metadata::default()));
         let market_makers = Arc::new(Mutex::new(HashMap::new()));
+        let mm_fleets = Arc::new(Mutex::new(HashMap::new()));
         let gridpools = Arc::new(Mutex::new(Vec::new()));
         let markets = Arc::new(Mutex::new(Vec::new()));
         let couplings = Arc::new(Mutex::new(Vec::new()));
@@ -220,6 +243,7 @@ impl Config {
             &mut ctx,
             metadata.clone(),
             market_makers.clone(),
+            mm_fleets.clone(),
             gridpools.clone(),
             markets.clone(),
             couplings.clone(),
@@ -250,6 +274,7 @@ impl Config {
             ctx: SharedMut::new(ctx),
             metadata,
             market_makers,
+            mm_fleets,
             gridpools,
             markets,
             couplings,
@@ -397,6 +422,14 @@ impl Config {
         self.market_makers.lock().values().cloned().collect()
     }
 
+    /// Snapshot of all MM fleets built by `(%make-mm-fleet …)`. The
+    /// binary's FleetManager owns one per-contract MM lifecycle per
+    /// fleet; each fleet's shared_params drives the band-effective
+    /// size + spread every MM in it reads on refresh.
+    pub fn mm_fleets(&self) -> Vec<MmFleetSpec> {
+        self.mm_fleets.lock().values().cloned().collect()
+    }
+
     pub fn gridpools(&self) -> Vec<GridpoolSpec> {
         self.gridpools.lock().clone()
     }
@@ -493,6 +526,7 @@ fn register_runtime(
     ctx: &mut TulispContext,
     metadata: Arc<RwLock<Metadata>>,
     market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
+    mm_fleets: Arc<Mutex<HashMap<String, MmFleetSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
@@ -516,6 +550,7 @@ fn register_runtime(
     register_couplings(ctx, couplings);
     register_gridpools(ctx, gridpools);
     register_market_makers(ctx, market_makers, anchor);
+    register_mm_fleets(ctx, mm_fleets);
     register_aggressors(ctx, aggressors, anchor);
     register_scenarios(ctx, scenarios);
     register_bias_scale(ctx, bias_scale);
@@ -1173,6 +1208,85 @@ fn register_market_makers(
     });
 }
 
+AsPlist! {
+    pub struct MakeMmFleetArgs {
+        name: String,
+        area<":area">: String,
+        /// How many forward 15-min contracts the fleet covers. Default
+        /// 48 (12 hours). FleetManager spawns one MM per quarter in
+        /// the window at startup and one new MM at each quarter
+        /// rotation.
+        window_quarters<":window-quarters">: Option<i64> {= None},
+        /// MM quote size by band, MW. Band for a contract at offset Q
+        /// is `(Q * len / window).min(len - 1)`, so the first entry
+        /// covers the front of the window (largest, deepest quotes).
+        size_bands<":size-bands">: Option<Vec<f64>> {= None},
+        /// MM half-spread by band, EUR. Same indexing as size-bands.
+        spread_bands<":spread-bands">: Option<Vec<f64>> {= None},
+        noise<":noise">: Option<f64> {= None},
+        follow<":follow">: Option<f64> {= None},
+        refresh_ms<":refresh-ms">: Option<i64> {= None},
+        seed_base<":seed-base">: Option<i64> {= None},
+    }
+}
+
+fn register_mm_fleets(
+    ctx: &mut TulispContext,
+    mm_fleets: Arc<Mutex<HashMap<String, MmFleetSpec>>>,
+) {
+    ctx.defun(
+        "%make-mm-fleet",
+        move |args: Plist<MakeMmFleetArgs>| -> Result<String, Error> {
+            let a = args.into_inner();
+            let default_params = MmFleetParams::default();
+            let size_bands = a
+                .size_bands
+                .map(|v| v.into_iter().map(f64_to_dec).collect::<Vec<_>>())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(default_params.size_bands.clone());
+            let spread_bands = a
+                .spread_bands
+                .map(|v| v.into_iter().map(f64_to_dec).collect::<Vec<_>>())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(default_params.spread_bands.clone());
+            let params = MmFleetParams {
+                size_bands,
+                spread_bands,
+                price_noise: a.noise.map(f64_to_dec).unwrap_or(default_params.price_noise),
+                follow_last_trade: a
+                    .follow
+                    .map(f64_to_dec)
+                    .map(|d| d.clamp(Decimal::ZERO, Decimal::ONE))
+                    .unwrap_or(default_params.follow_last_trade),
+                refresh_ms: a.refresh_ms.unwrap_or(default_params.refresh_ms as i64).max(100) as u64,
+                tick: default_params.tick,
+            };
+            let mut map = mm_fleets.lock();
+            if let Some(existing) = map.get(&a.name) {
+                // Hot reload: mutate the existing RwLock so the
+                // SharedFleetParams Arc identity survives; running
+                // per-contract MMs see the new bands on next refresh.
+                // window_quarters + seed_base stay frozen — they're
+                // structural and changing them mid-run would require
+                // retiring/respawning MMs.
+                *existing.shared_params.write() = params;
+            } else {
+                map.insert(
+                    a.name.clone(),
+                    MmFleetSpec {
+                        name: a.name.clone(),
+                        area: a.area,
+                        window_quarters: a.window_quarters.unwrap_or(48).max(1),
+                        shared_params: Arc::new(RwLock::new(params)),
+                        seed_base: a.seed_base.unwrap_or(0) as u64,
+                    },
+                );
+            }
+            Ok(a.name)
+        },
+    );
+}
+
 /// Build a `(set-X-FIELD NAME VAL)` defun that mutates a numeric
 /// field on a named spec's shared config. Generic over the spec
 /// type so the same plumbing covers MM and aggressor knobs.
@@ -1394,6 +1508,86 @@ mod tests {
         );
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 100);
+    }
+
+    #[tokio::test]
+    async fn make_mm_fleet_registers_spec() {
+        let f = write_tmp(
+            r#"
+            (%make-mm-fleet
+              :name "tn-fleet"
+              :area "10YDE-EON------1"
+              :window-quarters 24
+              :size-bands '(2.0 1.5 1.0)
+              :spread-bands '(0.40 0.55 0.70)
+              :noise 0.15
+              :follow 0.20
+              :refresh-ms 1500
+              :seed-base 5000)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let fleets = cfg.mm_fleets();
+        assert_eq!(fleets.len(), 1);
+        let f = &fleets[0];
+        assert_eq!(f.name, "tn-fleet");
+        assert_eq!(f.area, "10YDE-EON------1");
+        assert_eq!(f.window_quarters, 24);
+        assert_eq!(f.seed_base, 5000);
+        let p = f.shared_params.read();
+        assert_eq!(p.size_bands, vec![rust_decimal::dec!(2.0), rust_decimal::dec!(1.5), rust_decimal::dec!(1.0)]);
+        assert_eq!(p.refresh_ms, 1500);
+        assert_eq!(p.price_noise, rust_decimal::dec!(0.15));
+        assert_eq!(p.follow_last_trade, rust_decimal::dec!(0.20));
+    }
+
+    #[tokio::test]
+    async fn make_mm_fleet_uses_defaults_for_missing_bands() {
+        // Omitting :size-bands / :spread-bands falls back to the
+        // 4-band MmFleetParams::default tables.
+        let f = write_tmp(
+            r#"(%make-mm-fleet :name "x" :area "10YDE-EON------1")"#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let fleets = cfg.mm_fleets();
+        let p = fleets[0].shared_params.read();
+        assert_eq!(p.size_bands.len(), 4);
+        assert_eq!(p.spread_bands.len(), 4);
+        assert_eq!(p.refresh_ms, 2000);
+    }
+
+    #[tokio::test]
+    async fn remake_mm_fleet_preserves_shared_params_arc() {
+        // Hot-reload invariant: re-firing %make-mm-fleet with the
+        // same name updates the existing RwLock in place rather than
+        // creating a new Arc, so the FleetManager's running MMs
+        // keep their handle and pick up new band tables.
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
+        f.write_all(
+            br#"(%make-mm-fleet :name "tn" :area "10YDE-EON------1" :refresh-ms 2000)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let arc_before = cfg.mm_fleets()[0].shared_params.clone();
+        assert_eq!(arc_before.read().refresh_ms, 2000);
+
+        f.as_file().set_len(0).unwrap();
+        f.as_file().seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(
+            br#"(%make-mm-fleet :name "tn" :area "10YDE-EON------1" :refresh-ms 500)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        cfg.reload().unwrap();
+
+        let arc_after = cfg.mm_fleets()[0].shared_params.clone();
+        assert!(
+            Arc::ptr_eq(&arc_before, &arc_after),
+            "SharedFleetParams Arc must survive hot reload"
+        );
+        assert_eq!(arc_after.read().refresh_ms, 500);
     }
 
     #[tokio::test]
