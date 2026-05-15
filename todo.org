@@ -170,6 +170,19 @@ on the proto types via newtype.
 hemisphere). Fine for the four shipped zones; add a hemisphere flag if non-EU zones
 ever land.
 
+*** TODO Trades tape — share the bottom row
+At 32" 4K the full-width =panel-trades= leaves each of its six
+columns at ~630 px, mostly empty. Candidates to share Tier E:
+per-area fills heatmap, running P&L strip, recent-cancellations
+log. Pick one and move the tape to half-width.
+
+*** TODO Amendment-log for =UpdateGridpoolOrder=
+Once the Update RPC lands, populate the per-order event log
+(introduced for the drill-down right pane) with before/after
+deltas of price/quantity/valid_until/peak/display. The log
+plumbing is already in place — this just needs the Update path
+to call into it.
+
 * Carried over from plan.org
 
 ** Phase 12 — auth, hardening, perf
