@@ -12,11 +12,11 @@ use crate::sim::trade::PublicTrade;
 use crate::sim::world::World;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use parking_lot::RwLock;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -51,6 +51,11 @@ pub fn build_router(
         .route("/api/info", get(api_info))
         .route("/api/clock", get(api_clock))
         .route("/api/gridpools", get(api_gridpools))
+        .route("/api/gridpools/{id}/orders", get(api_gridpool_orders))
+        .route(
+            "/api/gridpools/{id}/orders/{oid}/trades",
+            get(api_gridpool_order_trades),
+        )
         .route("/api/scenarios", get(api_scenarios))
         .route("/api/scenarios/{name}/start", post(api_scenario_start))
         .route("/api/scenarios/{name}/next", post(api_scenario_next))
@@ -138,6 +143,139 @@ async fn api_gridpools(State(s): State<UiState>) -> Json<Vec<GridpoolResp>> {
         })
         .collect();
     Json(pools)
+}
+
+/// Per-order projection for the gridpool drill-down. State / side /
+/// actor / reason / order_type ride as the proto enums'
+/// SCREAMING_SNAKE_CASE names (`MARKET_SIDE_BUY`, `ORDER_STATE_ACTIVE`,
+/// …) — the UI does its own short-label mapping rather than us
+/// guessing the right casing here.
+#[derive(Serialize)]
+struct GridpoolOrderJson {
+    id: u64,
+    side: &'static str,
+    area: String,
+    period: String,
+    order_type: &'static str,
+    price: String,
+    quantity: String,
+    open_quantity: String,
+    filled_quantity: String,
+    state: &'static str,
+    state_reason: &'static str,
+    state_actor: &'static str,
+    create_time: String,
+    modification_time: String,
+    valid_until: Option<String>,
+    tag: Option<String>,
+}
+
+impl From<&crate::sim::order::OrderDetail> for GridpoolOrderJson {
+    fn from(d: &crate::sim::order::OrderDetail) -> Self {
+        Self {
+            id: d.id.0,
+            side: d.order.side.as_str_name(),
+            area: d.order.area.code.clone(),
+            period: d.order.period.start.to_rfc3339(),
+            order_type: d.order.order_type.as_str_name(),
+            price: d.order.price.normalize().to_string(),
+            quantity: d.order.quantity.normalize().to_string(),
+            open_quantity: d.open_quantity.normalize().to_string(),
+            filled_quantity: d.filled_quantity.normalize().to_string(),
+            state: d.state.state.as_str_name(),
+            state_reason: d.state.reason.as_str_name(),
+            state_actor: d.state.actor.as_str_name(),
+            create_time: d.create_time.to_rfc3339(),
+            modification_time: d.modification_time.to_rfc3339(),
+            valid_until: d.order.valid_until.map(|t| t.to_rfc3339()),
+            tag: d.order.tag.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct GridpoolTradeJson {
+    id: u64,
+    order_id: u64,
+    side: &'static str,
+    area: String,
+    period: String,
+    execution_time: String,
+    price: String,
+    quantity: String,
+    state: &'static str,
+}
+
+impl From<&crate::sim::trade::Trade> for GridpoolTradeJson {
+    fn from(t: &crate::sim::trade::Trade) -> Self {
+        Self {
+            id: t.id.0,
+            order_id: t.order_id.0,
+            side: t.side.as_str_name(),
+            area: t.area.code.clone(),
+            period: t.period.start.to_rfc3339(),
+            execution_time: t.execution_time.to_rfc3339(),
+            price: t.price.normalize().to_string(),
+            quantity: t.quantity.normalize().to_string(),
+            state: t.state.as_str_name(),
+        }
+    }
+}
+
+/// Optional `?period=<rfc3339>` filter on the orders endpoint. The
+/// drill-down's delivery dropdown picks one of the periods the pool
+/// has touched and scopes the list to that contract.
+#[derive(Deserialize)]
+struct OrdersQuery {
+    period: Option<String>,
+}
+
+async fn api_gridpool_orders(
+    State(s): State<UiState>,
+    Path(id): Path<u64>,
+    Query(q): Query<OrdersQuery>,
+) -> Result<Json<Vec<GridpoolOrderJson>>, StatusCode> {
+    let target_period = match q.period.as_deref() {
+        Some(p) => Some(
+            chrono::DateTime::parse_from_rfc3339(p)
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .with_timezone(&chrono::Utc),
+        ),
+        None => None,
+    };
+    let w = s.world.read();
+    let pool = w
+        .gridpools()
+        .get(crate::sim::order::GridpoolId(id))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut out: Vec<GridpoolOrderJson> = pool
+        .orders()
+        .filter(|d| target_period.is_none_or(|p| d.order.period.start == p))
+        .map(GridpoolOrderJson::from)
+        .collect();
+    // Newest first — the UI's drill-down lands on the most recently
+    // touched orders, which is what an operator usually wants to see.
+    out.sort_by(|a, b| b.create_time.cmp(&a.create_time));
+    Ok(Json(out))
+}
+
+async fn api_gridpool_order_trades(
+    State(s): State<UiState>,
+    Path((id, oid)): Path<(u64, u64)>,
+) -> Result<Json<Vec<GridpoolTradeJson>>, StatusCode> {
+    let w = s.world.read();
+    let pool = w
+        .gridpools()
+        .get(crate::sim::order::GridpoolId(id))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut out: Vec<GridpoolTradeJson> = pool
+        .trades()
+        .iter()
+        .filter(|t| t.order_id.0 == oid)
+        .map(GridpoolTradeJson::from)
+        .collect();
+    out.sort_by(|a, b| b.execution_time.cmp(&a.execution_time));
+    Ok(Json(out))
 }
 
 #[derive(Serialize)]

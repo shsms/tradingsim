@@ -17,18 +17,72 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use tower::ServiceExt;
 
+use chrono::{DateTime, TimeZone, Utc};
+use rust_decimal::dec;
 use tradingsim::scenarios::{
     ScenarioDef, ScenarioEntry, ScenarioRuntime, SharedScenarios, Stage, new_registry,
 };
 use tradingsim::sim::clock::{Clock, new_clock};
 use tradingsim::sim::gridpool::Gridpool;
-use tradingsim::sim::market::{Area, MarketRegistry, MarketRules};
-use tradingsim::sim::order::GridpoolId;
+use tradingsim::sim::market::{
+    Area, Currency, DeliveryDuration, DeliveryPeriod, MarketRegistry, MarketRules,
+};
+use tradingsim::sim::order::{
+    GridpoolId, MarketActor, Order, OrderDetail, OrderId, OrderState, Side, StateDetail,
+    StateReason,
+};
+use tradingsim::sim::trade::{Trade, TradeId, TradeState};
 use tradingsim::sim::weather::{SharedWeather, WeatherLocation, new_state};
 use tradingsim::sim::world::World;
 use tradingsim::ui::build_router;
 
 const DE_TN: &str = "10YDE-EON------1";
+
+fn period_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DeliveryPeriod {
+    DeliveryPeriod {
+        start: Utc.with_ymd_and_hms(year, month, day, hour, minute, 0).unwrap(),
+        duration: DeliveryDuration::DeliveryDuration15,
+    }
+}
+
+fn order_detail(
+    id: u64,
+    period: DeliveryPeriod,
+    side: Side,
+    state: OrderState,
+    create_time: DateTime<Utc>,
+) -> OrderDetail {
+    OrderDetail {
+        id: OrderId(id),
+        order: Order::limit(Area::eic(DE_TN), period, side, dec!(85.0), dec!(2.0), Currency::Eur),
+        state: StateDetail { state, reason: StateReason::Add, actor: MarketActor::User },
+        open_quantity: dec!(2.0),
+        filled_quantity: dec!(0),
+        create_time,
+        modification_time: create_time,
+    }
+}
+
+fn trade_for(order_id: u64, trade_id: u64, exec: DateTime<Utc>) -> Trade {
+    Trade {
+        id: TradeId(trade_id),
+        order_id: OrderId(order_id),
+        side: Side::Buy,
+        area: Area::eic(DE_TN),
+        period: period_at(2026, 5, 13, 12, 0),
+        execution_time: exec,
+        price: dec!(85.0),
+        currency: Currency::Eur,
+        quantity: dec!(1.0),
+        state: TradeState::Active,
+    }
+}
+
+fn seed_pool<F: FnOnce(&mut Gridpool)>(world: &Arc<RwLock<World>>, f: F) {
+    let mut w = world.write();
+    let pool = w.gridpools_mut().get_mut(GridpoolId(1)).expect("seeded pool");
+    f(pool);
+}
 
 fn empty_world() -> Arc<RwLock<World>> {
     let mut markets = MarketRegistry::new();
@@ -92,12 +146,17 @@ fn three_stage_scenario() -> Vec<Stage> {
 }
 
 fn build_app() -> (Router, SharedScenarios) {
+    let (router, scenarios, _) = build_app_with_world();
+    (router, scenarios)
+}
+
+fn build_app_with_world() -> (Router, SharedScenarios, Arc<RwLock<World>>) {
     let world = empty_world();
     let scenarios = new_registry();
     let weather = populated_weather();
     let clock = new_clock();
-    let router = build_router(world, Some(scenarios.clone()), Some(weather), clock);
-    (router, scenarios)
+    let router = build_router(world.clone(), Some(scenarios.clone()), Some(weather), clock);
+    (router, scenarios, world)
 }
 
 async fn get_json(app: &Router, path: &str) -> (StatusCode, Value) {
@@ -347,4 +406,123 @@ async fn api_clock_reflects_runtime_tz_changes() {
 
     let (_, j2) = get_json(&router, "/api/clock").await;
     assert_eq!(j2["tz"], "America/New_York");
+}
+
+#[tokio::test]
+async fn api_gridpool_orders_empty_for_clean_pool() {
+    let (app, _) = build_app();
+    let (status, j) = get_json(&app, "/api/gridpools/1/orders").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(j.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn api_gridpool_orders_returns_seeded_order() {
+    let (app, _, world) = build_app_with_world();
+    let created = Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 0).unwrap();
+    seed_pool(&world, |p| {
+        assert!(p.record_order(order_detail(
+            7,
+            period_at(2026, 5, 13, 12, 0),
+            Side::Buy,
+            OrderState::Active,
+            created,
+        )));
+    });
+    let (status, j) = get_json(&app, "/api/gridpools/1/orders").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = j.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], 7);
+    assert_eq!(arr[0]["side"], "MARKET_SIDE_BUY");
+    assert_eq!(arr[0]["state"], "ORDER_STATE_ACTIVE");
+    assert_eq!(arr[0]["area"], DE_TN);
+    assert_eq!(arr[0]["price"], "85");
+    assert_eq!(arr[0]["create_time"], created.to_rfc3339());
+}
+
+#[tokio::test]
+async fn api_gridpool_orders_filters_by_period_and_sorts_newest_first() {
+    let (app, _, world) = build_app_with_world();
+    let early = Utc.with_ymd_and_hms(2026, 5, 13, 8, 0, 0).unwrap();
+    let later = Utc.with_ymd_and_hms(2026, 5, 13, 8, 30, 0).unwrap();
+    let p_noon = period_at(2026, 5, 13, 12, 0);
+    let p_one = period_at(2026, 5, 13, 13, 0);
+    seed_pool(&world, |p| {
+        p.record_order(order_detail(1, p_noon.clone(), Side::Buy, OrderState::Active, early));
+        p.record_order(order_detail(2, p_one.clone(), Side::Sell, OrderState::Active, later));
+    });
+    // Newest first, no filter.
+    let (_, j) = get_json(&app, "/api/gridpools/1/orders").await;
+    let arr = j.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["id"], 2);
+    assert_eq!(arr[1]["id"], 1);
+
+    // Period filter narrows to one. `+` in the RFC-3339 offset has
+    // to be percent-encoded so axum's query parser doesn't decode it
+    // to a space — the JS side calls `encodeURIComponent` for the
+    // same reason.
+    let encoded = p_noon.start.to_rfc3339().replace('+', "%2B");
+    let q = format!("/api/gridpools/1/orders?period={encoded}");
+    let (_, j) = get_json(&app, &q).await;
+    let arr = j.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], 1);
+}
+
+#[tokio::test]
+async fn api_gridpool_orders_404_on_missing_pool() {
+    let (app, _) = build_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/gridpools/999/orders")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn api_gridpool_orders_400_on_malformed_period() {
+    let (app, _) = build_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/gridpools/1/orders?period=not-a-date")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_gridpool_order_trades_returns_only_matching_order() {
+    let (app, _, world) = build_app_with_world();
+    let now = Utc.with_ymd_and_hms(2026, 5, 13, 11, 0, 0).unwrap();
+    seed_pool(&world, |p| {
+        p.record_order(order_detail(
+            7,
+            period_at(2026, 5, 13, 12, 0),
+            Side::Buy,
+            OrderState::Active,
+            now,
+        ));
+        p.record_trade(trade_for(7, 100, now));
+        p.record_trade(trade_for(7, 101, now + chrono::Duration::seconds(30)));
+        p.record_trade(trade_for(8, 200, now)); // unrelated order
+    });
+    let (status, j) = get_json(&app, "/api/gridpools/1/orders/7/trades").await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = j.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    // Newest first.
+    assert_eq!(arr[0]["id"], 101);
+    assert_eq!(arr[1]["id"], 100);
+    assert_eq!(arr[0]["order_id"], 7);
 }
