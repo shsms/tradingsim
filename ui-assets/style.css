@@ -62,10 +62,10 @@ h1 {
    Tier A: chart    | scenarios                (chart 55%, scenarios 45%)
    Tier B: gridpools                           (full width, 3-pane master-detail)
    Tier C: filter bar                          (full width)
-   Tier D: weather | book | trades             (3-column, scoped by chips above)
+   Tier D: weather  | trades                   (2-column, scoped by chips above)
    Stacks single-column below 1100 px viewport. Gridpools sits above
-   the filter on purpose: filters scope weather / book / trades,
-   not the per-portfolio drill-down. */
+   the filter on purpose: filters scope weather / trades, not the
+   per-portfolio drill-down. */
 .grid {
   display: flex;
   flex-direction: column;
@@ -83,15 +83,15 @@ h1 {
    clientWidth grows, the next draw makes the canvas wider still,
    and the chart eventually shoves scenarios off the screen. */
 .tier-chart-scenarios { grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); }
-/* Weather sits on the left and needs room for 4 cell rows × 180 px;
-   the book is one aggregated DE ladder (~220 px) plus optional
-   neighbour ladders; trades is a 6-column table whose price/area/
-   delivery/exec columns each need ~70 px. 5/3/5 fractions land
-   weather ≈ trades on a 1920 px viewport and keep both readable at
-   4K, while leaving the narrow book panel just enough room for the
-   ladder plus its delivery dropdown header. */
-.tier-weather-book-trades {
-  grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 5fr);
+/* Weather is sized to fit the four DE cells on one row at typical
+   viewports (4 × 180 px + 3 gaps ≈ 744 px content). 1fr / 1fr
+   gives each side ~930 px at 1920 — plenty for the 4-cell row
+   and the 6-column trades table — without dedicating extra room
+   to the intl + neighbours case. When that's toggled, weather
+   wraps to a second row inside its panel; the row geometry stays
+   the same. */
+.tier-weather-trades {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 @media (max-width: 1100px) {
   .tier-row { grid-template-columns: 1fr; }
@@ -483,31 +483,10 @@ td { padding: 2px 6px; }
 }
 #price-chart { display: block; max-width: 100%; }
 
-/* Book ladders — one mini-ladder per active area, all for the
-   same delivery period. DE TSO zones come first, international
-   areas after. Capped at 4 visible by default with a 'show N
-   more' toggle so a "+ neighbours" view doesn't blow out the
-   panel. Period picked by the global filter bar; clicking a
-   trade row sets the period and the book follows. */
-.book-controls {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-  margin-bottom: 10px;
-  font-size: var(--fs-small);
-}
-.book-controls select {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 1px 6px;
-  font-family: inherit;
-  font-size: var(--fs-small);
-}
 /* Panel header row with the delivery picker pinned right next
    to the panel title — keeps the control near the data it
-   scopes. */
+   scopes. Used by the public-trades panel and the gridpool-orders
+   pane in the drill-down. */
 .book-head {
   display: flex;
   align-items: baseline;
@@ -527,85 +506,23 @@ td { padding: 2px 6px; }
   font-size: var(--fs-small);
 }
 
-/* Fixed-size ladders so the order book stays predictable as
-   areas come and go. Wraps to additional rows on narrow panels. */
-.book-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.book-row .ladder {
-  flex: 0 0 220px;
-  /* Reserved height = head + 3 ask rows + spread + 3 bid rows
-     + padding. Ladders past 3 levels per side use the inline
-     '+N more' control which expands beyond this height. */
-  min-height: 180px;
-}
-.book-show-more {
-  text-align: center;
-  color: var(--muted);
-  font-size: var(--fs-mini);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-  padding: 4px;
-  margin-top: 4px;
-}
-.book-show-more:hover { color: var(--text); }
-.ladder {
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 8px;
-}
-.ladder-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 4px;
-  font-size: var(--fs-small);
-}
-.ladder-head .midprice { color: var(--muted); }
-.ladder-row {
-  display: grid;
-  grid-template-columns: 60px 44px 1fr;
-  align-items: center;
-  font-size: var(--fs-small);
+/* Public trades table — fixed column widths so cells don't
+   jitter as content lengths change (4-digit ids vs 6-digit,
+   single area vs cross-area badge pair, integer vs decimal qty).
+   Sum of percentages = 100; tweak together. */
+.trades-table { table-layout: fixed; width: 100%; }
+.trades-table .col-id       { width: 12%; }
+.trades-table .col-qty      { width: 10%; }
+.trades-table .col-price    { width: 14%; }
+.trades-table .col-area     { width: 24%; }
+.trades-table .col-delivery { width: 18%; }
+.trades-table .col-exec     { width: 22%; }
+.trades-table td, .trades-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  gap: 6px;
-  padding: 1px 0;
-  min-height: 18px;
 }
-.ladder-row.ask { color: var(--sell); }
-.ladder-row.bid { color: var(--buy); }
-.ladder-row .price { text-align: right; }
-.ladder-row .qty { text-align: right; color: var(--muted); }
-.ladder-row .bar { height: 4px; background: currentColor; opacity: 0.35; border-radius: 1px; }
-.ladder-spread {
-  color: var(--muted);
-  font-size: var(--fs-mini);
-  text-align: center;
-  padding: 2px 0;
-  border-top: 1px dashed var(--border);
-  border-bottom: 1px dashed var(--border);
-  margin: 2px 0;
-}
-.ladder-empty {
-  color: var(--muted);
-  font-size: var(--fs-small);
-  text-align: center;
-  padding: 4px;
-}
-.ladder-more {
-  color: var(--muted);
-  font-size: var(--fs-mini);
-  text-align: center;
-  cursor: pointer;
-  padding: 2px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.ladder-more:hover { color: var(--text); }
 
 /* Filter bar — area chips that scope trades, book, and chart. */
 .filter-bar {

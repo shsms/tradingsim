@@ -14,7 +14,6 @@
 <section class="pulse" aria-label="system pulse">
   <div class="pulse-group">
     <span class="pill" id="pill-trades">trades</span>
-    <span class="pill" id="pill-book">book</span>
     <span class="pill" id="pill-weather">weather</span>
   </div>
   <div class="pulse-sep"></div>
@@ -100,12 +99,11 @@
     <span id="filter-chips"></span>
   </section>
 
-  <!-- Tier D: weather + public order book + public trades. One row;
-       no separate Tier E. The DE book is one aggregated ladder
-       across all four control zones (Germany clears at one price),
-       so the book panel is much narrower than before — that frees
-       enough width to host the trades tape inline. -->
-  <div class="tier-row tier-weather-book-trades">
+  <!-- Tier D: weather + public trades. Public order book lives
+       in the gridpool drill-down already; the standalone panel
+       added no new information now that the four DE control zones
+       share one MM and one price. -->
+  <div class="tier-row tier-weather-trades">
     <div class="panel panel-weather">
       <h2>Weather (now)</h2>
       <div class="muted" style="margin-bottom:6px">
@@ -113,16 +111,6 @@
         and wind direction.
       </div>
       <div id="weather" class="weather-grid">loading…</div>
-    </div>
-
-    <div class="panel panel-book">
-      <div class="book-head">
-        <h2>Public order book — one delivery</h2>
-        <span class="muted">delivery
-          <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
-        </span>
-      </div>
-      <div id="book"></div>
     </div>
 
     <div class="panel panel-trades">
@@ -133,7 +121,15 @@
         </span>
       </div>
       <div class="scroll">
-        <table>
+        <table class="trades-table">
+          <colgroup>
+            <col class="col-id">
+            <col class="col-qty">
+            <col class="col-price">
+            <col class="col-area">
+            <col class="col-delivery">
+            <col class="col-exec">
+          </colgroup>
           <thead><tr>
             <th>id</th><th>qty</th><th>price</th>
             <th>area</th><th>delivery</th><th>exec</th>

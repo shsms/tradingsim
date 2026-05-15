@@ -51,7 +51,6 @@ function toggleTz() {
   // but we force an immediate refresh so the toggle feels
   // instantaneous.
   tickClock();
-  rerenderBook();
   rerenderTrades();
   rerenderWeather();
   loadScenarios();
@@ -222,7 +221,6 @@ function recordTradePrice(t) {
 const SELECT_PREFS = {
   chart:        'tradingsim-chart-window-min',
   chartPeriod:  'tradingsim-chart-period',
-  book:         'tradingsim-book-period',
   trades:       'tradingsim-trades-filter',
 };
 
@@ -988,7 +986,6 @@ async function scenarioAction(name, action) {
 const WS_BACKOFF_MIN_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
 let tradesWsBackoff = WS_BACKOFF_MIN_MS;
-let bookWsBackoff = WS_BACKOFF_MIN_MS;
 
 function openTradesWs() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1010,12 +1007,6 @@ function openTradesWs() {
   };
 }
 
-// Client-side book state: Map<orderId, {area, period, side, price, qty}>.
-// Each WS message updates one entry; qty=0 removes it. Then we
-// re-render aggregated by (area, period, side, price).
-const bookState = new Map();
-let bookDirty = false;
-
 // Same array as ALL_AREAS — kept as an alias for the places that
 // already use the longer name to talk about "every chip the filter
 // row knows about".
@@ -1035,18 +1026,13 @@ let periodFilter = null;
 function setPeriodFilter(period) {
   if (!period) return;
   periodFilter = period;
-  // Sync the single-contract book so a click on a trade row in TN
-  // lands on the same delivery the user is looking at.
-  bookContract.period = period;
   renderPeriodPill();
-  rerenderBook();
   rerenderTrades();
 }
 
 function clearPeriodFilter() {
   periodFilter = null;
   renderPeriodPill();
-  rerenderBook();
   rerenderTrades();
 }
 
@@ -1066,7 +1052,6 @@ function toggleArea(code) {
   if (activeAreas.has(code)) activeAreas.delete(code);
   else activeAreas.add(code);
   renderFilterChips();
-  rerenderBook();
   rerenderTrades();
   rerenderWeather();
 }
@@ -1079,7 +1064,6 @@ function toggleNeighbours() {
     else activeAreas.delete(a.code);
   }
   renderFilterChips();
-  rerenderBook();
   rerenderTrades();
   rerenderWeather();
 }
@@ -1100,10 +1084,10 @@ function renderFilterChips() {
 // (area chips, focused-period pill, trades-delivery dropdown) so
 // "last 50" stays true regardless of which combination is on.
 const TRADES_BUFFER_CAP = 500;
-// Sized so the table body fits inside the Tier D panel without
-// overflowing past the weather / book panels next to it. ~25 rows
-// at compact density fills ~360 px which matches the .scroll max.
-const TRADES_DISPLAY_CAP = 25;
+// Just enough rows to read the recent tape at a glance without
+// asking the user to scroll inside a panel that already shares a
+// row with weather. ~10 rows comfortably fits a single page.
+const TRADES_DISPLAY_CAP = 10;
 const tradesBuffer = [];
 let tradesDirty = false;
 let tradesPeriodFilter = null; // null = all deliveries
@@ -1175,262 +1159,9 @@ function rerenderTrades() {
   tbody.innerHTML = visible.map(renderTradeRow).join('');
 }
 
-const TOP_LEVELS = 3;
-const ladderExpanded = new Set();
-
-function toggleLadder(key) {
-  if (ladderExpanded.has(key)) ladderExpanded.delete(key);
-  else ladderExpanded.add(key);
-  rerenderBook();
-}
-
-function ladderRow(side, price, qty, maxQ) {
-  const pct = Math.max(2, Math.round((qty / maxQ) * 100));
-  return `<div class="ladder-row ${side}">
-    <span class="price">${parseFloat(price).toFixed(2)}</span>
-    <span class="qty">${qty.toFixed(1)}</span>
-    <span class="bar" style="width:${pct}%"></span>
-  </div>`;
-}
-
-function renderLadder(g) {
-  const key = `${g.area}|${g.period}`;
-  const expanded = ladderExpanded.has(key);
-  const asks = Array.from(g.asks.entries())
-    .map(([p, q]) => [parseFloat(p), q])
-    .sort((a, b) => a[0] - b[0]);
-  const bids = Array.from(g.bids.entries())
-    .map(([p, q]) => [parseFloat(p), q])
-    .sort((a, b) => b[0] - a[0]);
-  const maxQ = Math.max(0.01, ...asks.map(x => x[1]), ...bids.map(x => x[1]));
-
-  const visAsks = expanded ? asks : asks.slice(0, TOP_LEVELS);
-  const visBids = expanded ? bids : bids.slice(0, TOP_LEVELS);
-
-  // asks rendered worst-to-best so the lowest ask sits next to the
-  // spread row at the centre of the ladder.
-  const askRows = visAsks
-    .slice()
-    .reverse()
-    .map(([p, q]) => ladderRow('ask', p, q, maxQ))
-    .join('');
-  const bidRows = visBids
-    .map(([p, q]) => ladderRow('bid', p, q, maxQ))
-    .join('');
-
-  const bestBid = bids[0]?.[0];
-  const bestAsk = asks[0]?.[0];
-  const mid = (bestBid != null && bestAsk != null)
-    ? ((bestBid + bestAsk) / 2).toFixed(2)
-    : '—';
-  const spread = (bestBid != null && bestAsk != null)
-    ? (bestAsk - bestBid).toFixed(2)
-    : '—';
-
-  const safeKey = key.replace(/'/g, '%27');
-  const askMore = (!expanded && asks.length > TOP_LEVELS)
-    ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">+ ${asks.length - TOP_LEVELS} more asks</div>`
-    : '';
-  const bidMore = (!expanded && bids.length > TOP_LEVELS)
-    ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">+ ${bids.length - TOP_LEVELS} more bids</div>`
-    : '';
-  const collapse = expanded
-    ? `<div class="ladder-more" onclick="toggleLadder('${safeKey}')">collapse</div>`
-    : '';
-
-  return `
-    <div class="ladder">
-      <div class="ladder-head">
-        <span><span class="area-badge">${areaTag(g.area)}</span></span>
-        <span class="midprice">mid ${mid}</span>
-      </div>
-      ${askMore}
-      ${askRows || '<div class="ladder-empty">no asks</div>'}
-      <div class="ladder-spread">spread ${spread}</div>
-      ${bidRows || '<div class="ladder-empty">no bids</div>'}
-      ${bidMore}
-      ${collapse}
-    </div>`;
-}
-
-/** Delivery period the book panel is currently showing. Area
- *  selection comes from the global `activeAreas` set (the
- *  filter chips), so the book always reflects the user's
- *  current scope. `period` is null until the first render
- *  picks a default. */
-const bookContract = { period: null };
-// Up to 1 DE-aggregate + 4 intl ladders fit before the panel needs
-// a "show more" affordance. The flex row wraps narrower panels to
-// additional lines anyway, so this is a per-column ceiling, not a
-// hard hide threshold.
-const BOOK_VISIBLE_CAP = 5;
-let bookShowAll = false;
-
-function selectBookPeriod(period) {
-  bookContract.period = period;
-  rememberSelectChoice('book', period);
-  rerenderBook();
-}
-
-function toggleBookShowAll() {
-  bookShowAll = !bookShowAll;
-  rerenderBook();
-}
-
-function rerenderBook() {
-  // Group rows by (area, period). Aggregate bids/asks per level.
-  // Closed-gate contracts (period.start in the past) get dropped
-  // belt-and-suspenders for missed qty=0 events.
-  const groups = new Map();
-  const cutoff = Date.now();
-  for (const r of bookState.values()) {
-    if (r.period) {
-      const ts = Date.parse(r.period);
-      if (!Number.isNaN(ts) && ts <= cutoff) continue;
-    }
-    const key = `${r.area}|${r.period}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = { area: r.area, period: r.period, bids: new Map(), asks: new Map() };
-      groups.set(key, g);
-    }
-    const target = r.side === 1 ? g.bids : (r.side === 2 ? g.asks : null);
-    if (target == null) continue;
-    const prev = target.get(r.price) || 0;
-    const next = prev + parseFloat(r.qty || '0');
-    target.set(r.price, next);
-  }
-
-  // Available delivery periods across ALL areas — the period
-  // dropdown lets the user pick any contract anyone is quoting,
-  // independent of which areas they currently have selected.
-  const allPeriods = new Set();
-  for (const g of groups.values()) allPeriods.add(g.period);
-  const periods = Array.from(allPeriods).sort();
-  if (!bookContract.period || !periods.includes(bookContract.period)) {
-    // Drop a stale persisted period (contract expired between
-    // reloads) before falling back to the soonest available.
-    if (bookContract.period && !periods.includes(bookContract.period)) {
-      rememberSelectChoice('book', null);
-    }
-    bookContract.period = periods[0] || null;
-  }
-  const periodSel = document.getElementById('book-period-select');
-  // Skip rewriting the <select> while the user is interacting
-  // with it — replacing innerHTML on every 200 ms tick would
-  // close the open dropdown before they can pick.
-  if (periodSel && document.activeElement !== periodSel) {
-    periodSel.innerHTML = periods
-      .map(
-        p => `<option value="${p}"${p === bookContract.period ? ' selected' : ''}>${shortTime(p)}</option>`
-      )
-      .join('');
-  }
-
-  const container = document.getElementById('book');
-  if (!container) return;
-  if (!bookContract.period) {
-    container.innerHTML = '<div class="ladder-empty"><i>no contracts have resting orders yet</i></div>';
-    return;
-  }
-
-  // DE active areas collapse into one aggregated ladder labeled
-  // "DE": the four control zones share one MM fleet quoting the
-  // same price into each book, but aggressors hit individual area
-  // books so per-area depth diverges over time. Summing across the
-  // four gives the total DE-wide depth at each price — the right
-  // view for a single bidding zone where liquidity is fungible.
-  // International ladders stay per-area; FR / NL / BE / AT really
-  // are distinct markets that can clear at different prices.
-  const intlActive = ALL_FILTER_AREAS
-    .filter(a => a.group === 'intl' && activeAreas.has(a.code));
-  const deActive = DE_AREAS.filter(a => activeAreas.has(a.code));
-  const matches = [];
-  if (deActive.length > 0) {
-    const agg = {
-      area: 'DE',
-      period: bookContract.period,
-      bids: new Map(),
-      asks: new Map(),
-    };
-    for (const a of deActive) {
-      const g = groups.get(`${a.code}|${bookContract.period}`);
-      if (!g) continue;
-      for (const [p, q] of g.bids) agg.bids.set(p, (agg.bids.get(p) || 0) + q);
-      for (const [p, q] of g.asks) agg.asks.set(p, (agg.asks.get(p) || 0) + q);
-    }
-    matches.push(agg);
-  }
-  for (const a of intlActive) {
-    matches.push(groups.get(`${a.code}|${bookContract.period}`) ?? {
-      area: a.code,
-      period: bookContract.period,
-      bids: new Map(),
-      asks: new Map(),
-    });
-  }
-
-  if (matches.length === 0) {
-    container.innerHTML = '<div class="ladder-empty"><i>no areas selected</i></div>';
-    return;
-  }
-
-  const visible = bookShowAll ? matches : matches.slice(0, BOOK_VISIBLE_CAP);
-  const hidden = matches.length - visible.length;
-  const row = `<div class="book-row">${visible.map(renderLadder).join('')}</div>`;
-  let footer = '';
-  if (hidden > 0) {
-    footer = `<div class="book-show-more" onclick="toggleBookShowAll()">+ ${hidden} more area${hidden === 1 ? '' : 's'}</div>`;
-  } else if (bookShowAll && matches.length > BOOK_VISIBLE_CAP) {
-    footer = '<div class="book-show-more" onclick="toggleBookShowAll()">collapse</div>';
-  }
-  container.innerHTML = row + footer;
-}
-
-function openBookWs() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws/public-book`);
-  ws.onopen = () => {
-    // Wipe any state from the previous connection — the server
-    // re-emits a full snapshot on every connect, so anything we
-    // already had is either reflected in that snapshot or has
-    // since been cancelled. Without this clear, ghost orders left
-    // over from a Lagged disconnect would accumulate.
-    bookState.clear();
-    bookDirty = true;
-    setPill('pill-book', 'ok', 'book');
-    bookWsBackoff = WS_BACKOFF_MIN_MS;
-  };
-  ws.onmessage = (e) => {
-    const r = JSON.parse(e.data);
-    const qty = parseFloat(r.quantity || '0');
-    if (qty <= 0) {
-      bookState.delete(r.id);
-    } else {
-      bookState.set(r.id, {
-        area: r.area,
-        period: r.period || '',
-        side: r.side,
-        price: r.price,
-        qty: r.quantity,
-      });
-    }
-    bookDirty = true;
-  };
-  ws.onclose = () => {
-    setPill('pill-book', 'down', 'book');
-    setTimeout(openBookWs, bookWsBackoff);
-    bookWsBackoff = Math.min(bookWsBackoff * 2, WS_BACKOFF_MAX_MS);
-  };
-}
-
 // Re-render at most ~5 times/sec; the MM refreshes generate enough
 // churn that per-message rerenders would overdraw needlessly.
 setInterval(() => {
-  if (bookDirty) {
-    bookDirty = false;
-    rerenderBook();
-  }
   if (tradesDirty) {
     tradesDirty = false;
     rerenderTrades();
@@ -1441,24 +1172,21 @@ setInterval(() => {
   initDensity();
   initChartWindow();
   initChartPeriod();
-  // Restore book + trades dropdown choices from localStorage so
-  // the first render uses the user's last picks instead of the
-  // defaults. Validation against the live period set happens
-  // inside rerenderBook / rerenderTrades — stale contracts that
-  // already expired get cleared there.
-  bookContract.period = rememberedSelectChoice('book') || null;
+  // Restore trades dropdown choice from localStorage so the first
+  // render uses the user's last pick instead of the default.
+  // Validation against the live period set happens inside
+  // rerenderTrades — stale contracts get cleared there.
   const tradesSaved = rememberedSelectChoice('trades');
   tradesPeriodFilter = tradesSaved && tradesSaved !== 'all' ? tradesSaved : null;
   // Pull the sim's timezone first so the very first tickClock /
-  // renderTrades / renderBook formats in the right zone — without
-  // this they'd render in UTC for a frame, then snap.
+  // renderTrades formats in the right zone — without this they'd
+  // render in UTC for a frame, then snap.
   await loadClock();
   tickClock();
   renderSparkbars();
   renderFilterChips();
   drawChart();
   setPill('pill-trades', 'down', 'trades');
-  setPill('pill-book', 'down', 'book');
   setPill('pill-weather', 'down', 'weather');
   await Promise.all([loadInfo(), loadGridpools(), loadScenarios(), loadWeather()]);
   setInterval(refreshGridpoolDrilldown, 3000);
@@ -1470,5 +1198,4 @@ setInterval(() => {
   setInterval(drawChart, 1000);
   window.addEventListener('resize', drawChart);
   openTradesWs();
-  openBookWs();
 })();

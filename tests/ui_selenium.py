@@ -114,9 +114,13 @@ def main() -> int:
             list_rows = driver.find_elements(By.CSS_SELECTOR, "#gridpool-list .row-item")
             assert list_rows, "expected at least one pool row"
 
-            book_head = driver.find_element(By.CSS_SELECTOR, ".panel-book h2")
-            # h2 carries `text-transform: uppercase`; compare lower.
-            assert "public order book" in book_head.text.lower(), book_head.text
+            # The dedicated public order book panel is gone — the four
+            # DE control zones share one MM and one price, so a
+            # standalone book panel didn't add anything the gridpool
+            # drill-down doesn't already cover. The trade tape carries
+            # the public-market view at the bottom of the page.
+            trades_head = driver.find_element(By.CSS_SELECTOR, ".panel-trades h2")
+            assert "public trades" in trades_head.text.lower(), trades_head.text
 
             assert driver.find_element(By.ID, "gridpool-period-select")
 
@@ -136,11 +140,11 @@ def main() -> int:
             filter_y = driver.find_element(By.ID, "area-filter-bar").rect["y"]
             assert gp_y < filter_y, (gp_y, filter_y)
 
-            # Weather + book share a row. Compare top edges with a few
-            # pixels of slack to absorb sub-pixel rounding.
+            # Weather + trades share Tier D. Compare top edges with a
+            # few pixels of slack to absorb sub-pixel rounding.
             weather_y = driver.find_element(By.CSS_SELECTOR, ".panel-weather").rect["y"]
-            book_y = driver.find_element(By.CSS_SELECTOR, ".panel-book").rect["y"]
-            assert abs(weather_y - book_y) < 4, (weather_y, book_y)
+            trades_y = driver.find_element(By.CSS_SELECTOR, ".panel-trades").rect["y"]
+            assert abs(weather_y - trades_y) < 4, (weather_y, trades_y)
 
             shot = REPO / "target" / "ui-selenium-screenshot.png"
             driver.save_screenshot(str(shot))
