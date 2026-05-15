@@ -59,12 +59,14 @@ h1 {
 }
 .muted { color: var(--muted); font-size: var(--fs-small); }
 /* Layout — top-down tiers.
-   Tier A: chart  | scenarios     (chart 55%, scenarios 45%)
-   Tier B: filter bar             (full width)
-   Tier C: book   | gridpools     (book 70%, gridpools 30%)
-   Tier D: weather                (full width, below book)
-   Tier E: trade tape             (full width, bottom)
-   Stacks single-column below 900 px viewport. */
+   Tier A: chart    | scenarios     (chart 55%, scenarios 45%)
+   Tier B: gridpools                (full width, 3-pane master-detail)
+   Tier C: filter bar               (full width)
+   Tier D: weather  | public book   (50/50 — scoped by chips above)
+   Tier E: trade tape               (full width, bottom)
+   Stacks single-column below 900 px viewport. Gridpools sits above
+   the filter on purpose: filters scope weather / book / trades,
+   not the per-portfolio drill-down. */
 .grid {
   display: flex;
   flex-direction: column;
@@ -82,10 +84,43 @@ h1 {
    clientWidth grows, the next draw makes the canvas wider still,
    and the chart eventually shoves scenarios off the screen. */
 .tier-chart-scenarios { grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); }
-.tier-book-gridpools  { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.tier-weather-book    { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 @media (max-width: 900px) {
   .tier-row { grid-template-columns: 1fr; }
 }
+
+/* Gridpool drill-down — three columns: pool list (narrow) → orders
+   for the selected pool (medium, with its own delivery dropdown) →
+   trades for the selected order (wide). The master/detail pattern
+   is asymmetric on purpose: the leaf pane carries more fields and
+   wants the most width. Stacks single-column below 1100 px. */
+.gridpool-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 6fr) minmax(0, 7fr);
+  gap: 12px;
+}
+@media (max-width: 1100px) {
+  .gridpool-layout { grid-template-columns: 1fr; }
+}
+.gridpool-list,
+.gridpool-orders,
+.gridpool-trades {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  min-height: 220px;
+}
+.gridpool-orders h2,
+.gridpool-trades h2 {
+  margin: 0 0 6px 0;
+  font-size: var(--fs-h2);
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.gridpool-list { display: flex; flex-direction: column; gap: 4px; }
 
 /* Scenarios + chart panels share a stable min-height so the
    panel doesn't jump between idle (picker only) and active
@@ -666,6 +701,27 @@ td { padding: 2px 6px; }
   user-select: none;
 }
 .row-item:hover { border-color: var(--muted); }
+.row-item.selected {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+.row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: var(--fs-mini);
+}
+.row-meta .row-sep { color: var(--border); }
+/* Inline selection highlight for the gridpool order rows in the
+   middle drill-down pane. Tables don't pick up .row-item styles,
+   so the row gets its own class. */
+tr.gp-order-row { cursor: pointer; }
+tr.gp-order-row:hover td { background: var(--panel-2); }
+tr.gp-order-row.selected td {
+  background: rgba(88, 166, 255, 0.15);
+}
 .row-head {
   display: flex;
   align-items: center;
@@ -674,27 +730,3 @@ td { padding: 2px 6px; }
   font-variant-numeric: tabular-nums;
 }
 .row-head .row-sep { color: var(--border); }
-.row-caret { margin-left: auto; color: var(--muted); font-size: var(--fs-mini); }
-.row-detail {
-  display: none;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--border);
-  font-size: var(--fs-mini);
-  color: var(--muted);
-  display: none;
-}
-.row-item.open .row-detail { display: block; }
-.row-item.open .row-caret::before { content: "▾"; }
-.row-item:not(.open) .row-caret::before { content: "▸"; }
-
-/* On tall windows there's no point hiding the detail block —
-   space isn't the limit. Show every row's detail by default and
-   drop the toggle affordance entirely; cursor reverts to default
-   so rows don't pretend to be interactive. */
-@media (min-height: 1200px) {
-  .row-item .row-detail { display: block; }
-  .row-item { cursor: default; }
-  .row-item:hover { border-color: var(--border); }
-  .row-caret { display: none; }
-}

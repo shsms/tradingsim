@@ -59,7 +59,30 @@
     </div>
   </div>
 
-  <!-- Tier B: filters -->
+  <!-- Tier B: gridpools (full width, master-detail). Lives above
+       the area filter on purpose — the filter scopes weather /
+       public book / trades, not the per-portfolio drill-down. -->
+  <div class="panel panel-gridpools">
+    <h2>Gridpools</h2>
+    <div class="gridpool-layout">
+      <div id="gridpool-list" class="gridpool-list muted">loading…</div>
+      <div class="gridpool-orders">
+        <div class="book-head">
+          <h2 id="gridpool-orders-title">Orders</h2>
+          <span class="muted">delivery
+            <select id="gridpool-period-select" onchange="selectGridpoolPeriod(this.value)"></select>
+          </span>
+        </div>
+        <div id="gridpool-orders" class="muted">select a gridpool</div>
+      </div>
+      <div class="gridpool-trades">
+        <h2 id="gridpool-trades-title">Trades</h2>
+        <div id="gridpool-trades" class="muted">select an order</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tier C: filters -->
   <section class="filter-bar" id="contract-filter-bar" style="display:none" aria-label="active delivery">
     <span>focused</span>
     <span class="contract-pill" id="contract-pill" onclick="clearPeriodFilter()">
@@ -73,32 +96,26 @@
     <span id="filter-chips"></span>
   </section>
 
-  <!-- Tier C: book + gridpools -->
-  <div class="tier-row tier-book-gridpools">
+  <!-- Tier D: weather (left) + public order book (right) -->
+  <div class="tier-row tier-weather-book">
+    <div class="panel panel-weather">
+      <h2>Weather (now)</h2>
+      <div class="muted" style="margin-bottom:6px">
+        Rows match the active area chips. Click a row for lat/lon
+        and wind direction.
+      </div>
+      <div id="weather" class="weather-grid">loading…</div>
+    </div>
+
     <div class="panel panel-book">
       <div class="book-head">
-        <h2>Order book — selected areas, one delivery</h2>
+        <h2>Public order book — selected areas, one delivery</h2>
         <span class="muted">delivery
           <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
         </span>
       </div>
       <div id="book"></div>
     </div>
-
-    <div class="panel panel-gridpools">
-      <h2>Gridpools</h2>
-      <div id="gridpools" class="row-list muted">loading…</div>
-    </div>
-  </div>
-
-  <!-- Tier D: weather -->
-  <div class="panel panel-weather">
-    <h2>Weather (now)</h2>
-    <div class="muted" style="margin-bottom:6px">
-      Rows match the active area chips. Click a row for lat/lon
-      and wind direction.
-    </div>
-    <div id="weather" class="weather-grid">loading…</div>
   </div>
 
   <!-- Tier E: trade tape (full width, bottom) -->

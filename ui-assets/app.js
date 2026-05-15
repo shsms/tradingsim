@@ -363,36 +363,243 @@ function drawChart() {
   }
 }
 
-function toggleRow(ev) {
-  ev.currentTarget.classList.toggle('open');
-}
+// Gridpool drill-down (3-pane master-detail): the pool list cache
+// + the currently-selected pool / order drive the middle and right
+// panes. Server endpoints used:
+//   /api/gridpools                      — list + counts
+//   /api/gridpools/{id}/orders          — order list (newest first)
+//   /api/gridpools/{id}/orders/{oid}/trades — fills for that order
+// Period filter is applied client-side: at our volumes the full
+// order list is cheap, and the dropdown's distinct-period set has
+// to be derived from the unfiltered data anyway.
+let gridpoolList = [];
+let gridpoolSelectedId = null;
+let gridpoolOrders = [];
+let gridpoolDeliveryFilter = null;
+let gridpoolSelectedOrderId = null;
+let gridpoolTrades = [];
+
+// Drop the noisy SCREAMING_SNAKE proto prefix for display. Falls
+// back to the raw name on unknown enum variants so a future server
+// addition shows up legibly rather than blank.
+const ORDER_STATE_SHORT = {
+  ORDER_STATE_PENDING:   'pending',
+  ORDER_STATE_ACTIVE:    'active',
+  ORDER_STATE_HIBERNATE: 'hibernate',
+  ORDER_STATE_FILLED:    'filled',
+  ORDER_STATE_CANCELED:  'canceled',
+  ORDER_STATE_EXPIRED:   'expired',
+  ORDER_STATE_FAILED:    'failed',
+};
+const SIDE_SHORT = { MARKET_SIDE_BUY: 'buy', MARKET_SIDE_SELL: 'sell' };
+const TRADE_STATE_SHORT = {
+  TRADE_STATE_ACTIVE:            'active',
+  TRADE_STATE_CANCEL_REQUESTED:  'cancel?',
+  TRADE_STATE_CANCEL_REJECTED:   'cancel✗',
+  TRADE_STATE_CANCELED:          'canceled',
+  TRADE_STATE_RECALL_REQUESTED:  'recall?',
+  TRADE_STATE_RECALL_REJECTED:   'recall✗',
+  TRADE_STATE_RECALLED:          'recalled',
+  TRADE_STATE_APPROVAL_REQUESTED:'approval?',
+};
+function shortOrderState(s) { return ORDER_STATE_SHORT[s] || s; }
+function shortSide(s)       { return SIDE_SHORT[s] || s; }
+function shortTradeState(s) { return TRADE_STATE_SHORT[s] || s; }
 
 async function loadGridpools() {
   const r = await fetch('/api/gridpools');
   if (!r.ok) return;
-  const j = await r.json();
-  const el = document.getElementById('gridpools');
-  if (!j.length) {
+  gridpoolList = await r.json();
+  // Auto-select on first paint: pool with the most trades wins —
+  // it's the one most likely to have a non-empty drill-down state,
+  // which avoids opening the page onto two empty panes. Falls back
+  // to the first pool if every pool's trade count is zero.
+  if (gridpoolSelectedId == null && gridpoolList.length) {
+    const best = [...gridpoolList].sort((a, b) => b.trades - a.trades)[0];
+    await selectGridpool(best.id);
+    return;
+  }
+  renderGridpoolList();
+}
+
+function renderGridpoolList() {
+  const el = document.getElementById('gridpool-list');
+  if (!el) return;
+  if (!gridpoolList.length) {
     el.innerHTML = '<i>no gridpools registered</i>';
     return;
   }
-  el.innerHTML = j.map(g => {
+  el.innerHTML = gridpoolList.map(g => {
+    const sel = g.id === gridpoolSelectedId ? ' selected' : '';
     const badges = g.areas.map(a => `<span class="area-badge">${areaTag(a)}</span>`).join(' ');
-    return `<div class="row-item" onclick="toggleRow(event)">
+    return `<div class="row-item${sel}" onclick="selectGridpool(${g.id})">
       <div class="row-head">
         <span class="area-badge">${g.id}</span>
         <span>${escapeHtml(g.name)}</span>
-        <span class="muted row-sep">·</span>
-        <span class="muted">${g.areas.length} areas</span>
-        <span class="muted row-sep">·</span>
-        <span class="muted">${g.orders} orders</span>
-        <span class="muted row-sep">·</span>
-        <span class="muted">${g.trades} trades</span>
-        <span class="row-caret"></span>
       </div>
-      <div class="row-detail">${badges}</div>
+      <div class="row-meta muted">
+        ${badges}
+        <span class="row-sep">·</span>
+        <span>${g.orders} orders</span>
+        <span class="row-sep">·</span>
+        <span>${g.trades} trades</span>
+      </div>
     </div>`;
   }).join('');
+}
+
+async function selectGridpool(id) {
+  if (gridpoolSelectedId !== id) {
+    gridpoolSelectedId = id;
+    gridpoolSelectedOrderId = null;
+    gridpoolDeliveryFilter = null;
+    gridpoolTrades = [];
+  }
+  renderGridpoolList();
+  renderGridpoolTrades();
+  await loadGridpoolOrders();
+}
+
+async function loadGridpoolOrders() {
+  if (gridpoolSelectedId == null) return;
+  const r = await fetch(`/api/gridpools/${gridpoolSelectedId}/orders`);
+  if (!r.ok) return;
+  gridpoolOrders = await r.json();
+  // If the previously-selected order vanished (fully filled +
+  // pruned, or cancelled), drop the selection so the trades pane
+  // doesn't keep showing stale fills.
+  if (
+    gridpoolSelectedOrderId != null &&
+    !gridpoolOrders.some(o => o.id === gridpoolSelectedOrderId)
+  ) {
+    gridpoolSelectedOrderId = null;
+    gridpoolTrades = [];
+    renderGridpoolTrades();
+  }
+  renderGridpoolPeriodSelect();
+  renderGridpoolOrders();
+}
+
+function gridpoolDistinctPeriods() {
+  const set = new Set(gridpoolOrders.map(o => o.period));
+  return [...set].sort();
+}
+
+function renderGridpoolPeriodSelect() {
+  const sel = document.getElementById('gridpool-period-select');
+  if (!sel) return;
+  const periods = gridpoolDistinctPeriods();
+  const opts = ['<option value="">all</option>'];
+  for (const p of periods) opts.push(`<option value="${p}">${shortTime(p)}</option>`);
+  sel.innerHTML = opts.join('');
+  // Preserve the user's choice across the periodic refresh; drop
+  // it silently if the period no longer matches any open order.
+  if (gridpoolDeliveryFilter && periods.includes(gridpoolDeliveryFilter)) {
+    sel.value = gridpoolDeliveryFilter;
+  } else {
+    gridpoolDeliveryFilter = null;
+    sel.value = '';
+  }
+}
+
+function selectGridpoolPeriod(value) {
+  gridpoolDeliveryFilter = value || null;
+  renderGridpoolOrders();
+}
+
+function gridpoolVisibleOrders() {
+  if (!gridpoolDeliveryFilter) return gridpoolOrders;
+  return gridpoolOrders.filter(o => o.period === gridpoolDeliveryFilter);
+}
+
+function renderGridpoolOrders() {
+  const el = document.getElementById('gridpool-orders');
+  if (!el) return;
+  if (gridpoolSelectedId == null) {
+    el.innerHTML = '<i>select a gridpool</i>';
+    return;
+  }
+  const orders = gridpoolVisibleOrders();
+  if (!orders.length) {
+    el.innerHTML = gridpoolDeliveryFilter
+      ? '<i>no orders for this delivery</i>'
+      : '<i>no orders for this gridpool</i>';
+    return;
+  }
+  const rows = orders.map(o => {
+    const sel = o.id === gridpoolSelectedOrderId ? ' selected' : '';
+    const sideCls = o.side === 'MARKET_SIDE_BUY' ? 'buy' : 'sell';
+    return `<tr class="gp-order-row${sel}" onclick="selectGridpoolOrder(${o.id})">
+      <td>${o.id}</td>
+      <td class="${sideCls}">${shortSide(o.side)}</td>
+      <td><span class="area-badge">${areaTag(o.area)}</span></td>
+      <td>${shortTime(o.period)}</td>
+      <td>${o.price}</td>
+      <td>${o.filled_quantity}/${o.quantity}</td>
+      <td>${shortOrderState(o.state)}</td>
+      <td>${shortTime(o.modification_time)}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<div class="scroll"><table>
+    <thead><tr>
+      <th>id</th><th>side</th><th>area</th><th>delivery</th>
+      <th>price</th><th>filled/qty</th><th>state</th><th>upd</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+async function selectGridpoolOrder(oid) {
+  gridpoolSelectedOrderId = oid;
+  renderGridpoolOrders();
+  await loadGridpoolOrderTrades();
+}
+
+async function loadGridpoolOrderTrades() {
+  if (gridpoolSelectedId == null || gridpoolSelectedOrderId == null) return;
+  const r = await fetch(
+    `/api/gridpools/${gridpoolSelectedId}/orders/${gridpoolSelectedOrderId}/trades`,
+  );
+  if (!r.ok) return;
+  gridpoolTrades = await r.json();
+  renderGridpoolTrades();
+}
+
+function renderGridpoolTrades() {
+  const el = document.getElementById('gridpool-trades');
+  if (!el) return;
+  if (gridpoolSelectedId == null) {
+    el.innerHTML = '<i>select a gridpool</i>';
+    return;
+  }
+  if (gridpoolSelectedOrderId == null) {
+    el.innerHTML = '<i>select an order</i>';
+    return;
+  }
+  if (!gridpoolTrades.length) {
+    el.innerHTML = '<i>no trades yet for this order</i>';
+    return;
+  }
+  const rows = gridpoolTrades.map(t => `<tr>
+    <td>${t.id}</td>
+    <td><span class="area-badge">${areaTag(t.area)}</span></td>
+    <td>${shortTime(t.execution_time)}</td>
+    <td>${t.price}</td>
+    <td>${t.quantity}</td>
+    <td>${shortTradeState(t.state)}</td>
+  </tr>`).join('');
+  el.innerHTML = `<div class="scroll"><table>
+    <thead><tr>
+      <th>id</th><th>area</th><th>exec</th><th>price</th><th>qty</th><th>state</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+async function refreshGridpoolDrilldown() {
+  await loadGridpools();
+  if (gridpoolSelectedId != null) await loadGridpoolOrders();
+  if (gridpoolSelectedOrderId != null) await loadGridpoolOrderTrades();
 }
 
 function escapeHtml(s) {
@@ -1120,7 +1327,7 @@ setInterval(() => {
   setPill('pill-book', 'down', 'book');
   setPill('pill-weather', 'down', 'weather');
   await Promise.all([loadInfo(), loadGridpools(), loadScenarios(), loadWeather()]);
-  setInterval(loadGridpools, 5000);
+  setInterval(refreshGridpoolDrilldown, 3000);
   setInterval(loadScenarios, 2000);
   setInterval(loadWeather, 10000);
   setInterval(tickClock, 1000);
