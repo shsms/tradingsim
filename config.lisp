@@ -56,8 +56,9 @@
             :sizes (caddr entry))
   ;; rates-base doubled vs the aggressor-fleet defaults
   ;; (500 1500 3500 8000) — calmer trade tape (~half the prints per
-  ;; second). rate_ms is task-time so a hot reload won't repick
-  ;; this; needs a process restart.
+  ;; second). Hot-reloadable: saving this file re-runs %make-aggressor
+  ;; for each name, which writes the new rate_ms into the shared
+  ;; AggressorConfig the running task reads on its next iteration.
   (aggressor-fleet :area (car entry)
                    :prefix (cadr entry)
                    :sizes (cadddr entry)

@@ -70,22 +70,24 @@ fn spawn_mm_task(world: Arc<RwLock<World>>, mut mm: MarketMaker, quarter_offset:
 fn spawn_aggressor_task(
     world: Arc<RwLock<World>>,
     mut ag: Aggressor,
-    rate: Duration,
     quarter_offset: i64,
 ) {
     let cfg = ag.shared_config();
-    let base_secs = rate.as_secs_f64();
     tokio::spawn(async move {
         loop {
             let now = Utc::now();
             let new_start = tradingsim::lisp::next_quarter_boundary(now)
                 + chrono::Duration::minutes(15 * quarter_offset);
-            {
+            // Combine the period roll + the rate_ms read under one
+            // write lock so a concurrent (set-aggressor-rate-ms …)
+            // doesn't race the period bump.
+            let base_secs = {
                 let mut c = cfg.write();
                 if c.period.start != new_start {
                     c.period.start = new_start;
                 }
-            }
+                c.rate_ms as f64 / 1000.0
+            };
             // Sleep before the next fire — duration shrinks as the
             // contract's gate approaches. Floor at 50 ms so a
             // mis-set base rate can't busy-spin even with the
@@ -269,14 +271,13 @@ async fn main() {
             aggressor_specs.len()
         );
         for spec in aggressor_specs {
-            let rate = Duration::from_millis(spec.rate_ms);
             let offset = spec.quarter_offset;
             bias_views.push(tradingsim::scenarios::AggressorView {
                 quarter_offset: offset,
                 shared_config: spec.shared_config.clone(),
             });
             let ag = Aggressor::with_shared_config(spec.shared_config, spec.seed);
-            spawn_aggressor_task(Arc::clone(&world), ag, rate, offset);
+            spawn_aggressor_task(Arc::clone(&world), ag, offset);
         }
     }
 

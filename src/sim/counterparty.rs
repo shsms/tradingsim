@@ -261,6 +261,14 @@ pub struct AggressorConfig {
     /// reference_price ± max_slippage so a stale resting order
     /// 100 EUR off market can't pull it away from sensible price.
     pub reference_price: Decimal,
+    /// Inter-fire wait, milliseconds, before gate_close_scale ramps
+    /// it down near the contract gate. Lives on the live config (not
+    /// the spawn-time AggressorSpec) so editing it in config.lisp and
+    /// hot-reloading, or calling `(set-aggressor-rate-ms …)`, takes
+    /// effect on the running task's next iteration. 50 ms floor is
+    /// enforced by every write site so a typo can't busy-spin the
+    /// task.
+    pub rate_ms: u64,
     /// Maximum slippage (EUR) from reference the aggressor accepts.
     /// 5.0 covers the MM's typical 0.40 half-spread plus a few
     /// EUR of natural intraday wandering, and stays well under
@@ -277,6 +285,7 @@ impl AggressorConfig {
             size: dec!(0.2),
             side_bias: 0.5,
             reference_price: dec!(85.00),
+            rate_ms: 1000,
             max_slippage: dec!(5.00),
         }
     }

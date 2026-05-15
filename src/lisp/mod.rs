@@ -112,7 +112,6 @@ pub struct AggressorSpec {
     pub name: String,
     pub shared_config: SharedAggressorConfig,
     pub seed: u64,
-    pub rate_ms: u64,
     /// Quarter-hours from the next 15-min boundary; same semantics
     /// as [`MarketMakerSpec::quarter_offset`].
     pub quarter_offset: i64,
@@ -846,16 +845,17 @@ fn register_aggressors(
                 // anchor; the bias tick will replace it within
                 // a few seconds based on curve + weather.
                 reference_price: f64_to_dec(85.00),
+                rate_ms: a.rate_ms.unwrap_or(1000).max(50) as u64,
                 max_slippage: f64_to_dec(5.00),
             };
             let seed = a.seed.unwrap_or(1) as u64;
-            let rate_ms = a.rate_ms.unwrap_or(1000).max(50) as u64;
             let mut map = ag.lock();
             if let Some(existing) = map.get(&a.name) {
                 // Hot-reload: keep the SharedConfig handle alive so
-                // the running task picks up new size / side-bias on
-                // its next fire. rate_ms is task-time only — needs
-                // a process restart to change.
+                // the running task picks up the new size / side-bias
+                // / rate_ms on its next fire. seed + quarter_offset
+                // are spawn-time on AggressorSpec and would need a
+                // process restart to change.
                 let mut w = existing.shared_config.write();
                 *w = cfg;
             } else {
@@ -865,7 +865,6 @@ fn register_aggressors(
                         name: a.name.clone(),
                         shared_config: Arc::new(RwLock::new(cfg)),
                         seed,
-                        rate_ms,
                         quarter_offset: a.quarter_offset.unwrap_or(0),
                     },
                 );
@@ -882,8 +881,14 @@ fn register_aggressors(
     mk_setter(ctx, "set-aggressor-size", aggressors.clone(), "aggressor", ag_cfg, |c, v| {
         c.size = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-aggressor-side-bias", aggressors, "aggressor", ag_cfg, |c, v| {
+    mk_setter(ctx, "set-aggressor-side-bias", aggressors.clone(), "aggressor", ag_cfg, |c, v| {
         c.side_bias = v.clamp(0.0, 1.0);
+    });
+    mk_setter(ctx, "set-aggressor-rate-ms", aggressors, "aggressor", ag_cfg, |c, v| {
+        // Floor at 50 ms — same clamp %make-aggressor applies on
+        // the create path. Negative / NaN inputs collapse to 50
+        // via the i64 cast + .max().
+        c.rate_ms = (v as i64).max(50) as u64;
     });
 }
 
@@ -1338,6 +1343,77 @@ mod tests {
             Ok(_) => panic!("expected error"),
             Err(e) => assert!(e.contains("nonexistent"), "got: {e}"),
         }
+    }
+
+    #[tokio::test]
+    async fn make_aggressor_writes_rate_ms_into_shared_config() {
+        let f = write_tmp(
+            r#"(%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 1500)"#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let ag = cfg.aggressors();
+        assert_eq!(ag[0].shared_config.read().rate_ms, 1500);
+    }
+
+    #[tokio::test]
+    async fn set_aggressor_rate_ms_updates_shared_config() {
+        let f = write_tmp(
+            r#"
+            (%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 1500)
+            (set-aggressor-rate-ms "a0" 2500)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.aggressors()[0].shared_config.read().rate_ms, 2500);
+    }
+
+    #[tokio::test]
+    async fn set_aggressor_rate_ms_floors_at_50() {
+        let f = write_tmp(
+            r#"
+            (%make-aggressor :name "a0" :area "10YDE-EON------1")
+            (set-aggressor-rate-ms "a0" 5)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.aggressors()[0].shared_config.read().rate_ms, 50);
+    }
+
+    #[tokio::test]
+    async fn remake_aggressor_preserves_shared_config_arc_and_updates_rate() {
+        // The hot-reload path: re-executing config.lisp on a file
+        // watcher tick re-fires (%make-aggressor …) for each known
+        // name. The existing SharedConfig Arc must survive (so the
+        // running task keeps reading from the same handle) AND its
+        // contents must reflect the new :rate-ms.
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
+        f.write_all(
+            br#"(%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 1000)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let arc_before = cfg.aggressors()[0].shared_config.clone();
+        assert_eq!(arc_before.read().rate_ms, 1000);
+
+        // Rewrite the file in place + call reload — exactly what the
+        // notify watcher does on a save event.
+        f.as_file().set_len(0).unwrap();
+        f.as_file().seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(
+            br#"(%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 4000)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        cfg.reload().unwrap();
+
+        let arc_after = cfg.aggressors()[0].shared_config.clone();
+        assert!(
+            Arc::ptr_eq(&arc_before, &arc_after),
+            "SharedConfig Arc identity must survive hot reload"
+        );
+        assert_eq!(arc_after.read().rate_ms, 4000);
     }
 
     #[tokio::test]
