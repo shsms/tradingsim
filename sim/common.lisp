@@ -6,7 +6,10 @@
 ;;
 ;; Built on tulisp-async's `run-with-timer` / `cancel-timer`. Use
 ;; `(every :milliseconds N :call FN)` to schedule a periodic callback
-;; that nudges market-maker knobs over time.
+;; — useful for drifting weather knobs, advancing a scenario, or any
+;; other time-driven mutation that needs to keep firing across hot
+;; reloads (active timers are tracked so (reset-state) can cancel
+;; them before the new config registers fresh ones).
 
 ;; Active timers — tracked so (reset-state) can cancel them on hot
 ;; reload.
@@ -16,8 +19,9 @@
 (defun reset-state ()
   "Cancel every timer registered via (every …) and reset the bookkeeping.
 Call at the top of config.lisp so a hot reload starts from a clean
-slate; the running market-maker tasks keep going (their SharedConfig
-handles survive across reloads)."
+slate; the running per-contract counterparty tasks keep going (each
+fleet's SharedFleetParams and each MM's SharedConfig survive the
+reload, and re-firing the fleet primitive mutates them in place)."
   (dolist (tm active-timers)
     (cancel-timer tm))
   (setq active-timers nil)
@@ -47,11 +51,11 @@ block can sit anywhere in the config relative to what it references."
                 active-timers))))
 
 ;; ---------------------------------------------------------------------------
-;; Fleet helpers — declarative wrappers around the (%make-market …),
-;; (%make-coupling …), (%make-market-maker …) and (%make-aggressor …)
-;; primitives. Pull the dotimes / band-mapping boilerplate out of
-;; config.lisp so each area only needs to declare what's distinct
-;; about it.
+;; Fleet helpers — declarative wrappers around (%make-market …),
+;; (%make-coupling …), (%make-mm-fleet …) and (%make-aggressor-fleet …).
+;; Each wrapper pulls the keyword-handling / default-application
+;; boilerplate out of config.lisp so an area declaration only needs
+;; to mention what's distinct about it.
 ;; ---------------------------------------------------------------------------
 
 (defun register-markets (eics &rest plist)

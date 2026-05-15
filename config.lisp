@@ -1,8 +1,12 @@
 ;; Sample tradingsim config — loaded by the binary at startup.
 ;;
-;; This file replaces the previous hardcoded defaults in
-;; bin/tradingsim.rs. Edit and re-launch the binary to take effect;
-;; hot reload (notify watcher) is on the deferred list.
+;; A notify-rs watcher reloads this file (plus anything passed to
+;; (watch-file …)) on save: re-firing (%make-mm-fleet …) /
+;; (%make-aggressor-fleet …) for each named fleet rewrites the
+;; SharedFleetParams in place, so running per-contract MMs and
+;; aggressors pick up new bands / rates on their next tick without
+;; restart. Spawn-time fields (window_quarters, seed_base) and the
+;; binary's socket addresses stay frozen — those need a relaunch.
 
 (unless (boundp 'tradingsim-loaded)
   (setq tradingsim-loaded t)
@@ -31,16 +35,18 @@
 ;; = quote chop is more visible + price catches up to scenario
 ;; shifts faster; higher = calmer book, longer windows where
 ;; aggressors lift one stale ask before it moves. Hot-reloadable:
-;; saving this file re-runs the mm-fleet calls below, which
-;; propagate the new value into every MM's shared config.
+;; saving this file re-runs each (mm-fleet …) below, which writes
+;; the new value into the fleet's shared params; per-contract MMs
+;; pick it up on their next refresh.
 (setq mm-refresh-ms 2000)
 
 ;; --- TSO regions ----------------------------------------------------------
 ;;
 ;; Four German TSO control zones treated as separate delivery areas.
-;; them so per-region liquidity profiles are observable. Volume share
-;; is roughly TenneT ~40% > Amprion ~30% > 50Hertz ~20% > TransnetBW
-;; ~10%, and the size tables below track that.
+;; Each gets its own fleet so per-region liquidity profiles are
+;; observable. Volume share is roughly TenneT ~40% > Amprion ~30% >
+;; 50Hertz ~20% > TransnetBW ~10%, and the size tables below track
+;; that.
 ;;
 ;; Per row:
 ;;   (eic, prefix, mm-sizes-per-band, ag-sizes-per-profile)
@@ -56,8 +62,10 @@
 (%make-gridpool :id 1 :name "default" :areas (mapcar 'car areas))
 (couple-all-pairs (mapcar 'car areas))
 
-;; Per-area MM + aggressor fleets. Each area gets 48 MMs (one per
-;; quarter, rolling forward) and 4 × 48 = 192 aggressors. Seeds are
+;; Per-area MM + aggressor fleets. Each fleet covers a rolling
+;; 48-quarter window: FleetManager owns one MM (and one aggressor
+;; per profile) per delivery contract in the window, retiring on
+;; gate and topping up at the far edge each 15-min boundary. Seeds
 ;; auto-assigned per fleet call so RNG streams don't collide.
 (dolist (entry areas)
   (mm-fleet :area (car entry)
@@ -66,9 +74,9 @@
             :refresh-ms mm-refresh-ms)
   ;; rates-base doubled vs the aggressor-fleet defaults
   ;; (500 1500 3500 8000) — calmer trade tape (~half the prints per
-  ;; second). Hot-reloadable: saving this file re-runs %make-aggressor
-  ;; for each name, which writes the new rate_ms into the shared
-  ;; AggressorConfig the running task reads on its next iteration.
+  ;; second). Hot-reloadable: saving this file re-runs the fleet
+  ;; primitive, which writes the new rates into the fleet's shared
+  ;; params; per-contract aggressors apply them on their next fire.
   (aggressor-fleet :area (car entry)
                    :prefix (cadr entry)
                    :sizes (cadddr entry)
@@ -91,14 +99,17 @@
 (register-markets (mapcar 'car international-areas))
 
 ;; Smaller fleets — 4 MMs covering the next hour, two aggressor
-;; profiles per quarter. Enough to demonstrate cross-border
-;; matching without doubling the task count.
+;; profiles per contract. Enough to demonstrate cross-border
+;; matching without doubling the task count. Per-area references
+;; come from the shared forward curve evaluated at each fleet's
+;; weather location (lower cloud cover / higher wind drags the
+;; reference down naturally), so no per-fleet :reference-base
+;; override is needed.
 (dolist (entry international-areas)
   (mm-fleet :area (car entry)
             :prefix (cadr entry)
             :quarters 4
             :sizes '(0.5 0.4 0.3 0.2)
-            :reference-base 75.0
             :refresh-ms mm-refresh-ms)
   (aggressor-fleet :area (car entry)
                    :prefix (cadr entry)
