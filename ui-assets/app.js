@@ -65,6 +65,21 @@ function shortTime(iso) {
   });
 }
 
+// hh:mm:ss variant for the gridpool drill-down's order create/upd
+// columns + the per-order trade exec column — seconds matter when
+// reading the local history of one order at the resolution the
+// matcher actually fires at. The book / trades-tape / period
+// dropdowns stay on shortTime since their context is "which 15-min
+// contract" and seconds would just add noise.
+function shortTimeSec(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '--:--:--';
+  return d.toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false, timeZone: SIM_TZ,
+  });
+}
+
 async function loadInfo() {
   const r = await fetch('/api/info');
   if (!r.ok) return;
@@ -537,13 +552,15 @@ function renderGridpoolOrders() {
       <td>${o.price}</td>
       <td>${o.filled_quantity}/${o.quantity}</td>
       <td>${shortOrderState(o.state)}</td>
-      <td>${shortTime(o.modification_time)}</td>
+      <td>${shortTimeSec(o.create_time)}</td>
+      <td>${shortTimeSec(o.modification_time)}</td>
     </tr>`;
   }).join('');
   el.innerHTML = `<div class="scroll"><table>
     <thead><tr>
       <th>id</th><th>side</th><th>area</th><th>delivery</th>
-      <th>price</th><th>filled/qty</th><th>state</th><th>upd</th>
+      <th>price</th><th>filled/qty</th><th>state</th>
+      <th>created</th><th>upd</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
@@ -583,7 +600,7 @@ function renderGridpoolTrades() {
   const rows = gridpoolTrades.map(t => `<tr>
     <td>${t.id}</td>
     <td><span class="area-badge">${areaTag(t.area)}</span></td>
-    <td>${shortTime(t.execution_time)}</td>
+    <td>${shortTimeSec(t.execution_time)}</td>
     <td>${t.price}</td>
     <td>${t.quantity}</td>
     <td>${shortTradeState(t.state)}</td>
