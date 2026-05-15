@@ -64,12 +64,12 @@ function shortTime(iso) {
   });
 }
 
-// hh:mm:ss variant for the gridpool drill-down's order create/upd
-// columns + the per-order trade exec column — seconds matter when
-// reading the local history of one order at the resolution the
-// matcher actually fires at. The book / trades-tape / period
-// dropdowns stay on shortTime since their context is "which 15-min
-// contract" and seconds would just add noise.
+// hh:mm:ss variant for execution-time columns: the gridpool
+// drill-down's order create/upd + per-order trades, and the
+// public trades tape's exec column. Seconds matter when reading
+// match history at the resolution the matcher actually fires at.
+// Delivery-period columns stay on shortTime — those are 15-min
+// contract identifiers where seconds would always be :00.
 function shortTimeSec(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '--:--:--';
@@ -1121,7 +1121,7 @@ function renderTradeRow(t) {
     `<td>#${t.id}</td><td>${t.quantity}</td><td>${t.price}</td>` +
     `<td>${area}</td>` +
     `<td class="muted">${shortTime(t.period)}</td>` +
-    `<td class="muted">${shortTime(t.execution_time)}</td>` +
+    `<td class="muted">${shortTimeSec(t.execution_time)}</td>` +
     `</tr>`;
 }
 
