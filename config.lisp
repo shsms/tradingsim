@@ -54,9 +54,14 @@
   (mm-fleet :area (car entry)
             :prefix (cadr entry)
             :sizes (caddr entry))
+  ;; rates-base doubled vs the aggressor-fleet defaults
+  ;; (500 1500 3500 8000) — calmer trade tape (~half the prints per
+  ;; second). rate_ms is task-time so a hot reload won't repick
+  ;; this; needs a process restart.
   (aggressor-fleet :area (car entry)
                    :prefix (cadr entry)
-                   :sizes (cadddr entry)))
+                   :sizes (cadddr entry)
+                   :rates-base '(1000 3000 7000 16000)))
 
 ;; --- International coupling ----------------------------------------------
 ;;
@@ -87,7 +92,7 @@
                    :prefix (cadr entry)
                    :quarters 4
                    :sizes '(0.1 0.2)
-                   :rates-base '(1500 4000)))
+                   :rates-base '(3000 8000)))
 
 ;; Re-register the gridpool with all eight areas so the user can
 ;; place orders in any of them through the same default pool.
