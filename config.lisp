@@ -26,6 +26,15 @@
 ;; absent; tune up to 30-40 if you want negative prices faster.
 (set-mm-bias-scale 25.0)
 
+;; MM refresh cadence (ms) — how often every market-maker re-prices
+;; and re-posts its bid+ask. Floor 100 ms, default 2000 ms. Lower
+;; = quote chop is more visible + price catches up to scenario
+;; shifts faster; higher = calmer book, longer windows where
+;; aggressors lift one stale ask before it moves. Hot-reloadable:
+;; saving this file re-runs the mm-fleet calls below, which
+;; propagate the new value into every MM's shared config.
+(setq mm-refresh-ms 2000)
+
 ;; --- TSO regions ----------------------------------------------------------
 ;;
 ;; Four German TSO control zones treated as separate delivery areas.
@@ -53,7 +62,8 @@
 (dolist (entry areas)
   (mm-fleet :area (car entry)
             :prefix (cadr entry)
-            :sizes (caddr entry))
+            :sizes (caddr entry)
+            :refresh-ms mm-refresh-ms)
   ;; rates-base doubled vs the aggressor-fleet defaults
   ;; (500 1500 3500 8000) — calmer trade tape (~half the prints per
   ;; second). Hot-reloadable: saving this file re-runs %make-aggressor
@@ -88,7 +98,8 @@
             :prefix (cadr entry)
             :quarters 4
             :sizes '(0.5 0.4 0.3 0.2)
-            :reference-base 75.0)
+            :reference-base 75.0
+            :refresh-ms mm-refresh-ms)
   (aggressor-fleet :area (car entry)
                    :prefix (cadr entry)
                    :quarters 4
