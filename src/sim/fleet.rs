@@ -303,7 +303,6 @@ fn spawn_mm_contract(
         spec.seed_base.wrapping_add(initial_offset as u64),
     );
     mm_views.lock().push(MmView {
-        quarter_offset: initial_offset,
         shared_config: shared_config.clone(),
     });
     let (retire_tx, retire_rx) = oneshot::channel();
@@ -402,7 +401,6 @@ fn spawn_aggressor_contract(
         .wrapping_add(profile as u64);
     let ag = Aggressor::with_shared_config(shared_config.clone(), seed);
     aggressor_views.lock().push(AggressorView {
-        quarter_offset: initial_offset,
         shared_config: shared_config.clone(),
     });
     let (retire_tx, retire_rx) = oneshot::channel();

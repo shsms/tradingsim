@@ -148,12 +148,12 @@ fn today_at(tz: Tz, hour: f64, now: DateTime<Utc>) -> DateTime<Utc> {
 // Bias-application tick.
 // ---------------------------------------------------------------------------
 
-/// One aggressor's view for the tick: just the offset and shared
-/// config. Cloned cheaply (Arc) so the tick doesn't hold the
-/// registry lock while writing biases.
+/// One aggressor's view for the tick — just a clone of the shared
+/// config Arc. The bias tick derives effective offset, area, and
+/// period from the config each cycle; cloning is cheap so holding
+/// many views doesn't pin the FleetManager's lock.
 #[derive(Clone)]
 pub struct AggressorView {
-    pub quarter_offset: i64,
     pub shared_config: SharedAggressorConfig,
 }
 
@@ -163,7 +163,6 @@ pub struct AggressorView {
 /// — the mechanism prices use to move quickly under load.
 #[derive(Clone)]
 pub struct MmView {
-    pub quarter_offset: i64,
     pub shared_config: SharedConfig,
 }
 
@@ -629,7 +628,6 @@ mod tests {
                 )
             };
             MmView {
-                quarter_offset,
                 shared_config: Arc::new(RwLock::new(cfg)),
             }
         };
@@ -670,7 +668,6 @@ mod tests {
             },
         );
         let view = MmView {
-            quarter_offset: 0,
             shared_config: Arc::new(RwLock::new(cfg)),
         };
         apply_biases(
@@ -702,7 +699,6 @@ mod tests {
             },
         );
         let view = AggressorView {
-            quarter_offset: 0,
             shared_config: Arc::new(RwLock::new(ag_cfg)),
         };
         apply_biases(

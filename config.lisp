@@ -154,10 +154,12 @@
 
 ;; --- Demand / surplus tilts ------------------------------------------------
 ;;
-;; Uncomment to skew an individual MM's quoting:
-;;
-;; (set-mm-demand "tn-q4" 0.20)    ;; TenneT q4: aggressive procurement
-;; (set-mm-surplus "am-q3" 0.30)   ;; Amprion q3: midday solar dump
+;; Per-MM tilts are no longer addressable by name — contract-owned MMs
+;; rotate through the window, so a stable handle would map to a moving
+;; contract. Use the scenario layer instead: a (define-scenario …) stage
+;; with bias-from/bias-to ≠ 0.5 produces the same demand+surplus shift
+;; across the affected quarters, and the shift fades naturally with
+;; offset-to-gate via the decay-weight blend.
 
 ;; --- Scenarios -------------------------------------------------------------
 ;;

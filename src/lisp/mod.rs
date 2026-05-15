@@ -24,10 +24,9 @@ use rust_decimal::Decimal;
 use tulisp::{AsPlist, Error, Plist, Plistable, SharedMut, TulispContext};
 
 use crate::sim::counterparty::{
-    AggressorConfig, AggressorFleetParams, MarketMakerConfig, MmFleetParams, SharedAggressorConfig,
-    SharedAggressorFleetParams, SharedConfig, SharedFleetParams,
+    AggressorFleetParams, MmFleetParams, SharedAggressorFleetParams, SharedFleetParams,
 };
-use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod, MarketRules};
+use crate::sim::market::{Area, Currency, MarketRules};
 
 /// Top-level identity + transport settings, set via lisp defuns.
 #[derive(Clone, Debug)]
@@ -47,24 +46,6 @@ impl Default for Metadata {
             physics_tick: Duration::from_millis(100),
         }
     }
-}
-
-/// One market-maker as configured by `(make-market-maker …)`. The
-/// shared_config is what the running MM task reads each refresh;
-/// runtime `(set-mm-* …)` defuns mutate it in place.
-#[derive(Clone)]
-pub struct MarketMakerSpec {
-    pub name: String,
-    pub shared_config: SharedConfig,
-    /// Seed for the MM's RNG; surfaces in the binary's MM spawner so
-    /// each MM is independently deterministic from a fixed lisp
-    /// config.
-    pub seed: u64,
-    /// Quarter-hours from the next 15-min boundary. The spawn task
-    /// rolls the SharedConfig's period forward each tick using this
-    /// offset, so the MM always quotes the contract starting
-    /// `quarter_offset` quarters from now.
-    pub quarter_offset: i64,
 }
 
 /// One market-maker fleet as configured by `(%make-mm-fleet …)`.
@@ -142,31 +123,16 @@ pub struct AggressorFleetSpec {
     pub seed_base: u64,
 }
 
-/// One aggressor from `(%make-aggressor …)`. The binary spawns one
-/// tokio task per spec that fires `Aggressor::fire(&mut world)` on
-/// the configured cadence.
-#[derive(Clone)]
-pub struct AggressorSpec {
-    pub name: String,
-    pub shared_config: SharedAggressorConfig,
-    pub seed: u64,
-    /// Quarter-hours from the next 15-min boundary; same semantics
-    /// as [`MarketMakerSpec::quarter_offset`].
-    pub quarter_offset: i64,
-}
-
 #[derive(Clone)]
 pub struct Config {
     #[allow(dead_code)]
     filename: String,
     pub(crate) ctx: SharedMut<TulispContext>,
     metadata: Arc<RwLock<Metadata>>,
-    market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     mm_fleets: Arc<Mutex<HashMap<String, MmFleetSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
-    aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     aggressor_fleets: Arc<Mutex<HashMap<String, AggressorFleetSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
@@ -229,12 +195,10 @@ impl Config {
     fn build_empty(filename: &str) -> Self {
         let mut ctx = TulispContext::new();
         let metadata = Arc::new(RwLock::new(Metadata::default()));
-        let market_makers = Arc::new(Mutex::new(HashMap::new()));
         let mm_fleets = Arc::new(Mutex::new(HashMap::new()));
         let gridpools = Arc::new(Mutex::new(Vec::new()));
         let markets = Arc::new(Mutex::new(Vec::new()));
         let couplings = Arc::new(Mutex::new(Vec::new()));
-        let aggressors = Arc::new(Mutex::new(HashMap::new()));
         let aggressor_fleets = Arc::new(Mutex::new(HashMap::new()));
         let scenarios = crate::scenarios::new_registry();
         let bias_scale = crate::scenarios::new_bias_scale();
@@ -261,12 +225,10 @@ impl Config {
         register_runtime(
             &mut ctx,
             metadata.clone(),
-            market_makers.clone(),
             mm_fleets.clone(),
             gridpools.clone(),
             markets.clone(),
             couplings.clone(),
-            aggressors.clone(),
             aggressor_fleets.clone(),
             scenarios.clone(),
             bias_scale.clone(),
@@ -293,12 +255,10 @@ impl Config {
             filename: filename.to_string(),
             ctx: SharedMut::new(ctx),
             metadata,
-            market_makers,
             mm_fleets,
             gridpools,
             markets,
             couplings,
-            aggressors,
             aggressor_fleets,
             scenarios,
             bias_scale,
@@ -436,13 +396,6 @@ impl Config {
         self.metadata.read().weather_addr.clone()
     }
 
-    /// Snapshot of all market-makers built by the lisp config. Each
-    /// spec carries a SharedConfig handle the binary can hand to
-    /// MarketMaker::with_shared_config.
-    pub fn market_makers(&self) -> Vec<MarketMakerSpec> {
-        self.market_makers.lock().values().cloned().collect()
-    }
-
     /// Snapshot of all MM fleets built by `(%make-mm-fleet …)`. The
     /// binary's FleetManager owns one per-contract MM lifecycle per
     /// fleet; each fleet's shared_params drives the band-effective
@@ -461,10 +414,6 @@ impl Config {
 
     pub fn couplings(&self) -> Vec<CouplingSpec> {
         self.couplings.lock().clone()
-    }
-
-    pub fn aggressors(&self) -> Vec<AggressorSpec> {
-        self.aggressors.lock().values().cloned().collect()
     }
 
     /// Snapshot of all aggressor fleets built by
@@ -553,12 +502,10 @@ impl Config {
 fn register_runtime(
     ctx: &mut TulispContext,
     metadata: Arc<RwLock<Metadata>>,
-    market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
     mm_fleets: Arc<Mutex<HashMap<String, MmFleetSpec>>>,
     gridpools: Arc<Mutex<Vec<GridpoolSpec>>>,
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
-    aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
     aggressor_fleets: Arc<Mutex<HashMap<String, AggressorFleetSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
@@ -570,7 +517,7 @@ fn register_runtime(
     recall_queue: Arc<Mutex<std::collections::VecDeque<u64>>>,
     extra_watches: Arc<Mutex<HashSet<PathBuf>>>,
     load_dir: PathBuf,
-    anchor: DateTime<Utc>,
+    _anchor: DateTime<Utc>,
 ) {
     add_log_functions(ctx);
     register_time_helpers(ctx);
@@ -578,9 +525,7 @@ fn register_runtime(
     register_markets(ctx, markets);
     register_couplings(ctx, couplings);
     register_gridpools(ctx, gridpools);
-    register_market_makers(ctx, market_makers, anchor);
     register_mm_fleets(ctx, mm_fleets);
-    register_aggressors(ctx, aggressors, anchor);
     register_aggressor_fleets(ctx, aggressor_fleets);
     register_scenarios(ctx, scenarios);
     register_bias_scale(ctx, bias_scale);
@@ -873,91 +818,6 @@ fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::Shar
 }
 
 AsPlist! {
-    pub struct MakeAggressorArgs {
-        name: String,
-        area<":area">: String,
-        quarter_offset<":quarter-offset">: Option<i64> {= None},
-        rate_ms<":rate-ms">: Option<i64> {= None},
-        size<":size">: Option<f64> {= None},
-        side_bias<":side-bias">: Option<f64> {= None},
-        seed<":seed">: Option<i64> {= None},
-    }
-}
-
-fn register_aggressors(
-    ctx: &mut TulispContext,
-    aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
-    anchor: DateTime<Utc>,
-) {
-    let ag = aggressors.clone();
-    ctx.defun(
-        "%make-aggressor",
-        move |args: Plist<MakeAggressorArgs>| -> Result<String, Error> {
-            let a = args.into_inner();
-            let area = Area::eic(&a.area);
-            let period = DeliveryPeriod {
-                start: next_quarter_boundary(anchor)
-                    + chrono::Duration::minutes(15 * a.quarter_offset.unwrap_or(0)),
-                duration: DeliveryDuration::DeliveryDuration15,
-            };
-            let cfg = AggressorConfig {
-                area,
-                period,
-                currency: Currency::Eur,
-                size: a.size.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.2)),
-                side_bias: a.side_bias.unwrap_or(0.5).clamp(0.0, 1.0),
-                // Seed the reference at the conventional EUR
-                // anchor; the bias tick will replace it within
-                // a few seconds based on curve + weather.
-                reference_price: f64_to_dec(85.00),
-                rate_ms: a.rate_ms.unwrap_or(1000).max(50) as u64,
-                max_slippage: f64_to_dec(5.00),
-            };
-            let seed = a.seed.unwrap_or(1) as u64;
-            let mut map = ag.lock();
-            if let Some(existing) = map.get(&a.name) {
-                // Hot-reload: keep the SharedConfig handle alive so
-                // the running task picks up the new size / side-bias
-                // / rate_ms on its next fire. seed + quarter_offset
-                // are spawn-time on AggressorSpec and would need a
-                // process restart to change.
-                let mut w = existing.shared_config.write();
-                *w = cfg;
-            } else {
-                map.insert(
-                    a.name.clone(),
-                    AggressorSpec {
-                        name: a.name.clone(),
-                        shared_config: Arc::new(RwLock::new(cfg)),
-                        seed,
-                        quarter_offset: a.quarter_offset.unwrap_or(0),
-                    },
-                );
-            }
-            Ok(a.name)
-        },
-    );
-
-    // Runtime setters for the size + side-bias knobs — shared
-    // mk_setter plumbing with the MM side.
-    fn ag_cfg(s: &AggressorSpec) -> Arc<RwLock<AggressorConfig>> {
-        s.shared_config.clone()
-    }
-    mk_setter(ctx, "set-aggressor-size", aggressors.clone(), "aggressor", ag_cfg, |c, v| {
-        c.size = f64_to_dec(v);
-    });
-    mk_setter(ctx, "set-aggressor-side-bias", aggressors.clone(), "aggressor", ag_cfg, |c, v| {
-        c.side_bias = v.clamp(0.0, 1.0);
-    });
-    mk_setter(ctx, "set-aggressor-rate-ms", aggressors, "aggressor", ag_cfg, |c, v| {
-        // Floor at 50 ms — same clamp %make-aggressor applies on
-        // the create path. Negative / NaN inputs collapse to 50
-        // via the i64 cast + .max().
-        c.rate_ms = (v as i64).max(50) as u64;
-    });
-}
-
-AsPlist! {
     pub struct MakeAggressorFleetArgs {
         name: String,
         area<":area">: String,
@@ -1158,24 +1018,6 @@ fn register_gridpools(ctx: &mut TulispContext, gridpools: Arc<Mutex<Vec<Gridpool
     );
 }
 
-AsPlist! {
-    pub struct MakeMmArgs {
-        name: String,
-        area<":area">: String,
-        /// Quarter-hours after the next 15-min boundary on or after
-        /// Config::anchor. 0 = the next quarter; 4 = one hour later.
-        quarter_offset<":quarter-offset">: Option<i64> {= None},
-        reference<":reference">: Option<f64> {= None},
-        spread<":spread">: Option<f64> {= None},
-        size<":size">: Option<f64> {= None},
-        demand<":demand">: Option<f64> {= None},
-        surplus<":surplus">: Option<f64> {= None},
-        noise<":noise">: Option<f64> {= None},
-        seed<":seed">: Option<i64> {= None},
-        refresh_ms<":refresh-ms">: Option<i64> {= None},
-    }
-}
-
 pub fn next_quarter_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
     let secs = now.timestamp();
     let bucket = (secs / 900 + 1) * 900;
@@ -1197,118 +1039,6 @@ fn register_time_helpers(ctx: &mut TulispContext) {
 
 fn f64_to_dec(v: f64) -> Decimal {
     Decimal::try_from(v).unwrap_or(Decimal::ZERO)
-}
-
-fn register_market_makers(
-    ctx: &mut TulispContext,
-    market_makers: Arc<Mutex<HashMap<String, MarketMakerSpec>>>,
-    anchor: DateTime<Utc>,
-) {
-    let mm = market_makers.clone();
-    ctx.defun(
-        "%make-market-maker",
-        move |args: Plist<MakeMmArgs>| -> Result<String, Error> {
-            let a = args.into_inner();
-            let area = Area::eic(&a.area);
-            let period = DeliveryPeriod {
-                start: next_quarter_boundary(anchor)
-                    + chrono::Duration::minutes(15 * a.quarter_offset.unwrap_or(0)),
-                duration: DeliveryDuration::DeliveryDuration15,
-            };
-            let reference = a
-                .reference
-                .map(f64_to_dec)
-                .unwrap_or_else(|| f64_to_dec(85.00));
-            let mut cfg = MarketMakerConfig {
-                area,
-                period,
-                currency: Currency::Eur,
-                // Seed baseline and live price together so the first
-                // refresh has nowhere to drift from until the bias
-                // tick computes a fundamentals-derived baseline.
-                reference_baseline: reference,
-                reference_price: reference,
-                spread: a.spread.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.40)),
-                size: a.size.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(1.0)),
-                demand: a.demand.map(f64_to_dec).unwrap_or(Decimal::ZERO),
-                surplus: a.surplus.map(f64_to_dec).unwrap_or(Decimal::ZERO),
-                price_noise: a.noise.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.10)),
-                tick: f64_to_dec(0.01),
-                follow_last_trade: Decimal::ZERO,
-                refresh_ms: a.refresh_ms.unwrap_or(2000).max(100) as u64,
-            };
-            // demand/surplus are already in cfg; nothing else to set.
-            let _ = &mut cfg;
-            let seed = a.seed.unwrap_or(1) as u64;
-            let mut map = mm.lock();
-            if let Some(existing) = map.get(&a.name) {
-                // Reload-friendly: keep the SharedConfig handle alive
-                // so the running MM task picks up the new values on
-                // its next refresh. Seed only takes effect on first
-                // insert; rotating an MM's seed needs a process
-                // restart.
-                let mut w = existing.shared_config.write();
-                *w = cfg;
-            } else {
-                map.insert(
-                    a.name.clone(),
-                    MarketMakerSpec {
-                        name: a.name.clone(),
-                        shared_config: Arc::new(RwLock::new(cfg)),
-                        seed,
-                        quarter_offset: a.quarter_offset.unwrap_or(0),
-                    },
-                );
-            }
-            Ok(a.name)
-        },
-    );
-    fn mm_cfg(s: &MarketMakerSpec) -> Arc<RwLock<MarketMakerConfig>> {
-        s.shared_config.clone()
-    }
-    mk_setter(
-        ctx,
-        "set-mm-reference",
-        market_makers.clone(),
-        "market-maker",
-        mm_cfg,
-        |c, v| {
-            // (set-mm-reference NAME EUR) is the explicit-snap path
-            // — jumps the live price as well as the baseline so a
-            // lisp callback that wants to peg an MM doesn't have to
-            // wait for mean reversion. The scenario bias tick uses
-            // a different path that touches baseline only.
-            let d = f64_to_dec(v);
-            c.reference_baseline = d;
-            c.reference_price = d;
-        },
-    );
-    mk_setter(ctx, "set-mm-spread", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
-        c.spread = f64_to_dec(v);
-    });
-    mk_setter(ctx, "set-mm-size", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
-        c.size = f64_to_dec(v);
-    });
-    mk_setter(ctx, "set-mm-demand", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
-        c.demand = f64_to_dec(v);
-    });
-    mk_setter(ctx, "set-mm-surplus", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
-        c.surplus = f64_to_dec(v);
-    });
-    mk_setter(ctx, "set-mm-noise", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
-        c.price_noise = f64_to_dec(v);
-    });
-    mk_setter(ctx, "set-mm-follow-last-trade", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
-        // 0.0 = static; 1.0 = snap to last trade each refresh.
-        c.follow_last_trade = f64_to_dec(v.clamp(0.0, 1.0));
-    });
-    mk_setter(ctx, "set-mm-refresh-ms", market_makers, "market-maker", mm_cfg, |c, v| {
-        // Floor at 100 ms — see MarketMakerConfig::refresh_ms for
-        // why MM refresh wants a higher floor than aggressor fire.
-        // Negative / NaN inputs collapse to 100 via the i64 cast +
-        // .max().
-        c.refresh_ms = (v as i64).max(100) as u64;
-    });
 }
 
 AsPlist! {
@@ -1386,41 +1116,6 @@ fn register_mm_fleets(
                 );
             }
             Ok(a.name)
-        },
-    );
-}
-
-/// Build a `(set-X-FIELD NAME VAL)` defun that mutates a numeric
-/// field on a named spec's shared config. Generic over the spec
-/// type so the same plumbing covers MM and aggressor knobs.
-///
-/// - `access` returns the spec's `Arc<RwLock<Config>>` field.
-/// - `apply` writes one f64 into the config under the write lock.
-fn mk_setter<S, C, A, F>(
-    ctx: &mut TulispContext,
-    defun_name: &'static str,
-    map: Arc<Mutex<HashMap<String, S>>>,
-    spec_label: &'static str,
-    access: A,
-    apply: F,
-) where
-    S: Send + Sync + 'static,
-    C: Send + Sync + 'static,
-    A: Fn(&S) -> Arc<RwLock<C>> + Send + Sync + 'static,
-    F: Fn(&mut C, f64) + Send + Sync + 'static,
-{
-    ctx.defun(
-        defun_name,
-        move |name: String, value: f64| -> Result<bool, Error> {
-            let guard = map.lock();
-            match guard.get(&name) {
-                Some(spec) => {
-                    let arc = access(spec);
-                    apply(&mut arc.write(), value);
-                    Ok(true)
-                }
-                None => Err(Error::os_error(format!("unknown {spec_label} {name:?}"))),
-            }
         },
     );
 }
@@ -1514,103 +1209,6 @@ mod tests {
         let f = write_tmp("(set-physics-tick-ms 200)");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         assert_eq!(cfg.metadata().physics_tick, Duration::from_millis(200));
-    }
-
-    #[tokio::test]
-    async fn make_market_maker_registers_spec() {
-        let f = write_tmp(
-            r#"
-            (%make-market-maker
-              :name "q0"
-              :area "10YDE-EON------1"
-              :quarter-offset 0
-              :reference 90.00
-              :spread 0.50
-              :size 2.0
-              :seed 7)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let mms = cfg.market_makers();
-        assert_eq!(mms.len(), 1);
-        let mm = &mms[0];
-        assert_eq!(mm.name, "q0");
-        assert_eq!(mm.seed, 7);
-        let inner = mm.shared_config.read();
-        assert_eq!(inner.reference_price, rust_decimal::dec!(90.00));
-        assert_eq!(inner.spread, rust_decimal::dec!(0.50));
-        assert_eq!(inner.size, rust_decimal::dec!(2.0));
-        // Next 15-min boundary after `anchor`.
-        assert!(inner.period.start > cfg.anchor());
-        assert_eq!(inner.period.duration, DeliveryDuration::DeliveryDuration15);
-    }
-
-    #[tokio::test]
-    async fn set_mm_demand_after_make_takes_effect_on_shared() {
-        let f = write_tmp(
-            r#"
-            (%make-market-maker :name "h0" :area "10YDE-EON------1")
-            (set-mm-demand "h0" 0.20)
-            (set-mm-surplus "h0" 0.05)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let mms = cfg.market_makers();
-        let inner = mms[0].shared_config.read();
-        assert_eq!(inner.demand, rust_decimal::dec!(0.20));
-        assert_eq!(inner.surplus, rust_decimal::dec!(0.05));
-    }
-
-    #[tokio::test]
-    async fn set_mm_demand_unknown_name_errors() {
-        let f = write_tmp(r#"(set-mm-demand "nonexistent" 0.10)"#);
-        let path = f.path().to_str().unwrap().to_string();
-        match Config::new(&path) {
-            Ok(_) => panic!("expected error"),
-            Err(e) => assert!(e.contains("nonexistent"), "got: {e}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn make_mm_writes_refresh_ms_into_shared_config() {
-        let f = write_tmp(
-            r#"(%make-market-maker :name "m0" :area "10YDE-EON------1" :refresh-ms 750)"#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 750);
-    }
-
-    #[tokio::test]
-    async fn make_mm_default_refresh_ms_is_2000() {
-        let f = write_tmp(
-            r#"(%make-market-maker :name "m0" :area "10YDE-EON------1")"#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 2000);
-    }
-
-    #[tokio::test]
-    async fn set_mm_refresh_ms_updates_shared_config() {
-        let f = write_tmp(
-            r#"
-            (%make-market-maker :name "m0" :area "10YDE-EON------1")
-            (set-mm-refresh-ms "m0" 1250)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 1250);
-    }
-
-    #[tokio::test]
-    async fn set_mm_refresh_ms_floors_at_100() {
-        let f = write_tmp(
-            r#"
-            (%make-market-maker :name "m0" :area "10YDE-EON------1")
-            (set-mm-refresh-ms "m0" 10)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 100);
     }
 
     #[tokio::test]
@@ -1769,110 +1367,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remake_mm_preserves_shared_config_arc_and_updates_refresh() {
-        // Same hot-reload invariant the aggressor test pins down:
-        // the SharedConfig Arc the running task holds survives a
-        // reload(), and the new :refresh-ms value lands in it.
-        use std::io::{Seek, SeekFrom, Write};
-        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
-        f.write_all(
-            br#"(%make-market-maker :name "m0" :area "10YDE-EON------1" :refresh-ms 2000)"#,
-        )
-        .unwrap();
-        f.flush().unwrap();
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let arc_before = cfg.market_makers()[0].shared_config.clone();
-        assert_eq!(arc_before.read().refresh_ms, 2000);
-
-        f.as_file().set_len(0).unwrap();
-        f.as_file().seek(SeekFrom::Start(0)).unwrap();
-        f.write_all(
-            br#"(%make-market-maker :name "m0" :area "10YDE-EON------1" :refresh-ms 500)"#,
-        )
-        .unwrap();
-        f.flush().unwrap();
-        cfg.reload().unwrap();
-
-        let arc_after = cfg.market_makers()[0].shared_config.clone();
-        assert!(
-            Arc::ptr_eq(&arc_before, &arc_after),
-            "SharedConfig Arc identity must survive hot reload"
-        );
-        assert_eq!(arc_after.read().refresh_ms, 500);
-    }
-
-    #[tokio::test]
-    async fn make_aggressor_writes_rate_ms_into_shared_config() {
-        let f = write_tmp(
-            r#"(%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 1500)"#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let ag = cfg.aggressors();
-        assert_eq!(ag[0].shared_config.read().rate_ms, 1500);
-    }
-
-    #[tokio::test]
-    async fn set_aggressor_rate_ms_updates_shared_config() {
-        let f = write_tmp(
-            r#"
-            (%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 1500)
-            (set-aggressor-rate-ms "a0" 2500)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.aggressors()[0].shared_config.read().rate_ms, 2500);
-    }
-
-    #[tokio::test]
-    async fn set_aggressor_rate_ms_floors_at_50() {
-        let f = write_tmp(
-            r#"
-            (%make-aggressor :name "a0" :area "10YDE-EON------1")
-            (set-aggressor-rate-ms "a0" 5)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.aggressors()[0].shared_config.read().rate_ms, 50);
-    }
-
-    #[tokio::test]
-    async fn remake_aggressor_preserves_shared_config_arc_and_updates_rate() {
-        // The hot-reload path: re-executing config.lisp on a file
-        // watcher tick re-fires (%make-aggressor …) for each known
-        // name. The existing SharedConfig Arc must survive (so the
-        // running task keeps reading from the same handle) AND its
-        // contents must reflect the new :rate-ms.
-        use std::io::{Seek, SeekFrom, Write};
-        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
-        f.write_all(
-            br#"(%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 1000)"#,
-        )
-        .unwrap();
-        f.flush().unwrap();
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let arc_before = cfg.aggressors()[0].shared_config.clone();
-        assert_eq!(arc_before.read().rate_ms, 1000);
-
-        // Rewrite the file in place + call reload — exactly what the
-        // notify watcher does on a save event.
-        f.as_file().set_len(0).unwrap();
-        f.as_file().seek(SeekFrom::Start(0)).unwrap();
-        f.write_all(
-            br#"(%make-aggressor :name "a0" :area "10YDE-EON------1" :rate-ms 4000)"#,
-        )
-        .unwrap();
-        f.flush().unwrap();
-        cfg.reload().unwrap();
-
-        let arc_after = cfg.aggressors()[0].shared_config.clone();
-        assert!(
-            Arc::ptr_eq(&arc_before, &arc_after),
-            "SharedConfig Arc identity must survive hot reload"
-        );
-        assert_eq!(arc_after.read().rate_ms, 4000);
-    }
-
-    #[tokio::test]
     async fn make_gridpool_registers_spec() {
         let f = write_tmp(
             r#"
@@ -1978,58 +1472,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_mm_reference_snaps_baseline_and_price() {
-        // (set-mm-reference …) is the explicit-snap path — it
-        // must write both baseline and live price so a lisp
-        // callback can peg the MM without waiting for mean
-        // reversion.
-        let f = write_tmp(
-            r#"
-            (%make-market-maker :name "h0" :area "10YDE-EON------1")
-            (set-mm-reference "h0" 100.0)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let mm = cfg.market_makers().pop().unwrap();
-        let inner = mm.shared_config.read();
-        assert_eq!(inner.reference_baseline, rust_decimal::dec!(100.0));
-        assert_eq!(inner.reference_price, rust_decimal::dec!(100.0));
-    }
-
-    #[tokio::test]
-    async fn mm_setters_update_each_field() {
-        let f = write_tmp(
-            r#"
-            (%make-market-maker :name "h0" :area "10YDE-EON------1")
-            (set-mm-spread "h0" 0.80)
-            (set-mm-size "h0" 3.5)
-            (set-mm-noise "h0" 0.25)
-            (set-mm-follow-last-trade "h0" 0.30)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let mm = cfg.market_makers().pop().unwrap();
-        let inner = mm.shared_config.read();
-        assert_eq!(inner.spread, rust_decimal::dec!(0.80));
-        assert_eq!(inner.size, rust_decimal::dec!(3.5));
-        assert_eq!(inner.price_noise, rust_decimal::dec!(0.25));
-        assert_eq!(inner.follow_last_trade, rust_decimal::dec!(0.30));
-    }
-
-    #[tokio::test]
-    async fn set_mm_follow_clamps_to_unit_range() {
-        let f = write_tmp(
-            r#"
-            (%make-market-maker :name "h0" :area "10YDE-EON------1")
-            (set-mm-follow-last-trade "h0" 1.50)
-            "#,
-        );
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let mm = cfg.market_makers().pop().unwrap();
-        assert_eq!(mm.shared_config.read().follow_last_trade, rust_decimal::dec!(1.0));
-    }
-
-    #[tokio::test]
     async fn suspend_resume_market_toggles_flag() {
         let f = write_tmp("(suspend-market)");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
@@ -2111,30 +1553,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_timer_callback_fires_and_mutates_shared_config() {
+    async fn run_with_timer_callback_fires_and_mutates_shared() {
         // tulisp-async exposes `(run-with-timer first repeat fn …)`.
-        // The (every …) sugar wrapper is built on top of it in
-        // sim/common.lisp (not loaded in tests).
+        // Verify the timer fires by reading bias-scale (shared, write-
+        // through-defun-mutable) instead of an MM config — the
+        // (%make-mm-fleet …) primitive doesn't expose a per-name
+        // setter; bias-scale is the simplest globally-set knob to
+        // probe whether tulisp-async ticks under the timer loop.
         let f = write_tmp(
             r#"
-            (%make-market-maker :name "h0" :area "10YDE-EON------1")
             (setq counter 0)
             (run-with-timer 0.001 0.001
               (lambda ()
                 (setq counter (+ counter 1))
-                (set-mm-demand "h0" (* counter 0.01))))
+                (set-mm-bias-scale counter)))
             "#,
         );
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        let mm = cfg.market_makers().pop().unwrap();
-        assert_eq!(mm.shared_config.read().demand, rust_decimal::dec!(0));
+        assert!((*cfg.bias_scale().read() - 25.0).abs() < 1e-9);
 
         let _drain = cfg.spawn_timer_loop(Duration::from_millis(5));
         tokio::time::sleep(Duration::from_millis(60)).await;
-        let demand = mm.shared_config.read().demand;
+        let bias = *cfg.bias_scale().read();
+        // counter starts at 0, increments 1 per fire — after ~60ms
+        // at 1ms cadence many fires have landed.
+        assert!(bias > 0.0, "bias_scale was not mutated by the timer: {bias}");
         assert!(
-            demand > rust_decimal::dec!(0),
-            "demand stayed at 0: {demand}"
+            (bias - 25.0).abs() > 0.5,
+            "bias_scale still at the default 25.0 — timer didn't fire"
         );
     }
 }

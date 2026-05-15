@@ -124,9 +124,23 @@ Natural slices: =MarketState= (physical state), =Fanout=
 
 *** TODO Unify MM and Aggressor under a =Counterparty= trait
 Both hold =Arc<RwLock<Config>>=, a seeded RNG, a tick loop, a
-fair-value reference, a price/size policy, and submit via
-=submit_counterparty_order=. A small trait sharing the spawn
-pattern would deduplicate =spawn_mm_task= / =spawn_aggressor_task=.
+fair-value reference, and submit via =submit_counterparty_order=.
+=fleet::run_mm_contract= and =fleet::run_aggressor_contract= are
+near-mirror tokio loops over the same retire-or-tick select; a
+small trait sharing the spawn pattern would deduplicate them.
+
+*** DONE Bind counterparty state to the contract, not the slot
+Replaced slot-indexed rotation with per-contract counterparties
+in =src/sim/fleet.rs=. =FleetManager= spawns one MM (and N
+aggressors) per delivery contract in each fleet's rolling
+window; each task owns one fixed =period= for its lifetime and
+applies band lookups per refresh against the fleet's mutable
+recipe. =roll_forward= signals retirement at quarter boundaries
+and tops the window up at the far edge. =MarketMaker::cancel_resting=
+guarantees no orphan quotes on gated books. The quarter-boundary
+price dip is gone because per-MM state (=reference_price=, RNG
+stream, =follow_last_trade= residue) now evolves with the contract
+it quotes instead of being inherited at rotation.
 
 *** DONE Move duck curve out of =scenarios.rs=
 =natural_duck_bias=, =decay_weight=, =lerp= now live in
