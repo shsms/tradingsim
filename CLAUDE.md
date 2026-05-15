@@ -109,6 +109,26 @@ smoke-test driver once Phase 4 lands the gRPC server: point it at
 `[::1]:8810` and exercise place / list / cancel + the four stream
 RPCs.
 
+## Browser tests (Selenium + headless Firefox)
+
+The fast UI tests in `tests/ui_e2e.rs` drive the axum Router via
+`tower::ServiceExt::oneshot` — no browser, no JS. For tests that
+need to exercise the live HTML / CSS / JS (layout, drill-downs,
+WS updates), use Selenium against headless Firefox:
+
+```sh
+/usr/bin/python3 tests/ui_selenium.py          # one-shot
+```
+
+Run with `/usr/bin/python3` directly so the system
+`python3-selenium` from `/usr/lib/python3/dist-packages` is picked
+up — the project venv at `/vagrant/venv` masks `dist-packages` if
+its `python3` is used. `geckodriver` is at `/usr/local/bin/`
+(installed manually from Mozilla's GitHub releases — Debian does
+not package it). Firefox is the `firefox-esr` apt package. The
+scripts launch `firefox-esr -headless`, so no display server is
+needed.
+
 ## Commit conventions
 
 Per the cross-project commit style: imperative subject, no prefix tag,
