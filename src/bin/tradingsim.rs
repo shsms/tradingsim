@@ -7,108 +7,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use simplelog::{ColorChoice, Config as LogConfig, LevelFilter, TermLogger, TerminalMode};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tonic::transport::Server;
 use tradingsim::{
-    lisp::Config as LispConfig,
+    lisp::{Config as LispConfig, MmFleetSpec},
     proto::trading::electricity_trading_service_server::ElectricityTradingServiceServer,
     server::ElectricityTradingServer,
-    sim::counterparty::{Aggressor, MarketMaker, MarketMakerConfig},
+    sim::counterparty::MmFleetParams,
+    sim::fleet::FleetManager,
     sim::gridpool::Gridpool,
-    sim::market::{Area, DeliveryDuration, DeliveryPeriod, MarketRegistry, MarketRules},
+    sim::market::{Area, MarketRegistry, MarketRules},
     sim::order::GridpoolId,
     sim::world::World,
     ui as ui_server,
 };
-
-/// Fallback MM coverage when no config.lisp is loaded.
-const MM_HOURS_COVERED: i64 = 4;
-
-fn next_hour_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
-    let secs = now.timestamp();
-    let bucket = (secs / 3600 + 1) * 3600;
-    DateTime::from_timestamp(bucket, 0).unwrap()
-}
-
-/// Spawn one tokio task that calls `mm.refresh(...)` on the cadence
-/// the MM's shared config carries (`refresh_ms`, default 2000 ms,
-/// hot-reloadable). `quarter_offset` rolls the MM's delivery period
-/// forward each tick so the MM always quotes the contract starting
-/// that many quarter-hours from the next 15-min boundary.
-fn spawn_mm_task(world: Arc<RwLock<World>>, mut mm: MarketMaker, quarter_offset: i64) {
-    let cfg = mm.shared_config();
-    tokio::spawn(async move {
-        loop {
-            let now = Utc::now();
-            let new_start = tradingsim::lisp::next_quarter_boundary(now)
-                + chrono::Duration::minutes(15 * quarter_offset);
-            // Bump period + read refresh_ms under one lock so a
-            // concurrent (set-mm-refresh-ms …) can't race the
-            // period roll.
-            let wait_ms = {
-                let mut c = cfg.write();
-                if c.period.start != new_start {
-                    c.period.start = new_start;
-                }
-                c.refresh_ms
-            };
-            // Refresh first, sleep after — preserves the previous
-            // tokio::time::interval(2s) behaviour where the first
-            // refresh fired immediately and the wait sat between
-            // refreshes, not before the first one.
-            {
-                let mut w = world.write();
-                mm.refresh(&mut w, now);
-            }
-            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-        }
-    });
-}
-
-/// Spawn one tokio task that fires `ag.fire(...)` on a horizon-
-/// scaled cadence. The base rate (from the lisp fleet config) is
-/// the inter-fire delay at ≥2 h to gate; near gate it shortens by
-/// up to 3× via `gate_close_scale`, the same curve the MM walk
-/// amplitude uses. Combined with the per-fire size ramp inside
-/// `Aggressor::fire`, total volume on a contract concentrates in
-/// its last hour the way real intraday does (~70% there) instead
-/// of being uniform across the contract's life.
-fn spawn_aggressor_task(
-    world: Arc<RwLock<World>>,
-    mut ag: Aggressor,
-    quarter_offset: i64,
-) {
-    let cfg = ag.shared_config();
-    tokio::spawn(async move {
-        loop {
-            let now = Utc::now();
-            let new_start = tradingsim::lisp::next_quarter_boundary(now)
-                + chrono::Duration::minutes(15 * quarter_offset);
-            // Combine the period roll + the rate_ms read under one
-            // write lock so a concurrent (set-aggressor-rate-ms …)
-            // doesn't race the period bump.
-            let base_secs = {
-                let mut c = cfg.write();
-                if c.period.start != new_start {
-                    c.period.start = new_start;
-                }
-                c.rate_ms as f64 / 1000.0
-            };
-            // Sleep before the next fire — duration shrinks as the
-            // contract's gate approaches. Floor at 50 ms so a
-            // mis-set base rate can't busy-spin even with the
-            // tightest 3× ramp at gate.
-            let scale = tradingsim::sim::counterparty::gate_close_scale(new_start, now);
-            let wait =
-                Duration::from_secs_f64((base_secs / scale.max(1.0)).max(0.05));
-            tokio::time::sleep(wait).await;
-            let mut w = world.write();
-            ag.fire(&mut w, Utc::now());
-        }
-    });
-}
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
@@ -212,11 +126,6 @@ async fn main() {
 
     let trading_addr = lisp_config.trading_addr();
 
-    // Synthetic liquidity: either driven by lisp's (make-market-maker
-    // …) entries, or — when no config.lisp is loaded — the prior
-    // four-hour fallback so the demo still has a quoted book.
-    let mm_specs = lisp_config.market_makers();
-
     // Drain tulisp-async timers (every / run-with-timer) on a fixed
     // cadence so scheduled callbacks in config.lisp actually fire.
     // Also spawn the notify-rs file watcher so edits to config.lisp
@@ -227,67 +136,45 @@ async fn main() {
 
     let world = Arc::new(RwLock::new(world));
 
-    let mut mm_views: Vec<tradingsim::scenarios::MmView> = Vec::new();
-    if !mm_specs.is_empty() {
-        log::info!(
-            "Spawning {} market-maker(s) from config.lisp",
-            mm_specs.len()
-        );
-        for spec in mm_specs {
-            let offset = spec.quarter_offset;
-            mm_views.push(tradingsim::scenarios::MmView {
-                quarter_offset: offset,
-                shared_config: spec.shared_config.clone(),
-            });
-            let mm = MarketMaker::with_shared_config(spec.shared_config, spec.seed);
-            spawn_mm_task(Arc::clone(&world), mm, offset);
-        }
+    // Per-contract counterparties. FleetManager spawns one MM (and
+    // N aggressors) per delivery contract in each fleet's rolling
+    // window, and rotates them every 15 min so contracts gating off
+    // are retired and fresh ones at the far edge come online.
+    let manager = Arc::new(Mutex::new(FleetManager::new(
+        Arc::clone(&world),
+        lisp_config.curve(),
+        lisp_config.weather(),
+        lisp_config.clock(),
+    )));
+    let mm_fleets = lisp_config.mm_fleets();
+    if mm_fleets.is_empty() {
+        log::info!("No MM fleets in lisp config — spawning default fallback fleet");
+        manager.lock().add_mm_fleet(MmFleetSpec {
+            name: "default".into(),
+            area: area.code.clone(),
+            window_quarters: 16,
+            shared_params: Arc::new(RwLock::new(MmFleetParams::default())),
+            seed_base: 0,
+        });
     } else {
-        log::info!(
-            "No market-makers in lisp config — spawning {} hardcoded MMs",
-            MM_HOURS_COVERED
-        );
-        let first_hour = next_hour_boundary(Utc::now());
-        for hour_offset in 0..MM_HOURS_COVERED {
-            let start = first_hour + chrono::Duration::hours(hour_offset);
-            let period = DeliveryPeriod {
-                start,
-                duration: DeliveryDuration::DeliveryDuration15,
-            };
-            let cfg = MarketMakerConfig::default_for(area.clone(), period);
-            log::info!(
-                "Market-maker quoting {} hour @ ref {} EUR/MWh (spread {})",
-                start.format("%Y-%m-%dT%H:%M:%SZ"),
-                cfg.reference_price,
-                cfg.spread
-            );
-            let mm = MarketMaker::new(cfg, (hour_offset as u64).wrapping_mul(0x9E37_79B9));
-            // Hardcoded fallback: hour_offset is in HOURS, but the
-            // rolling task works in quarter-hours. Multiply by 4.
-            spawn_mm_task(Arc::clone(&world), mm, hour_offset * 4);
+        log::info!("Spawning {} MM fleet(s) from config.lisp", mm_fleets.len());
+        for spec in mm_fleets {
+            manager.lock().add_mm_fleet(spec);
         }
     }
-
-    // Aggressors — non-gridpool takers that cross the MM's quotes
-    // and generate public trades. Drives observable price activity
-    // on the public trade tape.
-    let aggressor_specs = lisp_config.aggressors();
-    let mut bias_views: Vec<tradingsim::scenarios::AggressorView> = Vec::new();
-    if !aggressor_specs.is_empty() {
+    let aggressor_fleets = lisp_config.aggressor_fleets();
+    if !aggressor_fleets.is_empty() {
         log::info!(
-            "Spawning {} aggressor(s) from config.lisp",
-            aggressor_specs.len()
+            "Spawning {} aggressor fleet(s) from config.lisp",
+            aggressor_fleets.len()
         );
-        for spec in aggressor_specs {
-            let offset = spec.quarter_offset;
-            bias_views.push(tradingsim::scenarios::AggressorView {
-                quarter_offset: offset,
-                shared_config: spec.shared_config.clone(),
-            });
-            let ag = Aggressor::with_shared_config(spec.shared_config, spec.seed);
-            spawn_aggressor_task(Arc::clone(&world), ag, offset);
+        for spec in aggressor_fleets {
+            manager.lock().add_aggressor_fleet(spec);
         }
     }
+    let mm_views_handle = manager.lock().mm_views();
+    let aggressor_views_handle = manager.lock().aggressor_views();
+    FleetManager::start_lifecycle_task(Arc::clone(&manager));
 
     // Bias tick — applies the natural duck curve to every aggressor
     // (sets side_bias) and every MM (sets demand + surplus) every 5
@@ -295,53 +182,18 @@ async fn main() {
     // weighted by quarter-offset decay. The MM tilts give an
     // immediate quote shift on top of the slower follow-last-trade
     // drift, so visible price moves land within seconds rather than
-    // minutes.
-    // Seed each MM's reference from the curve+weather at boot so
-    // the very first quote (within MM_REFRESH_INTERVAL) is
-    // already on-curve, ahead of the first bias tick a few
-    // seconds later.
-    {
-        let curve_handle = lisp_config.curve();
-        let weather_handle = lisp_config.weather();
-        let clock_handle = lisp_config.clock();
-        let curve = curve_handle.read();
-        let weather = weather_handle.read();
-        let clock = clock_handle.read().clone();
-        for view in &mm_views {
-            let cfg_snap = view.shared_config.read();
-            let period_start = cfg_snap.period.start;
-            let area_code = cfg_snap.area.code.clone();
-            drop(cfg_snap);
-            // Period start in the configured *local* zone so the
-            // curve lookup (peak/belly hours are local) and the
-            // solar-elevation day-of-year both land on the right
-            // value at boot — straight UTC was peaking around
-            // CEST 14:00 in summer.
-            let hour = clock.local_hour(period_start);
-            let day = clock.local_day_of_year(period_start);
-            let loc = weather.for_area(&area_code);
-            // Seed both baseline (the bias tick's target) and
-            // the live price so the first refresh quotes
-            // on-curve before the first bias tick fires.
-            let seeded = tradingsim::scenarios::effective_ref(&curve, loc, hour, day);
-            let mut w = view.shared_config.write();
-            w.reference_baseline = seeded;
-            w.reference_price = seeded;
-        }
-    }
-
-    if !bias_views.is_empty() || !mm_views.is_empty() {
-        tradingsim::scenarios::spawn_bias_tick(
-            bias_views,
-            mm_views,
-            lisp_config.scenarios(),
-            lisp_config.bias_scale(),
-            lisp_config.curve(),
-            lisp_config.weather(),
-            lisp_config.clock(),
-            Duration::from_secs(5),
-        );
-    }
+    // minutes. Views are read from FleetManager's live registries so
+    // the tick automatically picks up newly-spawned contracts.
+    tradingsim::scenarios::spawn_bias_tick(
+        aggressor_views_handle,
+        mm_views_handle,
+        lisp_config.scenarios(),
+        lisp_config.bias_scale(),
+        lisp_config.curve(),
+        lisp_config.weather(),
+        lisp_config.clock(),
+        Duration::from_secs(5),
+    );
 
     // Expire orders whose valid_until has lapsed. Once a second is
     // generous given the proto's UTC-timestamp resolution.

@@ -198,8 +198,8 @@ pub fn new_curve() -> SharedCurve {
 /// per-contract natural-curve bias by the quarter-offset decay
 /// weight.
 pub fn spawn_bias_tick(
-    aggressors: Vec<AggressorView>,
-    mms: Vec<MmView>,
+    aggressors: Arc<Mutex<Vec<AggressorView>>>,
+    mms: Arc<Mutex<Vec<MmView>>>,
     scenarios: SharedScenarios,
     bias_scale: SharedBiasScale,
     curve: SharedCurve,
@@ -264,9 +264,15 @@ pub fn spawn_bias_tick(
             let scenario_bias = active
                 .as_ref()
                 .map(|(s, rt, _)| stage_bias_now(s, rt, &clock_snap, now));
+            // Snapshot the live view sets — FleetManager mutates them
+            // on each quarter rotation, so holding the locks while we
+            // iterate would contend with roll_forward. Cloning is
+            // cheap (Arc<RwLock<Config>>) and decouples the two.
+            let ag_snap = aggressors.lock().clone();
+            let mm_snap = mms.lock().clone();
             apply_biases(
-                &aggressors,
-                &mms,
+                &ag_snap,
+                &mm_snap,
                 scenario_bias,
                 scale,
                 &curve_snap,
@@ -327,12 +333,21 @@ fn apply_biases(
     now: DateTime<Utc>,
 ) {
     let base_boundary = next_quarter_boundary(now);
-    let period_hour_for = |offset: i64| -> f64 {
-        let period_start = base_boundary + chrono::Duration::minutes(15 * offset);
+    // Offset to the next 15-min boundary derived from the contract's
+    // own period start. Contract-owned MMs see this drop as they age
+    // through the window (it's how the natural-curve bias migrates
+    // forward in their life); slot-based MMs rotate their period
+    // every quarter so the derivation returns the same constant
+    // their static slot index would have.
+    let offset_for = |period_start: DateTime<Utc>| -> i64 {
+        ((period_start - base_boundary).num_minutes() / 15).max(0)
+    };
+    let period_hour_for = |period_start: DateTime<Utc>| -> f64 {
         clock.local_hour(period_start)
     };
-    let effective_for = |offset: i64| -> f64 {
-        let natural = natural_duck_bias(period_hour_for(offset));
+    let effective_for = |period_start: DateTime<Utc>| -> f64 {
+        let natural = natural_duck_bias(period_hour_for(period_start));
+        let offset = offset_for(period_start);
         match scenario_bias {
             Some(stage_bias) => lerp(natural, stage_bias, decay_weight(offset)),
             None => natural,
@@ -343,15 +358,18 @@ fn apply_biases(
     // curve+weather-derived fundamentals reference at this quarter.
     // Weather falls back to the registry's default location when
     // the area isn't explicitly linked.
-    let fundamentals = |area_code: &str, offset: i64| -> Decimal {
+    let fundamentals = |area_code: &str, period_start: DateTime<Utc>| -> Decimal {
         let loc = weather.for_area(area_code);
-        effective_ref(curve, loc, period_hour_for(offset), day_of_year)
+        effective_ref(curve, loc, period_hour_for(period_start), day_of_year)
     };
     for view in aggressors {
-        let area_code = view.shared_config.read().area.code.clone();
-        let new_ref = fundamentals(&area_code, view.quarter_offset);
+        let (area_code, period_start) = {
+            let c = view.shared_config.read();
+            (c.area.code.clone(), c.period.start)
+        };
+        let new_ref = fundamentals(&area_code, period_start);
         let mut cfg = view.shared_config.write();
-        cfg.side_bias = effective_for(view.quarter_offset);
+        cfg.side_bias = effective_for(period_start);
         // Same fair-value anchor the MM uses for its baseline.
         // Without this, the aggressor's slippage clamp would
         // still be measuring off the stale 85 EUR boot seed and
@@ -359,10 +377,13 @@ fn apply_biases(
         cfg.reference_price = new_ref;
     }
     for view in mms {
-        let bias = effective_for(view.quarter_offset);
+        let (area_code, period_start) = {
+            let c = view.shared_config.read();
+            (c.area.code.clone(), c.period.start)
+        };
+        let bias = effective_for(period_start);
         let shift = (bias - 0.5) * bias_scale;
-        let area_code = view.shared_config.read().area.code.clone();
-        let new_ref = fundamentals(&area_code, view.quarter_offset);
+        let new_ref = fundamentals(&area_code, period_start);
         let mut cfg = view.shared_config.write();
         // Write the fundamentals target — the MM refresh
         // (step_reference) mean-reverts the live reference_price

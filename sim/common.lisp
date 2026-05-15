@@ -84,64 +84,52 @@ product). Same :gate-offset-seconds knob as couple-all-pairs."
          :gate-offset-seconds offset)))))
 
 (defun mm-fleet (&rest plist)
-  "Spawn :quarters market-makers covering one delivery area — one per
-15-min contract. Each MM's quarter-offset rolls forward in the
-binary's spawn task so the fleet always covers the next-N quarters.
+  "Register one MM fleet covering :quarters forward 15-min contracts
+in :area. FleetManager spawns one MM per contract in the rolling
+window and rotates them every 15 min so contracts gating off are
+retired and fresh ones at the far edge come online.
 
-  :area             EIC code (required)
-  :prefix           name prefix (required, e.g. \"tn\" → \"tn-q0\")
-  :quarters         contracts to cover (default 48)
-  :sizes            list of MM sizes per band, MW
-                    (default '(1.0 0.7 0.5 0.3); 4 bands × 12 quarters)
-  :spreads          list of spreads per band, EUR
-                    (default '(0.40 0.55 0.70 0.90))
-  :reference-base   reference at q0, EUR (default 85.0)
-  :reference-slope  reference walk per quarter, EUR (default 0.10)
-  :noise            random-walk noise on the reference (default 0.10)
-  :follow           follow-last-trade rate (default 0.10; 0 = static)
-  :refresh-ms       per-MM refresh cadence in ms (default 2000); the
-                    sim's MarketMakerConfig default, applied to every
-                    MM in the fleet. Hot-reloadable: saving config.lisp
-                    re-runs %make-market-maker, which writes the new
-                    value into the shared config the running task
-                    reads on its next iteration.
-  :seed-base        starting seed (default: auto from a global counter)
+  :area         EIC code (required)
+  :prefix       name prefix (required, e.g. \"tn\")
+  :quarters     contracts to cover (default 48)
+  :sizes        list of MM sizes per band, MW
+                (default '(1.0 0.7 0.5 0.3); 4 bands across the window)
+  :spreads      list of half-spreads per band, EUR
+                (default '(0.40 0.55 0.70 0.90))
+  :noise        random-walk noise on the reference (default 0.10)
+  :follow       follow-last-trade rate (default 0.10; 0 = static)
+  :refresh-ms   per-MM refresh cadence in ms (default 2000)
+  :seed-base    starting seed (default: auto from a global counter)
 
-The band index for quarter i is `(* i n) / quarters` where n is the
-number of entries in :sizes — so a 4-element list maps to 4 evenly
-spaced bands across the window."
+Band index for a contract at current offset Q is
+`(min (- (length sizes) 1) (/ (* Q (length sizes)) quarters))`.
+A contract enters at the back band, tightens its spread and grows
+its size as it ages forward."
   (let* ((area (plist-get plist :area))
          (prefix (plist-get plist :prefix))
          (quarters (or (plist-get plist :quarters) 48))
          (sizes (or (plist-get plist :sizes) '(1.0 0.7 0.5 0.3)))
          (spreads (or (plist-get plist :spreads) '(0.40 0.55 0.70 0.90)))
-         (ref-base (or (plist-get plist :reference-base) 85.0))
-         (ref-slope (or (plist-get plist :reference-slope) 0.10))
          (noise (or (plist-get plist :noise) 0.10))
          (follow (or (plist-get plist :follow) 0.10))
          (refresh-ms (or (plist-get plist :refresh-ms) 2000))
-         (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base)))
-         (band-count (length sizes)))
-    (dotimes (i quarters)
-      (let* ((band (min (- band-count 1) (/ (* i band-count) quarters)))
-             (name (format "%s-q%d" prefix i)))
-        (%make-market-maker
-         :name name
-         :area area
-         :quarter-offset i
-         :reference (+ ref-base (* ref-slope i))
-         :spread (nth band spreads)
-         :size (nth band sizes)
-         :noise noise
-         :refresh-ms refresh-ms
-         :seed (+ seed-base i))
-        (when (> follow 0)
-          (set-mm-follow-last-trade name follow))))))
+         (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base))))
+    (%make-mm-fleet
+     :name (format "%s-fleet" prefix)
+     :area area
+     :window-quarters quarters
+     :size-bands sizes
+     :spread-bands spreads
+     :noise noise
+     :follow follow
+     :refresh-ms refresh-ms
+     :seed-base seed-base)))
 
 (defun aggressor-fleet (&rest plist)
-  "Spawn :quarters × P aggressors covering one delivery area, where
-P is the length of :sizes (one profile per entry). Names follow
-`ag-<prefix>-q<quarter>-<profile>`.
+  "Register one aggressor fleet covering :quarters forward contracts
+in :area with P profiles (= (length :sizes)). FleetManager spawns
+one aggressor per (contract, profile) pair, rotating per quarter
+the same way mm-fleet does.
 
   :area         EIC code (required)
   :prefix       name prefix (required, e.g. \"tn\")
@@ -149,7 +137,7 @@ P is the length of :sizes (one profile per entry). Names follow
   :sizes        list of MW per profile (default '(0.2 0.5 1.0 1.5))
   :rates-base   list of base rate_ms per profile
                 (default '(500 1500 3500 8000));
-                effective rate = base × (quarter + 1)
+                effective rate = base × (current_offset + 1)
   :side-bias    side bias for every profile (default 0.5)
   :seed-base    starting seed (default: auto from a global counter)"
   (let* ((area (plist-get plist :area))
@@ -158,15 +146,12 @@ P is the length of :sizes (one profile per entry). Names follow
          (sizes (or (plist-get plist :sizes) '(0.2 0.5 1.0 1.5)))
          (rates-base (or (plist-get plist :rates-base) '(500 1500 3500 8000)))
          (side-bias (or (plist-get plist :side-bias) 0.5))
-         (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base)))
-         (profiles (length sizes)))
-    (dotimes (i quarters)
-      (dotimes (p profiles)
-        (%make-aggressor
-         :name (format "ag-%s-q%d-%d" prefix i p)
-         :area area
-         :quarter-offset i
-         :rate-ms (* (nth p rates-base) (+ i 1))
-         :size (nth p sizes)
-         :side-bias side-bias
-         :seed (+ seed-base (* i 100) p))))))
+         (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base))))
+    (%make-aggressor-fleet
+     :name (format "ag-%s-fleet" prefix)
+     :area area
+     :window-quarters quarters
+     :profile-sizes sizes
+     :profile-rate-bases rates-base
+     :side-bias side-bias
+     :seed-base seed-base)))
