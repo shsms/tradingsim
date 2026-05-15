@@ -1100,7 +1100,10 @@ function renderFilterChips() {
 // (area chips, focused-period pill, trades-delivery dropdown) so
 // "last 50" stays true regardless of which combination is on.
 const TRADES_BUFFER_CAP = 500;
-const TRADES_DISPLAY_CAP = 50;
+// Sized so the table body fits inside the Tier D panel without
+// overflowing past the weather / book panels next to it. ~25 rows
+// at compact density fills ~360 px which matches the .scroll max.
+const TRADES_DISPLAY_CAP = 25;
 const tradesBuffer = [];
 let tradesDirty = false;
 let tradesPeriodFilter = null; // null = all deliveries
@@ -1256,7 +1259,11 @@ function renderLadder(g) {
  *  current scope. `period` is null until the first render
  *  picks a default. */
 const bookContract = { period: null };
-const BOOK_VISIBLE_CAP = 4;
+// Up to 1 DE-aggregate + 4 intl ladders fit before the panel needs
+// a "show more" affordance. The flex row wraps narrower panels to
+// additional lines anyway, so this is a per-column ceiling, not a
+// hard hide threshold.
+const BOOK_VISIBLE_CAP = 5;
 let bookShowAll = false;
 
 function selectBookPeriod(period) {
@@ -1327,22 +1334,41 @@ function rerenderBook() {
     return;
   }
 
-  // One ladder per active area for the selected period. DE TSO
-  // zones come first (tn → bw), then international (fr → at), so
-  // the home market is always on the left. Empty groups are kept
-  // (and rendered with "no asks / no bids" placeholders) so the
-  // card itself doesn't flicker every couple of seconds when the
-  // MM rotates quotes — the cancel arrives a hair before the
-  // repost, leaving a brief no-orders window the renderer used to
-  // collapse into "no resting orders in active areas".
-  const matches = ALL_FILTER_AREAS
-    .filter(a => activeAreas.has(a.code))
-    .map(a => groups.get(`${a.code}|${bookContract.period}`) ?? {
+  // DE active areas collapse into one aggregated ladder labeled
+  // "DE": the four control zones share one MM fleet quoting the
+  // same price into each book, but aggressors hit individual area
+  // books so per-area depth diverges over time. Summing across the
+  // four gives the total DE-wide depth at each price — the right
+  // view for a single bidding zone where liquidity is fungible.
+  // International ladders stay per-area; FR / NL / BE / AT really
+  // are distinct markets that can clear at different prices.
+  const intlActive = ALL_FILTER_AREAS
+    .filter(a => a.group === 'intl' && activeAreas.has(a.code));
+  const deActive = DE_AREAS.filter(a => activeAreas.has(a.code));
+  const matches = [];
+  if (deActive.length > 0) {
+    const agg = {
+      area: 'DE',
+      period: bookContract.period,
+      bids: new Map(),
+      asks: new Map(),
+    };
+    for (const a of deActive) {
+      const g = groups.get(`${a.code}|${bookContract.period}`);
+      if (!g) continue;
+      for (const [p, q] of g.bids) agg.bids.set(p, (agg.bids.get(p) || 0) + q);
+      for (const [p, q] of g.asks) agg.asks.set(p, (agg.asks.get(p) || 0) + q);
+    }
+    matches.push(agg);
+  }
+  for (const a of intlActive) {
+    matches.push(groups.get(`${a.code}|${bookContract.period}`) ?? {
       area: a.code,
       period: bookContract.period,
       bids: new Map(),
       asks: new Map(),
     });
+  }
 
   if (matches.length === 0) {
     container.innerHTML = '<div class="ladder-empty"><i>no areas selected</i></div>';

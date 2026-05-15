@@ -59,12 +59,11 @@ h1 {
 }
 .muted { color: var(--muted); font-size: var(--fs-small); }
 /* Layout — top-down tiers.
-   Tier A: chart    | scenarios     (chart 55%, scenarios 45%)
-   Tier B: gridpools                (full width, 3-pane master-detail)
-   Tier C: filter bar               (full width)
-   Tier D: weather  | public book   (50/50 — scoped by chips above)
-   Tier E: trade tape               (full width, bottom)
-   Stacks single-column below 900 px viewport. Gridpools sits above
+   Tier A: chart    | scenarios                (chart 55%, scenarios 45%)
+   Tier B: gridpools                           (full width, 3-pane master-detail)
+   Tier C: filter bar                          (full width)
+   Tier D: weather | book | trades             (3-column, scoped by chips above)
+   Stacks single-column below 1100 px viewport. Gridpools sits above
    the filter on purpose: filters scope weather / book / trades,
    not the per-portfolio drill-down. */
 .grid {
@@ -84,8 +83,17 @@ h1 {
    clientWidth grows, the next draw makes the canvas wider still,
    and the chart eventually shoves scenarios off the screen. */
 .tier-chart-scenarios { grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); }
-.tier-weather-book    { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-@media (max-width: 900px) {
+/* Weather sits on the left and needs room for 4 cell rows × 180 px;
+   the book is one aggregated DE ladder (~220 px) plus optional
+   neighbour ladders; trades is a 6-column table whose price/area/
+   delivery/exec columns each need ~70 px. 5/3/5 fractions land
+   weather ≈ trades on a 1920 px viewport and keep both readable at
+   4K, while leaving the narrow book panel just enough room for the
+   ladder plus its delivery dropdown header. */
+.tier-weather-book-trades {
+  grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 5fr);
+}
+@media (max-width: 1100px) {
   .tier-row { grid-template-columns: 1fr; }
 }
 

@@ -100,8 +100,12 @@
     <span id="filter-chips"></span>
   </section>
 
-  <!-- Tier D: weather (left) + public order book (right) -->
-  <div class="tier-row tier-weather-book">
+  <!-- Tier D: weather + public order book + public trades. One row;
+       no separate Tier E. The DE book is one aggregated ladder
+       across all four control zones (Germany clears at one price),
+       so the book panel is much narrower than before — that frees
+       enough width to host the trades tape inline. -->
+  <div class="tier-row tier-weather-book-trades">
     <div class="panel panel-weather">
       <h2>Weather (now)</h2>
       <div class="muted" style="margin-bottom:6px">
@@ -113,31 +117,30 @@
 
     <div class="panel panel-book">
       <div class="book-head">
-        <h2>Public order book — selected areas, one delivery</h2>
+        <h2>Public order book — one delivery</h2>
         <span class="muted">delivery
           <select id="book-period-select" onchange="selectBookPeriod(this.value)"></select>
         </span>
       </div>
       <div id="book"></div>
     </div>
-  </div>
 
-  <!-- Tier E: trade tape (full width, bottom) -->
-  <div class="panel panel-trades">
-    <div class="book-head">
-      <h2>Public trades — last 50</h2>
-      <span class="muted">delivery
-        <select id="trades-period-select" onchange="selectTradesPeriod(this.value)"></select>
-      </span>
-    </div>
-    <div class="scroll">
-      <table>
-        <thead><tr>
-          <th>id</th><th>qty (MW)</th><th>price (EUR)</th>
-          <th>area</th><th>delivery</th><th>exec</th>
-        </tr></thead>
-        <tbody id="trades"></tbody>
-      </table>
+    <div class="panel panel-trades">
+      <div class="book-head">
+        <h2>Public trades</h2>
+        <span class="muted">delivery
+          <select id="trades-period-select" onchange="selectTradesPeriod(this.value)"></select>
+        </span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th>id</th><th>qty</th><th>price</th>
+            <th>area</th><th>delivery</th><th>exec</th>
+          </tr></thead>
+          <tbody id="trades"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
