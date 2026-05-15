@@ -182,33 +182,36 @@ function initDensity() {
   updateDensityChip();
 }
 
-// Tier 2 — price chart. Per-area circular buffers of recent
-// trade prints, redrawn on a 1s tick. Canvas is sized to its
-// parent's CSS width each draw so window resizes don't blur it.
+// Tier 2 — price chart. Single flat buffer of recent trade prints
+// touching any DE control zone (buy or sell side), redrawn on a 1s
+// tick. Canvas is sized to its parent's CSS width each draw so
+// window resizes don't blur it.
 //
 // Each entry stores periodMs so the chart can isolate a single
 // delivery period — without that filter, prints for delivery
 // 15:00 and 18:00 would land on the same line at the same
-// wallclock minute and the line would jump nonsensically.
+// wallclock minute and the line would jump nonsensically. With a
+// national DE MM the four control zones quote one price, so a
+// single line aggregating every DE-touching print is the right
+// view — per-area lines would just overlap.
 const PERIOD_STEP_MS = 15 * 60 * 1000;
 const MAX_WINDOW_MS = 4 * 60 * 60 * 1000;
 let chartWindowMs = 30 * 60 * 1000;
-// Chart plots only the colored areas (the four control zones).
-// Intl areas don't get a chart line — they show up in trades and
-// the order book but not the per-area price tape.
-const CHART_AREAS = ALL_AREAS.filter(a => a.color);
-const priceSeries = new Map();
-for (const a of CHART_AREAS) priceSeries.set(a.code, []);
+const DE_CODE_SET = new Set(DE_AREAS.map(a => a.code));
+const CHART_LINE_COLOR = '#58a6ff';
+const priceSeries = [];
 
 function recordTradePrice(t) {
-  const arr = priceSeries.get(t.buy_area);
-  if (!arr) return;
+  // Accept any trade where either leg is a DE area — cross-area
+  // prints (TN↔AM etc) reflect the same national price and should
+  // count.
+  if (!DE_CODE_SET.has(t.buy_area) && !DE_CODE_SET.has(t.sell_area)) return;
   const ms = Date.parse(t.execution_time);
   const pms = Date.parse(t.period);
   if (!isFinite(ms) || !isFinite(pms)) return;
-  arr.push({ t: ms, price: parseFloat(t.price), periodMs: pms });
+  priceSeries.push({ t: ms, price: parseFloat(t.price), periodMs: pms });
   const cutoff = Date.now() - MAX_WINDOW_MS;
-  while (arr.length && arr[0].t < cutoff) arr.shift();
+  while (priceSeries.length && priceSeries[0].t < cutoff) priceSeries.shift();
 }
 
 // Persisted-select state — localStorage entries keep the chart
@@ -217,9 +220,10 @@ function recordTradePrice(t) {
 // timing (which is unreliable for dropdowns whose options are
 // populated by JS after data arrives).
 const SELECT_PREFS = {
-  chart:  'tradingsim-chart-window-min',
-  book:   'tradingsim-book-period',
-  trades: 'tradingsim-trades-filter',
+  chart:        'tradingsim-chart-window-min',
+  chartPeriod:  'tradingsim-chart-period',
+  book:         'tradingsim-book-period',
+  trades:       'tradingsim-trades-filter',
 };
 
 function rememberSelectChoice(which, value) {
@@ -247,16 +251,52 @@ function initChartWindow() {
   setChartWindow(sel.value);
 }
 
+/** Chart-local override for the delivery period dropdown. 'auto'
+ *  means "follow whatever effectivePeriodMs would fall back to";
+ *  any other value is an RFC-3339 string that pins the chart to
+ *  one contract regardless of click-pinned periodFilter or the
+ *  natural front-of-queue rotation. */
+let chartPeriodChoice = 'auto';
+
+function setChartPeriod(value) {
+  chartPeriodChoice = value || 'auto';
+  rememberSelectChoice('chartPeriod', chartPeriodChoice === 'auto' ? null : chartPeriodChoice);
+  blurActive();
+  drawChart();
+}
+
+function initChartPeriod() {
+  // The <select>'s options are populated lazily inside drawChart
+  // (it needs the live distinct-period set from priceSeries to
+  // know what to offer), so just remember the saved choice and let
+  // the first draw fill in the rest.
+  chartPeriodChoice = rememberedSelectChoice('chartPeriod') || 'auto';
+}
+
 /** Effective delivery period (epoch ms) the chart is plotting:
- *  pinned period if the user clicked into one, otherwise the
- *  soonest upcoming 15-min boundary (the contract that's about
- *  to close + currently most-actively-traded). Rotates as
- *  wallclock advances. */
+ *  the chart dropdown's explicit pick wins if set; otherwise the
+ *  click-pinned periodFilter (set from a trade row); otherwise the
+ *  soonest upcoming 15-min boundary (the contract that's about to
+ *  close + currently most-actively-traded). */
 function effectivePeriodMs() {
+  if (chartPeriodChoice !== 'auto') return Date.parse(chartPeriodChoice);
   if (periodFilter) return Date.parse(periodFilter);
   const now = Date.now();
   return Math.ceil(now / PERIOD_STEP_MS) * PERIOD_STEP_MS;
 }
+
+/** Resampling bucket size in ms, picked so the window holds ~60
+ *  buckets — enough resolution to see the shape, sparse enough that
+ *  noise averages out per bucket. Snapped to whole seconds. */
+function pickBucketMs(windowMs) {
+  return Math.max(5000, Math.round(windowMs / 60 / 1000) * 1000);
+}
+
+/** EMA over bucket means smooths out the residual bucket-to-bucket
+ *  jitter the resampling didn't kill. 0.4 keeps the line responsive
+ *  to actual price moves (≈3-bucket half-life) without echoing every
+ *  bid-ask bounce that survived the bucketing. */
+const CHART_EMA_ALPHA = 0.4;
 
 function pickXStep(windowMs) {
   const candidates = [1, 2, 5, 10, 15, 30, 60, 120].map(m => m * 60 * 1000);
@@ -277,16 +317,41 @@ function updateChartTitle() {
   if (!el) return;
   const eff = effectivePeriodMs();
   const hhmm = shortTime(new Date(eff).toISOString());
-  const tag = periodFilter ? 'pinned' : 'auto';
+  let tag;
+  if (chartPeriodChoice !== 'auto') tag = 'picked';
+  else if (periodFilter) tag = 'pinned';
+  else tag = 'auto';
   el.textContent = `Price tape — delivery ${hhmm} (${tag})`;
 }
 
-function renderChartLegend() {
-  const el = document.getElementById('chart-legend');
-  if (!el) return;
-  el.innerHTML = CHART_AREAS
-    .map(a => `<span><span class="dot" style="background:${a.color}"></span>${a.tag}</span>`)
-    .join('');
+/** Rebuild the chart-period <select>'s options from the distinct
+ *  periodMs values currently in priceSeries. Called every draw —
+ *  cheap (priceSeries holds at most a few hundred entries) and
+ *  keeps the dropdown current as the front contract rotates and
+ *  new far-edge contracts come into view. Skip while the user has
+ *  the <select> focused so it doesn't snap shut mid-pick. */
+function rerenderChartPeriodOptions() {
+  const sel = document.getElementById('chart-period-select');
+  if (!sel || document.activeElement === sel) return;
+  const periods = new Set();
+  for (const p of priceSeries) periods.add(p.periodMs);
+  const sorted = Array.from(periods).sort((a, b) => a - b);
+  // Drop a stale persisted choice — the pinned contract may have
+  // gated between page loads or fallen out of the buffer window.
+  if (chartPeriodChoice !== 'auto') {
+    const ms = Date.parse(chartPeriodChoice);
+    if (!sorted.includes(ms)) {
+      chartPeriodChoice = 'auto';
+      rememberSelectChoice('chartPeriod', null);
+    }
+  }
+  let opts = `<option value="auto"${chartPeriodChoice === 'auto' ? ' selected' : ''}>auto (next contract)</option>`;
+  for (const pms of sorted) {
+    const iso = new Date(pms).toISOString();
+    const selected = iso === chartPeriodChoice ? ' selected' : '';
+    opts += `<option value="${iso}"${selected}>${shortTime(iso)}</option>`;
+  }
+  sel.innerHTML = opts;
 }
 
 function drawChart() {
@@ -307,20 +372,46 @@ function drawChart() {
   const innerW = cssW - padL - padR;
   const innerH = cssH - padT - padB;
 
+  rerenderChartPeriodOptions();
   updateChartTitle();
   const effMs = effectivePeriodMs();
   const now = Date.now();
   const tmin = now - chartWindowMs;
 
+  // Resample: bucket every print falling in [tmin, now] for the
+  // active contract by time, take the mean price per bucket. The
+  // bucket centre is plotted so adjacent buckets sit side-by-side
+  // without a half-bucket lag.
+  const bucketMs = pickBucketMs(chartWindowMs);
+  const sums = new Map();
+  for (const p of priceSeries) {
+    if (p.t < tmin) continue;
+    if (p.periodMs !== effMs) continue;
+    const b = Math.floor(p.t / bucketMs) * bucketMs;
+    let e = sums.get(b);
+    if (!e) { e = { sum: 0, count: 0 }; sums.set(b, e); }
+    e.sum += p.price;
+    e.count += 1;
+  }
+  const buckets = Array.from(sums.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([start, e]) => ({ t: start + bucketMs / 2, mean: e.sum / e.count }));
+
+  // Smooth: EMA over the bucket means. First bucket seeds the
+  // running value; subsequent buckets blend by CHART_EMA_ALPHA.
+  const line = [];
+  let smoothed = null;
+  for (const b of buckets) {
+    smoothed = smoothed === null
+      ? b.mean
+      : CHART_EMA_ALPHA * b.mean + (1 - CHART_EMA_ALPHA) * smoothed;
+    line.push({ t: b.t, price: smoothed });
+  }
+
   let ymin = Infinity, ymax = -Infinity;
-  for (const [code, arr] of priceSeries) {
-    if (!activeAreas.has(code)) continue;
-    for (const p of arr) {
-      if (p.t < tmin) continue;
-      if (p.periodMs !== effMs) continue;
-      if (p.price < ymin) ymin = p.price;
-      if (p.price > ymax) ymax = p.price;
-    }
+  for (const pt of line) {
+    if (pt.price < ymin) ymin = pt.price;
+    if (pt.price > ymax) ymax = pt.price;
   }
   if (!isFinite(ymin)) { ymin = 70; ymax = 100; }
   if (ymax - ymin < 1) { ymax = ymin + 1; }
@@ -340,6 +431,11 @@ function drawChart() {
   ctx.lineWidth = 1;
 
   const ySteps = 5;
+  // Pick label precision based on the range so a tight chart
+  // (e.g. one contract over 5 min, only 1 EUR wide) doesn't print
+  // five identical integers stacked on the axis.
+  const yRange = ymax - ymin;
+  const yDecimals = yRange >= 10 ? 0 : yRange >= 2 ? 1 : 2;
   for (let i = 0; i <= ySteps; i++) {
     const y = padT + (i / ySteps) * innerH;
     ctx.beginPath();
@@ -348,7 +444,7 @@ function drawChart() {
     ctx.stroke();
     const v = ymax - (i / ySteps) * (ymax - ymin);
     ctx.textAlign = 'right';
-    ctx.fillText(v.toFixed(0), padL - 4, y + 3);
+    ctx.fillText(v.toFixed(yDecimals), padL - 4, y + 3);
   }
 
   ctx.textAlign = 'center';
@@ -359,23 +455,18 @@ function drawChart() {
     ctx.fillText(formatBack(Math.round(offset / 60000)), x, cssH - 4);
   }
 
-  ctx.lineWidth = 1.5;
+  if (line.length < 2) return;
+  ctx.strokeStyle = CHART_LINE_COLOR;
+  ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
-  for (const a of CHART_AREAS) {
-    if (!activeAreas.has(a.code)) continue;
-    const raw = priceSeries.get(a.code) || [];
-    const arr = raw.filter(p => p.t >= tmin && p.periodMs === effMs);
-    if (arr.length < 2) continue;
-    ctx.strokeStyle = a.color;
-    ctx.beginPath();
-    for (let i = 0; i < arr.length; i++) {
-      const x = xs(arr[i].t);
-      const y = ys(arr[i].price);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
+  ctx.beginPath();
+  for (let i = 0; i < line.length; i++) {
+    const x = xs(line[i].t);
+    const y = ys(line[i].price);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
   }
+  ctx.stroke();
 }
 
 // Gridpool drill-down (3-pane master-detail): the pool list cache
@@ -1323,6 +1414,7 @@ setInterval(() => {
 (async () => {
   initDensity();
   initChartWindow();
+  initChartPeriod();
   // Restore book + trades dropdown choices from localStorage so
   // the first render uses the user's last picks instead of the
   // defaults. Validation against the live period set happens
@@ -1337,7 +1429,6 @@ setInterval(() => {
   await loadClock();
   tickClock();
   renderSparkbars();
-  renderChartLegend();
   renderFilterChips();
   drawChart();
   setPill('pill-trades', 'down', 'trades');

@@ -47,7 +47,11 @@
               <option value="240">4 hours</option>
             </select>
           </label>
-          <div class="chart-legend" id="chart-legend"></div>
+          <label>delivery
+            <select id="chart-period-select" onchange="setChartPeriod(this.value)">
+              <option value="auto">auto (next contract)</option>
+            </select>
+          </label>
         </div>
       </div>
       <canvas id="price-chart"></canvas>
