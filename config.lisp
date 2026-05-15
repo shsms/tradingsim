@@ -42,44 +42,51 @@
 
 ;; --- TSO regions ----------------------------------------------------------
 ;;
-;; Four German TSO control zones treated as separate delivery areas.
-;; Each gets its own fleet so per-region liquidity profiles are
-;; observable. Volume share is roughly TenneT ~40% > Amprion ~30% >
-;; 50Hertz ~20% > TransnetBW ~10%, and the size tables below track
-;; that.
+;; Four German TSO control zones treated as separate delivery areas
+;; for redispatch / physical purposes — each carries its own weather
+;; location and its own aggressor fleet so per-region liquidity
+;; profiles stay observable. The MM, on the other hand, is one fleet
+;; covering all four areas at the same price: Germany is a single
+;; bidding zone for both day-ahead and intraday wholesale, so quotes
+;; should clear at one national number regardless of which TSO owns
+;; the wire. The fleet's reference baseline is the average of
+;; effective_ref across the four weather locations.
 ;;
 ;; Per row:
-;;   (eic, prefix, mm-sizes-per-band, ag-sizes-per-profile)
+;;   (eic, prefix, ag-sizes-per-profile)
 
 (setq areas
-      '(("10YDE-EON------1"   "tn"  (1.5 1.1 0.7 0.4)  (0.3 0.7 1.4 2.0))
-        ("10YDE-RWENET---I"   "am"  (1.2 0.9 0.6 0.4)  (0.2 0.5 1.0 1.4))
-        ("10YDE-VE-------2"   "hz"  (0.6 0.5 0.3 0.2)  (0.2 0.3 0.6 0.9))
-        ("10YDE-ENBW-----N"   "bw"  (0.3 0.2 0.2 0.1)  (0.1 0.2 0.3 0.4))))
+      '(("10YDE-EON------1"   "tn"  (0.3 0.7 1.4 2.0))
+        ("10YDE-RWENET---I"   "am"  (0.2 0.5 1.0 1.4))
+        ("10YDE-VE-------2"   "hz"  (0.2 0.3 0.6 0.9))
+        ("10YDE-ENBW-----N"   "bw"  (0.1 0.2 0.3 0.4))))
 
 ;; Markets + a single multi-area gridpool + all-pairs SIDC coupling.
 (register-markets (mapcar 'car areas))
 (%make-gridpool :id 1 :name "default" :areas (mapcar 'car areas))
 (couple-all-pairs (mapcar 'car areas))
 
-;; Per-area MM + aggressor fleets. Each fleet covers a rolling
-;; 48-quarter window: FleetManager owns one MM (and one aggressor
-;; per profile) per delivery contract in the window, retiring on
-;; gate and topping up at the far edge each 15-min boundary. Seeds
-;; auto-assigned per fleet call so RNG streams don't collide.
+;; One national MM fleet covering all four DE control zones at the
+;; same price. The size table is the aggregate of what the four
+;; per-area fleets used to carry (sum of front bands ≈ 3.6 MW, etc.),
+;; so total liquidity per book matches the old per-area depth while
+;; pricing is unified.
+(mm-fleet :areas (mapcar 'car areas)
+          :prefix "de"
+          :sizes '(3.6 2.7 1.8 1.1)
+          :refresh-ms mm-refresh-ms)
+
+;; Per-area aggressor fleets keep the per-region volume profile
+;; (TN ~40%, AM ~30%, HZ ~20%, BW ~10%). rates-base doubled vs the
+;; aggressor-fleet defaults (500 1500 3500 8000) — calmer trade
+;; tape (~half the prints per second). Hot-reloadable: saving this
+;; file re-runs the fleet primitive, which writes the new rates
+;; into the fleet's shared params; per-contract aggressors apply
+;; them on their next fire.
 (dolist (entry areas)
-  (mm-fleet :area (car entry)
-            :prefix (cadr entry)
-            :sizes (caddr entry)
-            :refresh-ms mm-refresh-ms)
-  ;; rates-base doubled vs the aggressor-fleet defaults
-  ;; (500 1500 3500 8000) — calmer trade tape (~half the prints per
-  ;; second). Hot-reloadable: saving this file re-runs the fleet
-  ;; primitive, which writes the new rates into the fleet's shared
-  ;; params; per-contract aggressors apply them on their next fire.
   (aggressor-fleet :area (car entry)
                    :prefix (cadr entry)
-                   :sizes (cadddr entry)
+                   :sizes (caddr entry)
                    :rates-base '(1000 3000 7000 16000)))
 
 ;; --- International coupling ----------------------------------------------
