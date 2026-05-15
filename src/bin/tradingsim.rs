@@ -151,7 +151,7 @@ async fn main() {
         log::info!("No MM fleets in lisp config — spawning default fallback fleet");
         manager.lock().add_mm_fleet(MmFleetSpec {
             name: "default".into(),
-            area: area.code.clone(),
+            areas: vec![area.code.clone()],
             window_quarters: 16,
             shared_params: Arc::new(RwLock::new(MmFleetParams::default())),
             seed_base: 0,

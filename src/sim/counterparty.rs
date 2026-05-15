@@ -26,7 +26,13 @@ use crate::sim::world::World;
 /// Knobs the binary (and later, lisp) sets per market-maker.
 #[derive(Clone, Debug)]
 pub struct MarketMakerConfig {
-    pub area: Area,
+    /// One MM can quote into multiple area books at the same prices.
+    /// `refresh` posts a bid + ask in each entry, so a German MM
+    /// covering TN/AM/HZ/BW prints one national price across all
+    /// four books — close to reality, where Germany is a single
+    /// bidding zone regardless of which TSO controls the wire.
+    /// Single-area fleets just pass a one-entry vector.
+    pub areas: Vec<Area>,
     pub period: DeliveryPeriod,
     pub currency: Currency,
     /// Fundamentals target, EUR/MWh. The scenario bias tick rewrites
@@ -77,7 +83,7 @@ pub struct MarketMakerConfig {
 impl MarketMakerConfig {
     pub fn default_for(area: Area, period: DeliveryPeriod) -> Self {
         Self {
-            area,
+            areas: vec![area],
             period,
             currency: Currency::Eur,
             reference_baseline: dec!(85.00),
@@ -170,8 +176,10 @@ pub type SharedFleetParams = Arc<RwLock<MmFleetParams>>;
 
 pub struct MarketMaker {
     config: SharedConfig,
-    bid_id: Option<OrderId>,
-    ask_id: Option<OrderId>,
+    /// One (area, order id) per area the MM posts the current bid in.
+    /// Parallel to `ask_ids`; both are rebuilt every refresh.
+    bid_ids: Vec<(Area, OrderId)>,
+    ask_ids: Vec<(Area, OrderId)>,
     rng: SmallRng,
 }
 
@@ -183,8 +191,8 @@ impl MarketMaker {
     pub fn with_shared_config(config: SharedConfig, seed: u64) -> Self {
         Self {
             config,
-            bid_id: None,
-            ask_id: None,
+            bid_ids: Vec::new(),
+            ask_ids: Vec::new(),
             rng: SmallRng::seed_from_u64(seed),
         }
     }
@@ -196,16 +204,16 @@ impl MarketMaker {
         self.config.clone()
     }
 
-    /// Cancel any resting bid/ask the MM still has on the book and
+    /// Cancel any resting bids/asks the MM still has on the books and
     /// forget them. Called by the FleetManager when retiring a
     /// per-contract MM whose delivery period has gated — leaves
-    /// the contract's book clean instead of carrying stale quotes
+    /// each covered book clean instead of carrying stale quotes
     /// against orders that can no longer trade.
     pub fn cancel_resting(&mut self, world: &mut World) {
-        if let Some(id) = self.bid_id.take() {
+        for (_, id) in self.bid_ids.drain(..) {
             world.cancel_counterparty_order(id);
         }
-        if let Some(id) = self.ask_id.take() {
+        for (_, id) in self.ask_ids.drain(..) {
             world.cancel_counterparty_order(id);
         }
     }
@@ -238,18 +246,26 @@ impl MarketMaker {
             return;
         }
 
-        if let Some(id) = self.bid_id.take() {
+        for (_, id) in self.bid_ids.drain(..) {
             world.cancel_counterparty_order(id);
         }
-        if let Some(id) = self.ask_id.take() {
+        for (_, id) in self.ask_ids.drain(..) {
             world.cancel_counterparty_order(id);
         }
 
-        if let Ok(id) = world.submit_counterparty_order(build(&cfg, Side::Buy, bid_price), now) {
-            self.bid_id = Some(id);
-        }
-        if let Ok(id) = world.submit_counterparty_order(build(&cfg, Side::Sell, ask_price), now) {
-            self.ask_id = Some(id);
+        for area in &cfg.areas {
+            if let Ok(id) = world.submit_counterparty_order(
+                build(&cfg, area, Side::Buy, bid_price),
+                now,
+            ) {
+                self.bid_ids.push((area.clone(), id));
+            }
+            if let Ok(id) = world.submit_counterparty_order(
+                build(&cfg, area, Side::Sell, ask_price),
+                now,
+            ) {
+                self.ask_ids.push((area.clone(), id));
+            }
         }
     }
 
@@ -271,10 +287,10 @@ impl MarketMaker {
     ///    volatility increases as delivery approaches; this
     ///    approximates that ramp.
     fn step_reference(&mut self, world: &World, now: DateTime<Utc>) {
-        let (area, period, baseline, current, follow_rate, walk_amp) = {
+        let (areas, period, baseline, current, follow_rate, walk_amp) = {
             let c = self.config.read();
             (
-                c.area.clone(),
+                c.areas.clone(),
                 c.period,
                 c.reference_baseline,
                 c.reference_price,
@@ -287,10 +303,14 @@ impl MarketMaker {
 
         if follow_rate > Decimal::ZERO {
             let hist = world.public_trade_history();
-            let last = hist
-                .iter()
-                .rev()
-                .find(|t| t.period == period && (t.buy_area == area || t.sell_area == area));
+            // Any trade touching one of the fleet's areas counts as
+            // feedback for this national reference. Most fleets carry
+            // a single area; the four-area DE fleet sees a cross-area
+            // print on TN↔AM as relevant signal the same way TN↔TN is.
+            let last = hist.iter().rev().find(|t| {
+                t.period == period
+                    && (areas.contains(&t.buy_area) || areas.contains(&t.sell_area))
+            });
             if let Some(t) = last {
                 new_ref += (t.price - current) * follow_rate;
             }
@@ -549,9 +569,9 @@ impl Aggressor {
     }
 }
 
-fn build(cfg: &MarketMakerConfig, side: Side, price: Decimal) -> Order {
+fn build(cfg: &MarketMakerConfig, area: &Area, side: Side, price: Decimal) -> Order {
     Order::limit(
-        cfg.area.clone(),
+        area.clone(),
         cfg.period,
         side,
         price,
@@ -594,7 +614,7 @@ mod tests {
     fn refresh_posts_bid_and_ask_around_reference() {
         let (mut world, cfg) = setup_world();
         let key = crate::sim::world::ContractKey {
-            area: cfg.area.clone(),
+            area: cfg.areas[0].clone(),
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg.clone(), 42);
@@ -609,7 +629,7 @@ mod tests {
     fn refresh_cancels_previous_quotes() {
         let (mut world, cfg) = setup_world();
         let key = crate::sim::world::ContractKey {
-            area: cfg.area.clone(),
+            area: cfg.areas[0].clone(),
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
@@ -626,7 +646,7 @@ mod tests {
         let (mut world, mut cfg) = setup_world();
         cfg.demand = dec!(0.20);
         let key = crate::sim::world::ContractKey {
-            area: cfg.area.clone(),
+            area: cfg.areas[0].clone(),
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
@@ -641,7 +661,7 @@ mod tests {
         let (mut world, mut cfg) = setup_world();
         cfg.surplus = dec!(0.20);
         let key = crate::sim::world::ContractKey {
-            area: cfg.area.clone(),
+            area: cfg.areas[0].clone(),
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
@@ -654,7 +674,7 @@ mod tests {
     fn shared_config_mutation_takes_effect_on_next_refresh() {
         let (mut world, cfg) = setup_world();
         let key = crate::sim::world::ContractKey {
-            area: cfg.area.clone(),
+            area: cfg.areas[0].clone(),
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
@@ -677,7 +697,7 @@ mod tests {
         // After MM refresh: best ask should be reference + spread = 85.4.
         let ask_before = world
             .book(&crate::sim::world::ContractKey {
-                area: mm_cfg.area.clone(),
+                area: mm_cfg.areas[0].clone(),
                 period: mm_cfg.period,
             })
             .unwrap()
@@ -686,7 +706,7 @@ mod tests {
         let ag_cfg = AggressorConfig {
             side_bias: 1.0, // always buy
             size: dec!(0.5),
-            ..AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period)
+            ..AggressorConfig::default_for(mm_cfg.areas[0].clone(), mm_cfg.period)
         };
         let mut ag = Aggressor::new(ag_cfg, 7);
         ag.fire(&mut world, t0());
@@ -694,7 +714,7 @@ mod tests {
         // started at 1.0 it's now 0.5.
         let depth = world
             .book(&crate::sim::world::ContractKey {
-                area: mm_cfg.area.clone(),
+                area: mm_cfg.areas[0].clone(),
                 period: mm_cfg.period,
             })
             .unwrap()
@@ -712,13 +732,13 @@ mod tests {
         // blindly. The slippage clamp now stops that.
         let (mut world, mm_cfg) = setup_world();
         let key = crate::sim::world::ContractKey {
-            area: mm_cfg.area.clone(),
+            area: mm_cfg.areas[0].clone(),
             period: mm_cfg.period,
         };
         // Seed a far-off-market sell. Two crossing counterparty
         // orders place it without anyone immediately taking it.
         let stale_sell = Order::limit(
-            mm_cfg.area.clone(),
+            mm_cfg.areas[0].clone(),
             mm_cfg.period,
             Side::Sell,
             dec!(173.00),
@@ -737,7 +757,7 @@ mod tests {
             size: dec!(0.5),
             reference_price: dec!(80.00),
             max_slippage: dec!(5.00),
-            ..AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period)
+            ..AggressorConfig::default_for(mm_cfg.areas[0].clone(), mm_cfg.period)
         };
         let mut ag = Aggressor::new(ag_cfg, 0);
         for _ in 0..10 {
@@ -753,12 +773,12 @@ mod tests {
     fn aggressor_skips_empty_book() {
         let (mut world, mm_cfg) = setup_world();
         // No MM refresh — book is empty for this contract.
-        let ag_cfg = AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period);
+        let ag_cfg = AggressorConfig::default_for(mm_cfg.areas[0].clone(), mm_cfg.period);
         let mut ag = Aggressor::new(ag_cfg, 0);
         ag.fire(&mut world, t0());
         // No panic, no trades — graceful no-op.
         let key = crate::sim::world::ContractKey {
-            area: mm_cfg.area.clone(),
+            area: mm_cfg.areas[0].clone(),
             period: mm_cfg.period,
         };
         assert!(world.book(&key).map(|b| b.is_empty()).unwrap_or(true));
@@ -773,7 +793,7 @@ mod tests {
         // crossing counterparty orders on an empty book (no MM
         // resting yet to interfere with the match).
         let mk = |side, price| {
-            Order::limit(cfg.area.clone(), cfg.period, side, price, dec!(0.1), Currency::Eur)
+            Order::limit(cfg.areas[0].clone(), cfg.period, side, price, dec!(0.1), Currency::Eur)
         };
         world
             .submit_counterparty_order(mk(Side::Sell, dec!(90.0)), t0())
@@ -796,7 +816,7 @@ mod tests {
         cfg.demand = dec!(10);
         cfg.surplus = dec!(10);
         let key = crate::sim::world::ContractKey {
-            area: cfg.area.clone(),
+            area: cfg.areas[0].clone(),
             period: cfg.period,
         };
         let mut mm = MarketMaker::new(cfg, 42);
@@ -933,12 +953,12 @@ mod tests {
         // (e.g. repeated 55 EUR prints on night-curve contracts).
         let (mut world, mm_cfg) = setup_world();
         let key = crate::sim::world::ContractKey {
-            area: mm_cfg.area.clone(),
+            area: mm_cfg.areas[0].clone(),
             period: mm_cfg.period,
         };
         // Seed a thin MM ask at 50 with only 0.4 MW of depth.
         let thin_ask = Order::limit(
-            mm_cfg.area.clone(),
+            mm_cfg.areas[0].clone(),
             mm_cfg.period,
             Side::Sell,
             dec!(50.00),
@@ -957,7 +977,7 @@ mod tests {
             size: dec!(1.0),
             reference_price: dec!(50.00),
             max_slippage: dec!(5.00),
-            ..AggressorConfig::default_for(mm_cfg.area.clone(), mm_cfg.period)
+            ..AggressorConfig::default_for(mm_cfg.areas[0].clone(), mm_cfg.period)
         };
         let mut ag = Aggressor::new(ag_cfg, 0);
         ag.fire(&mut world, t0());

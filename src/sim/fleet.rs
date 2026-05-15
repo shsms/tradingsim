@@ -246,20 +246,29 @@ impl FleetManager {
     }
 }
 
+/// Average `effective_ref` across `area_codes`. A fleet spanning the
+/// four DE control zones gets a national reference instead of locking
+/// to any single TSO's weather — matches Germany's single-bidding-zone
+/// reality. Single-area fleets short-circuit to the same value
+/// `effective_ref` would return alone.
 fn fundamentals_at(
     curve: &SharedCurve,
     weather: &SharedWeather,
     clock: &SharedClock,
-    area_code: &str,
+    area_codes: &[String],
     period_start: DateTime<Utc>,
 ) -> Decimal {
+    debug_assert!(!area_codes.is_empty(), "fundamentals_at needs at least one area");
     let curve = curve.read();
     let weather = weather.read();
     let clock = clock.read().clone();
-    let loc = weather.for_area(area_code);
     let hour = clock.local_hour(period_start);
     let day = clock.local_day_of_year(period_start);
-    effective_ref(&curve, loc, hour, day)
+    let mut sum = Decimal::ZERO;
+    for code in area_codes {
+        sum += effective_ref(&curve, weather.for_area(code), hour, day);
+    }
+    sum / Decimal::from(area_codes.len() as i64)
 }
 
 /// Build a per-contract MM, register its view, and spawn the refresh
@@ -279,11 +288,11 @@ fn spawn_mm_contract(
         start: period_start,
         duration: DeliveryDuration::DeliveryDuration15,
     };
-    let area = Area::eic(&spec.area);
-    let seeded = fundamentals_at(&curve, &weather, &clock, &spec.area, period_start);
+    let areas: Vec<Area> = spec.areas.iter().map(|c| Area::eic(c)).collect();
+    let seeded = fundamentals_at(&curve, &weather, &clock, &spec.areas, period_start);
     let params = spec.shared_params.read().clone();
     let cfg = MarketMakerConfig {
-        area: area.clone(),
+        areas,
         period,
         currency: Currency::Eur,
         reference_baseline: seeded,
@@ -382,7 +391,13 @@ fn spawn_aggressor_contract(
         duration: DeliveryDuration::DeliveryDuration15,
     };
     let area = Area::eic(&spec.area);
-    let seeded = fundamentals_at(&curve, &weather, &clock, &spec.area, period_start);
+    let seeded = fundamentals_at(
+        &curve,
+        &weather,
+        &clock,
+        std::slice::from_ref(&spec.area),
+        period_start,
+    );
     let params = spec.shared_params.read().clone();
     let cfg = AggressorConfig {
         area: area.clone(),
@@ -481,7 +496,7 @@ mod tests {
         );
         let spec = MmFleetSpec {
             name: "test".into(),
-            area: "10YDE-EON------1".into(),
+            areas: vec!["10YDE-EON------1".into()],
             window_quarters: 4,
             shared_params: Arc::new(RwLock::new(
                 crate::sim::counterparty::MmFleetParams::default(),
@@ -514,7 +529,7 @@ mod tests {
         );
         let spec = MmFleetSpec {
             name: "test".into(),
-            area: "10YDE-EON------1".into(),
+            areas: vec!["10YDE-EON------1".into()],
             window_quarters: 2,
             shared_params: Arc::new(RwLock::new(
                 crate::sim::counterparty::MmFleetParams::default(),

@@ -376,13 +376,23 @@ fn apply_biases(
         cfg.reference_price = new_ref;
     }
     for view in mms {
-        let (area_code, period_start) = {
+        let (area_codes, period_start) = {
             let c = view.shared_config.read();
-            (c.area.code.clone(), c.period.start)
+            (
+                c.areas.iter().map(|a| a.code.clone()).collect::<Vec<_>>(),
+                c.period.start,
+            )
         };
         let bias = effective_for(period_start);
         let shift = (bias - 0.5) * bias_scale;
-        let new_ref = fundamentals(&area_code, period_start);
+        // Average effective_ref across every area the MM quotes in.
+        // A four-area DE MM gets a national baseline; a single-area
+        // fleet keeps the same per-zone reference it always had.
+        let mut sum = Decimal::ZERO;
+        for code in &area_codes {
+            sum += fundamentals(code, period_start);
+        }
+        let new_ref = sum / Decimal::from(area_codes.len().max(1) as i64);
         let mut cfg = view.shared_config.write();
         // Write the fundamentals target — the MM refresh
         // (step_reference) mean-reverts the live reference_price
@@ -616,17 +626,14 @@ mod tests {
         // value).
         let now = Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap();
         let make_mm = |quarter_offset: i64| -> MmView {
-            let cfg = MarketMakerConfig {
-                area: crate::sim::market::Area::eic("10YDE-EON------1"),
-                ..MarketMakerConfig::default_for(
-                    crate::sim::market::Area::eic("10YDE-EON------1"),
-                    DeliveryPeriod {
-                        start: next_quarter_boundary(now)
-                            + chrono::Duration::minutes(15 * quarter_offset),
-                        duration: DeliveryDuration::DeliveryDuration15,
-                    },
-                )
-            };
+            let cfg = MarketMakerConfig::default_for(
+                crate::sim::market::Area::eic("10YDE-EON------1"),
+                DeliveryPeriod {
+                    start: next_quarter_boundary(now)
+                        + chrono::Duration::minutes(15 * quarter_offset),
+                    duration: DeliveryDuration::DeliveryDuration15,
+                },
+            );
             MmView {
                 shared_config: Arc::new(RwLock::new(cfg)),
             }

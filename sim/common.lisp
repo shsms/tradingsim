@@ -89,12 +89,18 @@ product). Same :gate-offset-seconds knob as couple-all-pairs."
 
 (defun mm-fleet (&rest plist)
   "Register one MM fleet covering :quarters forward 15-min contracts
-in :area. FleetManager spawns one MM per contract in the rolling
-window and rotates them every 15 min so contracts gating off are
-retired and fresh ones at the far edge come online.
+in one or more areas. FleetManager spawns one MM per contract in
+the rolling window and rotates them every 15 min so contracts gating
+off are retired and fresh ones at the far edge come online. When
+multiple areas are passed (e.g. all four DE control zones), each MM
+posts the same bid + ask into every area's book — one national price
+across the whole zone, matching Germany's single-bidding-zone reality.
 
-  :area         EIC code (required)
-  :prefix       name prefix (required, e.g. \"tn\")
+  :area         EIC code (single-area fleet; wraps to a one-entry list)
+  :areas        list of EIC codes (multi-area fleet)
+                Either :area or :areas is required; :areas wins if both
+                are passed.
+  :prefix       name prefix (required, e.g. \"tn\" / \"de\")
   :quarters     contracts to cover (default 48)
   :sizes        list of MM sizes per band, MW
                 (default '(1.0 0.7 0.5 0.3); 4 bands across the window)
@@ -109,7 +115,9 @@ Band index for a contract at current offset Q is
 `(min (- (length sizes) 1) (/ (* Q (length sizes)) quarters))`.
 A contract enters at the back band, tightens its spread and grows
 its size as it ages forward."
-  (let* ((area (plist-get plist :area))
+  (let* ((areas (or (plist-get plist :areas)
+                    (let ((a (plist-get plist :area)))
+                      (when a (list a)))))
          (prefix (plist-get plist :prefix))
          (quarters (or (plist-get plist :quarters) 48))
          (sizes (or (plist-get plist :sizes) '(1.0 0.7 0.5 0.3)))
@@ -120,7 +128,7 @@ its size as it ages forward."
          (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base))))
     (%make-mm-fleet
      :name (format "%s-fleet" prefix)
-     :area area
+     :areas areas
      :window-quarters quarters
      :size-bands sizes
      :spread-bands spreads

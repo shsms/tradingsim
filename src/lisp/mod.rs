@@ -49,17 +49,21 @@ impl Default for Metadata {
 }
 
 /// One market-maker fleet as configured by `(%make-mm-fleet …)`.
-/// A fleet covers `window_quarters` rolling forward contracts in one
-/// area; the binary's FleetManager spawns one MM per contract in the
-/// window at startup, and one new MM at each quarter rotation while
-/// retiring the contract that just gated. `shared_params` carries
-/// the band tables + scalar knobs every MM in the fleet re-reads on
-/// its refresh; hot reload writes new values into the RwLock in
-/// place so running MMs pick them up without restart.
+/// A fleet covers `window_quarters` rolling forward contracts across
+/// one or more areas; the binary's FleetManager spawns one MM per
+/// contract in the window at startup, and one new MM at each quarter
+/// rotation while retiring the contract that just gated. Each MM
+/// posts a single bid + ask in every one of `areas`'s books at the
+/// same price — so a fleet with all four DE control zones produces a
+/// single national price across TN/AM/HZ/BW, matching Germany's
+/// single-bidding-zone reality. `shared_params` carries the band
+/// tables + scalar knobs every MM in the fleet re-reads on its
+/// refresh; hot reload writes new values into the RwLock in place so
+/// running MMs pick them up without restart.
 #[derive(Clone)]
 pub struct MmFleetSpec {
     pub name: String,
-    pub area: String,
+    pub areas: Vec<String>,
     pub window_quarters: i64,
     pub shared_params: SharedFleetParams,
     /// First seed in the per-MM seed range. The manager assigns
@@ -1044,7 +1048,12 @@ fn f64_to_dec(v: f64) -> Decimal {
 AsPlist! {
     pub struct MakeMmFleetArgs {
         name: String,
-        area<":area">: String,
+        /// EIC codes the fleet quotes into. One entry behaves like the
+        /// old single-area fleet; pass the four DE control zones for a
+        /// single national price across TN/AM/HZ/BW. The `mm-fleet`
+        /// helper in `sim/common.lisp` accepts either `:area STR` or
+        /// `:areas (LIST …)` and forwards them here.
+        areas<":areas">: Vec<String>,
         /// How many forward 15-min contracts the fleet covers. Default
         /// 48 (12 hours). FleetManager spawns one MM per quarter in
         /// the window at startup and one new MM at each quarter
@@ -1094,21 +1103,27 @@ fn register_mm_fleets(
                 refresh_ms: a.refresh_ms.unwrap_or(default_params.refresh_ms as i64).max(100) as u64,
                 tick: default_params.tick,
             };
+            if a.areas.is_empty() {
+                return Err(Error::os_error(
+                    "%make-mm-fleet requires :areas to be a non-empty list of EIC codes"
+                        .to_string(),
+                ));
+            }
             let mut map = mm_fleets.lock();
             if let Some(existing) = map.get(&a.name) {
                 // Hot reload: mutate the existing RwLock so the
                 // SharedFleetParams Arc identity survives; running
                 // per-contract MMs see the new bands on next refresh.
-                // window_quarters + seed_base stay frozen — they're
-                // structural and changing them mid-run would require
-                // retiring/respawning MMs.
+                // window_quarters + seed_base + areas stay frozen —
+                // they're structural and changing them mid-run would
+                // require retiring/respawning MMs.
                 *existing.shared_params.write() = params;
             } else {
                 map.insert(
                     a.name.clone(),
                     MmFleetSpec {
                         name: a.name.clone(),
-                        area: a.area,
+                        areas: a.areas,
                         window_quarters: a.window_quarters.unwrap_or(48).max(1),
                         shared_params: Arc::new(RwLock::new(params)),
                         seed_base: a.seed_base.unwrap_or(0) as u64,
@@ -1217,7 +1232,7 @@ mod tests {
             r#"
             (%make-mm-fleet
               :name "tn-fleet"
-              :area "10YDE-EON------1"
+              :areas '("10YDE-EON------1")
               :window-quarters 24
               :size-bands '(2.0 1.5 1.0)
               :spread-bands '(0.40 0.55 0.70)
@@ -1232,7 +1247,7 @@ mod tests {
         assert_eq!(fleets.len(), 1);
         let f = &fleets[0];
         assert_eq!(f.name, "tn-fleet");
-        assert_eq!(f.area, "10YDE-EON------1");
+        assert_eq!(f.areas, vec!["10YDE-EON------1".to_string()]);
         assert_eq!(f.window_quarters, 24);
         assert_eq!(f.seed_base, 5000);
         let p = f.shared_params.read();
@@ -1247,7 +1262,7 @@ mod tests {
         // Omitting :size-bands / :spread-bands falls back to the
         // 4-band MmFleetParams::default tables.
         let f = write_tmp(
-            r#"(%make-mm-fleet :name "x" :area "10YDE-EON------1")"#,
+            r#"(%make-mm-fleet :name "x" :areas '("10YDE-EON------1"))"#,
         );
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         let fleets = cfg.mm_fleets();
@@ -1255,6 +1270,35 @@ mod tests {
         assert_eq!(p.size_bands.len(), 4);
         assert_eq!(p.spread_bands.len(), 4);
         assert_eq!(p.refresh_ms, 2000);
+    }
+
+    #[tokio::test]
+    async fn make_mm_fleet_accepts_multiple_areas() {
+        // The DE-wide use case: one fleet that quotes into all four
+        // TSO control zones at the same price.
+        let f = write_tmp(
+            r#"
+            (%make-mm-fleet
+              :name "de-fleet"
+              :areas '("10YDE-EON------1"
+                       "10YDE-RWENET---I"
+                       "10YDE-VE-------2"
+                       "10YDE-ENBW-----N"))
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let fleets = cfg.mm_fleets();
+        assert_eq!(fleets.len(), 1);
+        assert_eq!(fleets[0].areas.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn make_mm_fleet_rejects_empty_areas() {
+        let f = write_tmp(r#"(%make-mm-fleet :name "bad" :areas '())"#);
+        match Config::new(f.path().to_str().unwrap()) {
+            Ok(_) => panic!("expected empty-areas error"),
+            Err(e) => assert!(e.contains("non-empty list"), "got: {e}"),
+        }
     }
 
     #[tokio::test]
@@ -1341,7 +1385,7 @@ mod tests {
         use std::io::{Seek, SeekFrom, Write};
         let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
         f.write_all(
-            br#"(%make-mm-fleet :name "tn" :area "10YDE-EON------1" :refresh-ms 2000)"#,
+            br#"(%make-mm-fleet :name "tn" :areas '("10YDE-EON------1") :refresh-ms 2000)"#,
         )
         .unwrap();
         f.flush().unwrap();
@@ -1352,7 +1396,7 @@ mod tests {
         f.as_file().set_len(0).unwrap();
         f.as_file().seek(SeekFrom::Start(0)).unwrap();
         f.write_all(
-            br#"(%make-mm-fleet :name "tn" :area "10YDE-EON------1" :refresh-ms 500)"#,
+            br#"(%make-mm-fleet :name "tn" :areas '("10YDE-EON------1") :refresh-ms 500)"#,
         )
         .unwrap();
         f.flush().unwrap();
