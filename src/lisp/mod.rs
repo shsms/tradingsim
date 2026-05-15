@@ -1034,6 +1034,7 @@ AsPlist! {
         surplus<":surplus">: Option<f64> {= None},
         noise<":noise">: Option<f64> {= None},
         seed<":seed">: Option<i64> {= None},
+        refresh_ms<":refresh-ms">: Option<i64> {= None},
     }
 }
 
@@ -1096,6 +1097,7 @@ fn register_market_makers(
                 price_noise: a.noise.map(f64_to_dec).unwrap_or_else(|| f64_to_dec(0.10)),
                 tick: f64_to_dec(0.01),
                 follow_last_trade: Decimal::ZERO,
+                refresh_ms: a.refresh_ms.unwrap_or(2000).max(100) as u64,
             };
             // demand/surplus are already in cfg; nothing else to set.
             let _ = &mut cfg;
@@ -1158,9 +1160,16 @@ fn register_market_makers(
     mk_setter(ctx, "set-mm-noise", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         c.price_noise = f64_to_dec(v);
     });
-    mk_setter(ctx, "set-mm-follow-last-trade", market_makers, "market-maker", mm_cfg, |c, v| {
+    mk_setter(ctx, "set-mm-follow-last-trade", market_makers.clone(), "market-maker", mm_cfg, |c, v| {
         // 0.0 = static; 1.0 = snap to last trade each refresh.
         c.follow_last_trade = f64_to_dec(v.clamp(0.0, 1.0));
+    });
+    mk_setter(ctx, "set-mm-refresh-ms", market_makers, "market-maker", mm_cfg, |c, v| {
+        // Floor at 100 ms — see MarketMakerConfig::refresh_ms for
+        // why MM refresh wants a higher floor than aggressor fire.
+        // Negative / NaN inputs collapse to 100 via the i64 cast +
+        // .max().
+        c.refresh_ms = (v as i64).max(100) as u64;
     });
 }
 
@@ -1343,6 +1352,81 @@ mod tests {
             Ok(_) => panic!("expected error"),
             Err(e) => assert!(e.contains("nonexistent"), "got: {e}"),
         }
+    }
+
+    #[tokio::test]
+    async fn make_mm_writes_refresh_ms_into_shared_config() {
+        let f = write_tmp(
+            r#"(%make-market-maker :name "m0" :area "10YDE-EON------1" :refresh-ms 750)"#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 750);
+    }
+
+    #[tokio::test]
+    async fn make_mm_default_refresh_ms_is_2000() {
+        let f = write_tmp(
+            r#"(%make-market-maker :name "m0" :area "10YDE-EON------1")"#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 2000);
+    }
+
+    #[tokio::test]
+    async fn set_mm_refresh_ms_updates_shared_config() {
+        let f = write_tmp(
+            r#"
+            (%make-market-maker :name "m0" :area "10YDE-EON------1")
+            (set-mm-refresh-ms "m0" 1250)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 1250);
+    }
+
+    #[tokio::test]
+    async fn set_mm_refresh_ms_floors_at_100() {
+        let f = write_tmp(
+            r#"
+            (%make-market-maker :name "m0" :area "10YDE-EON------1")
+            (set-mm-refresh-ms "m0" 10)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(cfg.market_makers()[0].shared_config.read().refresh_ms, 100);
+    }
+
+    #[tokio::test]
+    async fn remake_mm_preserves_shared_config_arc_and_updates_refresh() {
+        // Same hot-reload invariant the aggressor test pins down:
+        // the SharedConfig Arc the running task holds survives a
+        // reload(), and the new :refresh-ms value lands in it.
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
+        f.write_all(
+            br#"(%make-market-maker :name "m0" :area "10YDE-EON------1" :refresh-ms 2000)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let arc_before = cfg.market_makers()[0].shared_config.clone();
+        assert_eq!(arc_before.read().refresh_ms, 2000);
+
+        f.as_file().set_len(0).unwrap();
+        f.as_file().seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(
+            br#"(%make-market-maker :name "m0" :area "10YDE-EON------1" :refresh-ms 500)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        cfg.reload().unwrap();
+
+        let arc_after = cfg.market_makers()[0].shared_config.clone();
+        assert!(
+            Arc::ptr_eq(&arc_before, &arc_after),
+            "SharedConfig Arc identity must survive hot reload"
+        );
+        assert_eq!(arc_after.read().refresh_ms, 500);
     }
 
     #[tokio::test]

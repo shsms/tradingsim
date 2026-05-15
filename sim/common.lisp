@@ -99,6 +99,12 @@ binary's spawn task so the fleet always covers the next-N quarters.
   :reference-slope  reference walk per quarter, EUR (default 0.10)
   :noise            random-walk noise on the reference (default 0.10)
   :follow           follow-last-trade rate (default 0.10; 0 = static)
+  :refresh-ms       per-MM refresh cadence in ms (default 2000); the
+                    sim's MarketMakerConfig default, applied to every
+                    MM in the fleet. Hot-reloadable: saving config.lisp
+                    re-runs %make-market-maker, which writes the new
+                    value into the shared config the running task
+                    reads on its next iteration.
   :seed-base        starting seed (default: auto from a global counter)
 
 The band index for quarter i is `(* i n) / quarters` where n is the
@@ -113,6 +119,7 @@ spaced bands across the window."
          (ref-slope (or (plist-get plist :reference-slope) 0.10))
          (noise (or (plist-get plist :noise) 0.10))
          (follow (or (plist-get plist :follow) 0.10))
+         (refresh-ms (or (plist-get plist :refresh-ms) 2000))
          (seed-base (or (plist-get plist :seed-base) (fleet-next-seed-base)))
          (band-count (length sizes)))
     (dotimes (i quarters)
@@ -126,6 +133,7 @@ spaced bands across the window."
          :spread (nth band spreads)
          :size (nth band sizes)
          :noise noise
+         :refresh-ms refresh-ms
          :seed (+ seed-base i))
         (when (> follow 0)
           (set-mm-follow-last-trade name follow))))))

@@ -64,6 +64,14 @@ pub struct MarketMakerConfig {
     /// at the start of each refresh. 0 = static reference;
     /// 1.0 = snap to last trade each tick.
     pub follow_last_trade: Decimal,
+    /// Interval, milliseconds, between refresh() calls on the spawn
+    /// task. Lives on the shared config (mirrors aggressor rate_ms)
+    /// so editing config.lisp and hot-reloading — or calling
+    /// `(set-mm-refresh-ms …)` — takes effect on the next iteration.
+    /// 100 ms floor is enforced by every write site: MM refresh
+    /// cancels + reposts both quotes under `world.write()`, so a
+    /// sub-100 ms cadence × 192 MMs would saturate the matcher.
+    pub refresh_ms: u64,
 }
 
 impl MarketMakerConfig {
@@ -81,6 +89,10 @@ impl MarketMakerConfig {
             price_noise: dec!(0.10),
             tick: dec!(0.01),
             follow_last_trade: dec!(0),
+            // Half-life math in step_reference assumes a 2 s cadence —
+            // ~70 s mean-reversion. Changing this default would also
+            // change those quoted times.
+            refresh_ms: 2000,
         }
     }
 }

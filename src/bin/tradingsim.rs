@@ -23,7 +23,6 @@ use tradingsim::{
     ui as ui_server,
 };
 
-const MM_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// Fallback MM coverage when no config.lisp is loaded.
 const MM_HOURS_COVERED: i64 = 4;
 
@@ -33,28 +32,37 @@ fn next_hour_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp(bucket, 0).unwrap()
 }
 
-/// Spawn one tokio task that ticks `mm.refresh(...)` every
-/// `MM_REFRESH_INTERVAL` against the shared world. `quarter_offset`
-/// rolls the MM's delivery period forward each tick so the MM
-/// always quotes the contract starting that many quarter-hours from
-/// the next 15-min boundary.
+/// Spawn one tokio task that calls `mm.refresh(...)` on the cadence
+/// the MM's shared config carries (`refresh_ms`, default 2000 ms,
+/// hot-reloadable). `quarter_offset` rolls the MM's delivery period
+/// forward each tick so the MM always quotes the contract starting
+/// that many quarter-hours from the next 15-min boundary.
 fn spawn_mm_task(world: Arc<RwLock<World>>, mut mm: MarketMaker, quarter_offset: i64) {
     let cfg = mm.shared_config();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(MM_REFRESH_INTERVAL);
         loop {
-            tick.tick().await;
             let now = Utc::now();
             let new_start = tradingsim::lisp::next_quarter_boundary(now)
                 + chrono::Duration::minutes(15 * quarter_offset);
-            {
+            // Bump period + read refresh_ms under one lock so a
+            // concurrent (set-mm-refresh-ms …) can't race the
+            // period roll.
+            let wait_ms = {
                 let mut c = cfg.write();
                 if c.period.start != new_start {
                     c.period.start = new_start;
                 }
+                c.refresh_ms
+            };
+            // Refresh first, sleep after — preserves the previous
+            // tokio::time::interval(2s) behaviour where the first
+            // refresh fired immediately and the wait sat between
+            // refreshes, not before the first one.
+            {
+                let mut w = world.write();
+                mm.refresh(&mut w, now);
             }
-            let mut w = world.write();
-            mm.refresh(&mut w, now);
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
         }
     });
 }
