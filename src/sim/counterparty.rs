@@ -196,6 +196,20 @@ impl MarketMaker {
         self.config.clone()
     }
 
+    /// Cancel any resting bid/ask the MM still has on the book and
+    /// forget them. Called by the FleetManager when retiring a
+    /// per-contract MM whose delivery period has gated — leaves
+    /// the contract's book clean instead of carrying stale quotes
+    /// against orders that can no longer trade.
+    pub fn cancel_resting(&mut self, world: &mut World) {
+        if let Some(id) = self.bid_id.take() {
+            world.cancel_counterparty_order(id);
+        }
+        if let Some(id) = self.ask_id.take() {
+            world.cancel_counterparty_order(id);
+        }
+    }
+
     /// Step the reference, compute a fresh bid + ask, then — only
     /// once the new pair is known to be valid — cancel the old
     /// quotes and post the new ones.

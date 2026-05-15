@@ -4,6 +4,7 @@ pub mod counterparty;
 pub mod curve;
 pub mod decimal;
 pub mod demand;
+pub mod fleet;
 pub mod gridpool;
 pub mod market;
 pub mod matching;
