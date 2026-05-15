@@ -124,7 +124,7 @@ async fn main() {
         world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
     }
 
-    let trading_addr = lisp_config.trading_addr();
+    let grpc_addr_str = lisp_config.grpc_addr();
 
     // Drain tulisp-async timers (every / run-with-timer) on a fixed
     // cadence so scheduled callbacks in config.lisp actually fire.
@@ -264,48 +264,31 @@ async fn main() {
         });
     }
 
-    // Weather forecast service: exposes the sim's internal weather
-    // state via the Frequenz weather API. Sibling port to the
-    // electricity-trading gRPC, configurable via
-    // (set-weather-socket-addr "…").
-    {
+    // Both gRPC services share one socket — tonic multiplexes by
+    // service path, so a client connecting once to the configured
+    // grpc-addr reaches ElectricityTrading and WeatherForecast.
+    // Configurable via `(set-grpc-socket-addr "…")`.
+    let trading_service = ElectricityTradingServiceServer::new(
+        ElectricityTradingServer::new(Arc::clone(&world)),
+    );
+    let weather_service = {
         use tradingsim::proto::weather::weather_forecast_service_server::WeatherForecastServiceServer;
         use tradingsim::weather_server::WeatherForecastServer;
-        let weather_handle = lisp_config.weather();
-        let cadence_handle = lisp_config.weather_cadence();
-        let weather_addr_str = lisp_config.weather_addr();
-        let weather_addr: std::net::SocketAddr = weather_addr_str.parse().unwrap_or_else(|e| {
-            log::error!(
-                "Invalid weather-socket-addr {weather_addr_str:?} ({e}); falling back to [::1]:8820"
-            );
-            "[::1]:8820".parse().unwrap()
-        });
-        tokio::spawn(async move {
-            let service = WeatherForecastServiceServer::new(
-                WeatherForecastServer::new(weather_handle).with_cadence(cadence_handle),
-            );
-            log::info!("WeatherForecast gRPC server listening on {weather_addr}");
-            if let Err(e) = Server::builder()
-                .add_service(service)
-                .serve(weather_addr)
-                .await
-            {
-                log::error!("Weather server exited: {e}");
-            }
-        });
-    }
+        WeatherForecastServiceServer::new(
+            WeatherForecastServer::new(lisp_config.weather())
+                .with_cadence(lisp_config.weather_cadence()),
+        )
+    };
 
-    let service =
-        ElectricityTradingServiceServer::new(ElectricityTradingServer::new(Arc::clone(&world)));
-
-    let addr = trading_addr.parse().unwrap_or_else(|e| {
-        log::error!("invalid trading-addr {trading_addr:?}: {e}");
+    let grpc_addr: std::net::SocketAddr = grpc_addr_str.parse().unwrap_or_else(|e| {
+        log::error!("invalid grpc-socket-addr {grpc_addr_str:?}: {e}");
         std::process::exit(1);
     });
-    log::info!("ElectricityTrading gRPC server listening on {addr}");
+    log::info!("gRPC services (ElectricityTrading + WeatherForecast) listening on {grpc_addr}");
     Server::builder()
-        .add_service(service)
-        .serve(addr)
+        .add_service(trading_service)
+        .add_service(weather_service)
+        .serve(grpc_addr)
         .await
         .unwrap();
 }

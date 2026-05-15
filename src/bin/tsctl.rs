@@ -26,7 +26,9 @@ use tradingsim::proto::trading::{
 #[derive(Parser, Debug)]
 #[command(name = "tsctl", version, about = "tradingsim client")]
 struct Cli {
-    /// gRPC endpoint for the tradingsim server.
+    /// gRPC endpoint for the tradingsim server. Both
+    /// ElectricityTrading and WeatherForecast are multiplexed on
+    /// this one socket (matching what tradingsim binds).
     #[arg(long, default_value = "http://[::1]:8810")]
     addr: String,
 
@@ -34,11 +36,6 @@ struct Cli {
     /// the gRPC channel).
     #[arg(long, default_value = "http://127.0.0.1:8811")]
     ui_addr: String,
-
-    /// gRPC endpoint for the WeatherForecastService (sibling of the
-    /// trading service; binary defaults to [::1]:8820).
-    #[arg(long, default_value = "http://[::1]:8820")]
-    weather_addr: String,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -907,7 +904,7 @@ async fn main() {
                 Ok(())
             }
             Cmd::Scenarios { action } => cmd_scenarios(&cli.ui_addr, action).await,
-            Cmd::Weather { location, live } => cmd_weather(&cli.weather_addr, location, live).await,
+            Cmd::Weather { location, live } => cmd_weather(&cli.addr, location, live).await,
             cmd => {
                 let mut client = connect(&cli.addr).await?;
                 match cmd {

@@ -51,13 +51,15 @@ cargo build --release
 ```
 
 The binary loads `config.lisp` from the current directory and
-binds three services:
+binds two sockets:
 
-| Service                  | Default address      | Lisp defun                       |
-| ------------------------ | -------------------- | -------------------------------- |
-| Electricity Trading gRPC | `[::1]:8810`         | `(set-trading-addr "…")`         |
-| Weather Forecast gRPC    | `[::1]:8820`         | `(set-weather-addr "…")`         |
-| Browser UI (HTTP)        | `127.0.0.1:8811`     | `(set-ui-addr "…")`              |
+| Service                            | Default address      | Lisp defun                        |
+| ---------------------------------- | -------------------- | --------------------------------- |
+| gRPC (ElectricityTrading + Weather)| `[::1]:8810`         | `(set-grpc-socket-addr "…")`      |
+| Browser UI (HTTP)                  | `127.0.0.1:8811`     | `(set-ui-addr "…")`               |
+
+Both gRPC services live on one socket — tonic routes by service
+path. Clients of either API connect to the same address.
 
 Open <http://127.0.0.1:8811/> to see the live order book, trade
 tape, weather panel, and scenario controls.
@@ -237,9 +239,8 @@ A minimal config:
 
 (reset-state)                          ;; clear timers from previous load
 
-(set-trading-addr "[::1]:8810")
+(set-grpc-socket-addr "[::1]:8810")
 (set-ui-addr "127.0.0.1:8811")
-(set-weather-addr "[::1]:8820")
 (set-physics-tick-ms 100)
 (set-timezone "Europe/Berlin")
 
@@ -262,9 +263,8 @@ loaded.
 
 | Defun                                    | Effect                                            |
 | ---------------------------------------- | ------------------------------------------------- |
-| `(set-trading-addr "[::1]:8810")`        | electricity-trading gRPC bind                     |
+| `(set-grpc-socket-addr "[::1]:8810")`    | trading + weather gRPC bind (both on one socket)  |
 | `(set-ui-addr "127.0.0.1:8811")`         | UI HTTP bind                                      |
-| `(set-weather-addr "[::1]:8820")`        | weather-forecast gRPC bind                        |
 | `(set-physics-tick-ms 100)`              | matcher loop cadence (ms)                         |
 | `(set-timezone "Europe/Berlin")`         | timezone the physics + scenario hours run in     |
 | `(set-weather-stream-cadence-seconds N)` | how often `ReceiveLiveWeatherForecast` emits     |
@@ -350,9 +350,8 @@ tsctl <command> [args]
 Global options:
 
 ```
-  --addr ADDR           gRPC endpoint (default http://[::1]:8810)
+  --addr ADDR           gRPC endpoint (default http://[::1]:8810; trading + weather)
   --ui-addr ADDR        HTTP endpoint for scenarios (default http://127.0.0.1:8811)
-  --weather-addr ADDR   weather gRPC endpoint (default http://[::1]:8820)
 ```
 
 Examples:

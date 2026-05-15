@@ -40,11 +40,12 @@ def free_port() -> int:
     return port
 
 
-def write_config(path: Path, ui_port: int, trading_port: int, weather_port: int) -> None:
+def write_config(path: Path, ui_port: int, grpc_port: int) -> None:
+    # Both gRPC services share one socket — tonic multiplexes the
+    # trading and weather services by path on the same listener.
     path.write_text(
-        f'(set-trading-addr "[::1]:{trading_port}")\n'
+        f'(set-grpc-socket-addr "[::1]:{grpc_port}")\n'
         f'(set-ui-addr "127.0.0.1:{ui_port}")\n'
-        f'(set-weather-addr "[::1]:{weather_port}")\n'
     )
 
 
@@ -83,8 +84,8 @@ def make_driver() -> webdriver.Firefox:
 def main() -> int:
     assert BIN.exists(), f"missing {BIN} — run `cargo build` first"
     cfg = REPO / "target" / "ui-selenium-config.lisp"
-    ui_port, trading_port, weather_port = free_port(), free_port(), free_port()
-    write_config(cfg, ui_port, trading_port, weather_port)
+    ui_port, grpc_port = free_port(), free_port()
+    write_config(cfg, ui_port, grpc_port)
 
     env = {**os.environ, "RUST_LOG": "warn"}
     proc = subprocess.Popen(

@@ -58,9 +58,9 @@ LIMIT orders only, 15-min delivery duration only.
   fixes the quarter-boundary price-dip bug (continuous state used
   to leak across rotations).
 - `src/lisp/mod.rs` — `Config::new(path)` evaluates a tulisp file
-  against runtime defuns: `(set-trading-addr STR)`,
-  `(set-ui-addr STR)`, `(set-weather-addr STR)`,
-  `(set-physics-tick-ms N)`, `(%make-market …)`,
+  against runtime defuns: `(set-grpc-socket-addr STR)`,
+  `(set-ui-addr STR)`, `(set-physics-tick-ms N)`,
+  `(%make-market …)`,
   `(%make-gridpool …)`, `(%make-coupling …)`,
   `(%make-mm-fleet …)`, `(%make-aggressor-fleet …)`,
   `(define-scenario …)`, `(%make-weather-location …)`,
@@ -72,14 +72,16 @@ LIMIT orders only, 15-min delivery duration only.
 - `src/bin/tradingsim.rs` — loads `config.lisp` if present (registers
   fleets from it); falls back to a single default `MmFleetSpec` so
   `tsctl place` has something to trade against on a fresh checkout;
-  serves the gRPC API on the configured socket addr
+  mounts both gRPC services (ElectricityTrading + WeatherForecast)
+  on the configured `(set-grpc-socket-addr …)` — tonic routes by
+  service path so one socket serves both
 - `src/bin/tsctl.rs` — info / place / get / modify / cancel /
   cancel-all / orders [--live] / trades [--live] / public-trades /
   public-book / scenarios (list / start / next / prev / jump / stop).
   --start accepts "next", "+N", or RFC-3339. The scenarios
   subcommands hit the HTTP UI server on --ui-addr (default 8811);
-  weather uses --weather-addr (default [::1]:8820); everything else
-  uses the gRPC --addr (default [::1]:8810).
+  everything else (trading + weather) uses the gRPC --addr (default
+  [::1]:8810).
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
   service
 
@@ -95,10 +97,10 @@ cargo run --bin tradingsim                # stub, exits
 cargo run --bin tsctl -- --help           # stub
 ```
 
-The server defaults to `[::1]:8810` for the trading gRPC,
-`127.0.0.1:8811` for the UI, and `[::1]:8820` for the weather
-forecast gRPC. All three are configurable via the lisp defuns
-`(set-trading-addr)`, `(set-ui-addr)`, `(set-weather-addr)`.
+The server defaults to `[::1]:8810` for all gRPC (ElectricityTrading
++ WeatherForecast multiplexed on one socket) and `127.0.0.1:8811`
+for the UI. Both are configurable via the lisp defuns
+`(set-grpc-socket-addr)` and `(set-ui-addr)`.
 
 ## Proto submodule
 

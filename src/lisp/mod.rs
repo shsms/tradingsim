@@ -29,20 +29,22 @@ use crate::sim::counterparty::{
 use crate::sim::market::{Area, Currency, MarketRules};
 
 /// Top-level identity + transport settings, set via lisp defuns.
+/// Both gRPC services (ElectricityTrading + WeatherForecast) bind
+/// to `grpc_addr` — tonic multiplexes them by service path, so one
+/// socket carries both. Clients of the trading or weather API both
+/// connect to the same endpoint.
 #[derive(Clone, Debug)]
 pub struct Metadata {
-    pub trading_addr: String,
+    pub grpc_addr: String,
     pub ui_addr: String,
-    pub weather_addr: String,
     pub physics_tick: Duration,
 }
 
 impl Default for Metadata {
     fn default() -> Self {
         Self {
-            trading_addr: "[::1]:8810".to_string(),
+            grpc_addr: "[::1]:8810".to_string(),
             ui_addr: "127.0.0.1:8811".to_string(),
-            weather_addr: "[::1]:8820".to_string(),
             physics_tick: Duration::from_millis(100),
         }
     }
@@ -388,16 +390,12 @@ impl Config {
         self.metadata.read().clone()
     }
 
-    pub fn trading_addr(&self) -> String {
-        self.metadata.read().trading_addr.clone()
+    pub fn grpc_addr(&self) -> String {
+        self.metadata.read().grpc_addr.clone()
     }
 
     pub fn ui_addr(&self) -> String {
         self.metadata.read().ui_addr.clone()
-    }
-
-    pub fn weather_addr(&self) -> String {
-        self.metadata.read().weather_addr.clone()
     }
 
     /// Snapshot of all MM fleets built by `(%make-mm-fleet …)`. The
@@ -1137,18 +1135,13 @@ fn register_mm_fleets(
 
 fn register_metadata(ctx: &mut TulispContext, metadata: Arc<RwLock<Metadata>>) {
     let m = metadata.clone();
-    ctx.defun("set-trading-addr", move |addr: String| -> String {
-        m.write().trading_addr = addr.clone();
+    ctx.defun("set-grpc-socket-addr", move |addr: String| -> String {
+        m.write().grpc_addr = addr.clone();
         addr
     });
     let m = metadata.clone();
     ctx.defun("set-ui-addr", move |addr: String| -> String {
         m.write().ui_addr = addr.clone();
-        addr
-    });
-    let m = metadata.clone();
-    ctx.defun("set-weather-addr", move |addr: String| -> String {
-        m.write().weather_addr = addr.clone();
         addr
     });
     let m = metadata.clone();
@@ -1158,8 +1151,8 @@ fn register_metadata(ctx: &mut TulispContext, metadata: Arc<RwLock<Metadata>>) {
         ms as i64
     });
     let m = metadata;
-    ctx.defun("get-trading-addr", move || -> String {
-        m.read().trading_addr.clone()
+    ctx.defun("get-grpc-socket-addr", move || -> String {
+        m.read().grpc_addr.clone()
     });
 }
 
@@ -1186,15 +1179,15 @@ mod tests {
     async fn empty_config_yields_defaults() {
         let f = write_tmp(";; empty\n");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.trading_addr(), "[::1]:8810");
+        assert_eq!(cfg.grpc_addr(), "[::1]:8810");
         assert_eq!(cfg.metadata().physics_tick, Duration::from_millis(100));
     }
 
     #[tokio::test]
-    async fn set_trading_addr_takes_effect() {
-        let f = write_tmp(r#"(set-trading-addr "[::]:9000")"#);
+    async fn set_grpc_socket_addr_takes_effect() {
+        let f = write_tmp(r#"(set-grpc-socket-addr "[::]:9000")"#);
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.trading_addr(), "[::]:9000");
+        assert_eq!(cfg.grpc_addr(), "[::]:9000");
     }
 
     #[tokio::test]
@@ -1205,18 +1198,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_weather_addr_takes_effect() {
-        let f = write_tmp(r#"(set-weather-addr "[::]:9200")"#);
-        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.weather_addr(), "[::]:9200");
-    }
-
-    #[tokio::test]
-    async fn ui_and_weather_addrs_have_sensible_defaults() {
+    async fn ui_addr_default_is_sensible() {
         let f = write_tmp(";; empty\n");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         assert_eq!(cfg.ui_addr(), "127.0.0.1:8811");
-        assert_eq!(cfg.weather_addr(), "[::1]:8820");
     }
 
     #[tokio::test]
