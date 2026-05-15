@@ -115,11 +115,20 @@ they emulate). The matcher supports `LIMIT` orders with `IOC` and
 `FOK` execution options; `AON` and the more exotic order types
 are deferred.
 
-Behind each contract sits a fleet of synthetic counterparties:
+Synthetic counterparties cover every contract in the trading
+window. They're declared as *fleets* (one recipe per area); the
+runtime spawns one market-maker + N aggressors per delivery
+contract and rotates them on each quarter boundary — gated
+contracts retire, fresh contracts spawn at the far edge.
 
 - **Market-makers** quote bid/ask pairs around a forward-curve
   reference price, with a mean-reverting random walk + a
   follow-last-trade pull so prices drift visibly under flow.
+  Quote size and half-spread come from the fleet's band tables
+  indexed by the contract's current offset to gate, so a
+  contract tightens its spread and grows its depth as it ages
+  forward — back-loaded liquidity the way real intraday markets
+  show it.
 - **Aggressors** fire marketable orders on a horizon-scaled
   cadence — volume back-loads toward gate close the way real
   intraday curves do.
@@ -273,17 +282,21 @@ loaded.
 
 **Counterparty liquidity**
 
-| Defun                                                          | Effect                              |
-| -------------------------------------------------------------- | ----------------------------------- |
-| `(%make-market-maker :name S :area EIC :quarter-offset N ...)` | one MM quoting one quarter          |
-| `(mm-fleet :area EIC :prefix S)`                               | 48 MMs covering the next 12 hours   |
-| `(%make-aggressor :name S :area EIC :rate-ms N :size MW ...)`  | one taker firing on a schedule      |
-| `(aggressor-fleet :area EIC :prefix S)`                        | 4 profiles × 48 quarters            |
-| `(set-mm-bias-scale 25.0)`                                     | EUR per (bias - 0.5) tilt unit      |
-| `(set-mm-reference NAME EUR)`                                  | snap an MM's reference price        |
-| `(set-mm-{spread,size,demand,surplus,noise} NAME VAL)`         | tune one knob on one MM             |
-| `(set-mm-follow-last-trade NAME RATE)`                         | 0 = static; 1 = snap to last trade  |
-| `(set-aggressor-{size,side-bias} NAME VAL)`                    | tune one knob on one aggressor      |
+| Defun                                                                                | Effect                                                                       |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `(%make-mm-fleet :name S :area EIC :window-quarters N :size-bands '(...) ...)`       | register one MM fleet — FleetManager spawns one MM per contract in the window |
+| `(mm-fleet :area EIC :prefix S)`                                                     | sugar: 48 MMs covering the next 12 hours                                     |
+| `(%make-aggressor-fleet :name S :area EIC :profile-sizes '(...) :profile-rate-bases '(...) ...)` | register one aggressor fleet — one taker per (contract, profile) pair        |
+| `(aggressor-fleet :area EIC :prefix S)`                                              | sugar: 4 profiles × 48 quarters                                              |
+| `(set-mm-bias-scale 25.0)`                                                           | EUR per (bias - 0.5) tilt unit (writes the fleet's demand/surplus shift)     |
+
+Hot reload: re-firing a `(%make-*-fleet …)` call with the same
+`:name` updates the fleet's shared params in place — running
+per-contract counterparties pick up new bands / rates on their
+next tick. Per-MM tuning by name isn't supported (contracts
+rotate through bands, so a stable handle would address a moving
+target); use the scenarios layer for time-varying bias and the
+forward curve / weather knobs for fundamentals.
 
 **Weather**
 

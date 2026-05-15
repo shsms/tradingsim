@@ -44,21 +44,34 @@ LIMIT orders only, 15-min delivery duration only.
   `submit_order` / `cancel_order` for gridpool flow and
   `submit_counterparty_order` / `cancel_counterparty_order` for
   synthetic liquidity
-- `src/sim/counterparty.rs` — `MarketMaker` engine: random-walked
-  reference, `Arc<RwLock<MarketMakerConfig>>` so lisp callbacks can
-  hot-mutate demand/surplus/reference between refreshes
+- `src/sim/counterparty.rs` — `MarketMaker` + `Aggressor` engines:
+  mean-reverting reference with random walk + follow-last-trade pull,
+  IOC-clamped aggressor fire. `MmFleetParams` / `AggressorFleetParams`
+  carry the band tables the FleetManager re-reads each refresh to
+  apply the contract's current offset-to-gate.
+- `src/sim/fleet.rs` — `FleetManager`: per-contract counterparty
+  lifecycle. Spawns one MM (and N aggressors) per delivery contract
+  in each fleet's rolling window, rotates them on every quarter
+  boundary (gating ones retired, new far-edge spawned), and exposes
+  `mm_views()` / `aggressor_views()` for the bias tick. Replaces the
+  old slot-indexed `spawn_mm_task` / `spawn_aggressor_task` and
+  fixes the quarter-boundary price-dip bug (continuous state used
+  to leak across rotations).
 - `src/lisp/mod.rs` — `Config::new(path)` evaluates a tulisp file
   against runtime defuns: `(set-trading-addr STR)`,
   `(set-ui-addr STR)`, `(set-weather-addr STR)`,
   `(set-physics-tick-ms N)`, `(%make-market …)`,
-  `(%make-gridpool …)`, `(%make-market-maker …)`,
-  `(set-mm-{reference,spread,size,demand,surplus,noise} NAME EUR)`,
+  `(%make-gridpool …)`, `(%make-coupling …)`,
+  `(%make-mm-fleet …)`, `(%make-aggressor-fleet …)`,
+  `(define-scenario …)`, `(%make-weather-location …)`,
+  `(set-mm-bias-scale F)`, `(set-forward-curve-base H P)`,
   plus tulisp-async's `(run-with-timer …)` + sugar `(every …)`
   from `sim/common.lisp`. `spawn_timer_loop` drives the firing
 - `config.lisp` — sample top-level config (4 TSO zones + 4 neighbours,
   cross-border couplings, weather locations, canned scenarios)
 - `src/bin/tradingsim.rs` — loads `config.lisp` if present (registers
-  MMs from it); falls back to a 4-hour hardcoded MM set otherwise;
+  fleets from it); falls back to a single default `MmFleetSpec` so
+  `tsctl place` has something to trade against on a fresh checkout;
   serves the gRPC API on the configured socket addr
 - `src/bin/tsctl.rs` — info / place / get / modify / cancel /
   cancel-all / orders [--live] / trades [--live] / public-trades /
