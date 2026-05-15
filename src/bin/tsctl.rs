@@ -140,6 +140,13 @@ enum Cmd {
         /// Optional sell-side delivery area filter (EIC code).
         #[arg(long)]
         sell_area: Option<String>,
+        /// Optional delivery-period filter. Accepts the same shapes
+        /// as `place --start`: "next", "+N" (quarters past next),
+        /// or an RFC-3339 UTC timestamp. The filter pins the period
+        /// at parse time — subsequent boundary rolls will not
+        /// re-target the filter.
+        #[arg(long)]
+        period: Option<String>,
     },
     /// Stream the public order book event tape (one record per
     /// resting-order state change).
@@ -727,14 +734,27 @@ async fn cmd_public_trades(
     client: &mut ElectricityTradingServiceClient<Channel>,
     buy_area: Option<String>,
     sell_area: Option<String>,
+    period: Option<String>,
 ) -> Result<(), String> {
     let mk_area = |code: String| tradingsim::proto::common::grid::DeliveryArea {
         code,
         code_type: tradingsim::proto::common::grid::EnergyMarketCodeType::EuropeEic as i32,
     };
+    // Duration is hard-pinned at 15 — the sim only admits 15-min
+    // contracts today (see CLAUDE.md) and exact_period_passes on
+    // the server compares both start *and* duration. When new
+    // durations land, lift this into a flag alongside --period.
+    let delivery_period = period
+        .map(|s| {
+            Ok::<_, String>(DeliveryPeriod {
+                start: Some(timestamp_proto(&s)?),
+                duration: duration_proto(15)? as i32,
+            })
+        })
+        .transpose()?;
     let filter = PublicTradeFilter {
         states: vec![TradeState::Active as i32],
-        delivery_period: None,
+        delivery_period,
         buy_delivery_area: buy_area.map(mk_area),
         sell_delivery_area: sell_area.map(mk_area),
     };
@@ -939,7 +959,8 @@ async fn main() {
                     Cmd::PublicTrades {
                         buy_area,
                         sell_area,
-                    } => cmd_public_trades(&mut client, buy_area, sell_area).await,
+                        period,
+                    } => cmd_public_trades(&mut client, buy_area, sell_area, period).await,
                     Cmd::PublicBook { area, side } => {
                         cmd_public_book(&mut client, area, side).await
                     }
