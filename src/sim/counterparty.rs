@@ -371,6 +371,71 @@ impl AggressorConfig {
 
 pub type SharedAggressorConfig = Arc<RwLock<AggressorConfig>>;
 
+/// Mutable recipe shared across every per-contract aggressor in one
+/// fleet. `(%make-aggressor-fleet …)` writes one of these; each
+/// aggressor the FleetManager spawns holds an
+/// `Arc<RwLock<AggressorFleetParams>>` clone and re-reads it on
+/// every fire to look up its profile-effective size + base rate.
+/// Hot-reload updates the RwLock contents in place.
+#[derive(Clone, Debug)]
+pub struct AggressorFleetParams {
+    /// Per-profile fire size, MW. The fleet spawns `profile_sizes.len()`
+    /// aggressors per contract, one per profile.
+    pub profile_sizes: Vec<Decimal>,
+    /// Per-profile inter-fire base, milliseconds. Effective fire
+    /// rate scales the base by (current_offset + 1), so further-out
+    /// contracts fire slower than near-gate ones for the same profile.
+    pub profile_rate_bases: Vec<u64>,
+    /// Initial side bias (the scenarios bias tick overwrites per
+    /// contract). 0.5 = balanced; > 0.5 = buy-heavy.
+    pub side_bias: f64,
+    /// Max EUR slippage from reference the aggressor accepts on a
+    /// fire — passed through to AggressorConfig::max_slippage.
+    pub max_slippage: Decimal,
+}
+
+impl AggressorFleetParams {
+    /// Effective size for `profile`. Out-of-range profiles clamp to
+    /// the last entry as a defensive guard.
+    pub fn size_for(&self, profile: usize) -> Decimal {
+        debug_assert!(
+            !self.profile_sizes.is_empty(),
+            "AggressorFleetParams profile_sizes must not be empty"
+        );
+        let idx = profile.min(self.profile_sizes.len() - 1);
+        self.profile_sizes[idx]
+    }
+
+    /// Effective inter-fire delay in ms for `profile` at quarter
+    /// `offset` from now. `base × (offset + 1)`: contract 0 quarters
+    /// out (front of window) fires at base ms; the contract 47
+    /// quarters out fires at 48× base. Combined with the gate-close
+    /// scale in the spawn task, total volume on a contract concentrates
+    /// in its final hour the way real intraday does.
+    pub fn rate_ms_for(&self, profile: usize, offset: i64) -> u64 {
+        debug_assert!(
+            !self.profile_rate_bases.is_empty(),
+            "AggressorFleetParams profile_rate_bases must not be empty"
+        );
+        let idx = profile.min(self.profile_rate_bases.len() - 1);
+        let mult = offset.max(0) as u64 + 1;
+        self.profile_rate_bases[idx].saturating_mul(mult).max(50)
+    }
+}
+
+impl Default for AggressorFleetParams {
+    fn default() -> Self {
+        Self {
+            profile_sizes: vec![dec!(0.2), dec!(0.5), dec!(1.0), dec!(1.5)],
+            profile_rate_bases: vec![500, 1500, 3500, 8000],
+            side_bias: 0.5,
+            max_slippage: dec!(5.00),
+        }
+    }
+}
+
+pub type SharedAggressorFleetParams = Arc<RwLock<AggressorFleetParams>>;
+
 pub struct Aggressor {
     config: SharedAggressorConfig,
     rng: SmallRng,
@@ -930,5 +995,39 @@ mod tests {
         assert_eq!(p.size_for(0, 4), dec!(0.5));
         assert_eq!(p.size_for(3, 4), dec!(0.5));
         assert_eq!(p.size_for(100, 4), dec!(0.5));
+    }
+
+    #[test]
+    fn aggressor_fleet_params_rate_scales_linearly_with_offset() {
+        let p = AggressorFleetParams::default();
+        // profile 0: base 500 ms. offset 0 → 500, offset 47 → 24000.
+        assert_eq!(p.rate_ms_for(0, 0), 500);
+        assert_eq!(p.rate_ms_for(0, 1), 1000);
+        assert_eq!(p.rate_ms_for(0, 47), 24000);
+        // profile 3: base 8000. offset 0 → 8000, offset 1 → 16000.
+        assert_eq!(p.rate_ms_for(3, 0), 8000);
+        assert_eq!(p.rate_ms_for(3, 1), 16000);
+    }
+
+    #[test]
+    fn aggressor_fleet_params_rate_floors_at_50() {
+        // Defensive: a 0-base profile (configuration error) should
+        // still produce a non-zero rate to avoid a busy-spin.
+        let p = AggressorFleetParams {
+            profile_rate_bases: vec![0],
+            ..AggressorFleetParams::default()
+        };
+        assert_eq!(p.rate_ms_for(0, 0), 50);
+        assert_eq!(p.rate_ms_for(0, 47), 50);
+    }
+
+    #[test]
+    fn aggressor_fleet_params_size_clamps_profile_to_last() {
+        let p = AggressorFleetParams::default();
+        assert_eq!(p.size_for(0), dec!(0.2));
+        assert_eq!(p.size_for(3), dec!(1.5));
+        // Profile beyond the table clamps to the last — defensive
+        // against an off-by-one in the spawner.
+        assert_eq!(p.size_for(99), dec!(1.5));
     }
 }

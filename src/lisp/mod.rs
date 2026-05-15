@@ -24,8 +24,8 @@ use rust_decimal::Decimal;
 use tulisp::{AsPlist, Error, Plist, Plistable, SharedMut, TulispContext};
 
 use crate::sim::counterparty::{
-    AggressorConfig, MarketMakerConfig, MmFleetParams, SharedAggressorConfig, SharedConfig,
-    SharedFleetParams,
+    AggressorConfig, AggressorFleetParams, MarketMakerConfig, MmFleetParams, SharedAggressorConfig,
+    SharedAggressorFleetParams, SharedConfig, SharedFleetParams,
 };
 use crate::sim::market::{Area, Currency, DeliveryDuration, DeliveryPeriod, MarketRules};
 
@@ -125,6 +125,23 @@ pub struct CouplingSpec {
     pub capacity_mw: Option<f64>,
 }
 
+/// One aggressor fleet as configured by `(%make-aggressor-fleet …)`.
+/// Mirrors [`MmFleetSpec`]: covers `window_quarters` rolling contracts
+/// in `area`, with one aggressor per (contract, profile) pair where
+/// profile indexes into `shared_params.profile_sizes / profile_rate_bases`.
+/// FleetManager owns the per-contract lifecycle; hot reload mutates
+/// `shared_params` in place to preserve Arc identity.
+#[derive(Clone)]
+pub struct AggressorFleetSpec {
+    pub name: String,
+    pub area: String,
+    pub window_quarters: i64,
+    pub shared_params: SharedAggressorFleetParams,
+    /// First seed in the per-(contract, profile) seed range. Each
+    /// aggressor gets `seed_base + offset * 100 + profile`.
+    pub seed_base: u64,
+}
+
 /// One aggressor from `(%make-aggressor …)`. The binary spawns one
 /// tokio task per spec that fires `Aggressor::fire(&mut world)` on
 /// the configured cadence.
@@ -150,6 +167,7 @@ pub struct Config {
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
+    aggressor_fleets: Arc<Mutex<HashMap<String, AggressorFleetSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
@@ -217,6 +235,7 @@ impl Config {
         let markets = Arc::new(Mutex::new(Vec::new()));
         let couplings = Arc::new(Mutex::new(Vec::new()));
         let aggressors = Arc::new(Mutex::new(HashMap::new()));
+        let aggressor_fleets = Arc::new(Mutex::new(HashMap::new()));
         let scenarios = crate::scenarios::new_registry();
         let bias_scale = crate::scenarios::new_bias_scale();
         let curve = crate::scenarios::new_curve();
@@ -248,6 +267,7 @@ impl Config {
             markets.clone(),
             couplings.clone(),
             aggressors.clone(),
+            aggressor_fleets.clone(),
             scenarios.clone(),
             bias_scale.clone(),
             curve.clone(),
@@ -279,6 +299,7 @@ impl Config {
             markets,
             couplings,
             aggressors,
+            aggressor_fleets,
             scenarios,
             bias_scale,
             curve,
@@ -446,6 +467,13 @@ impl Config {
         self.aggressors.lock().values().cloned().collect()
     }
 
+    /// Snapshot of all aggressor fleets built by
+    /// `(%make-aggressor-fleet …)`. Same shape as
+    /// [`Config::mm_fleets`], for the aggressor side.
+    pub fn aggressor_fleets(&self) -> Vec<AggressorFleetSpec> {
+        self.aggressor_fleets.lock().values().cloned().collect()
+    }
+
     /// Hand out the scenarios registry the lisp side populates via
     /// `(define-scenario …)`. The UI layer mutates the runtime state
     /// in this map when the browser hits the start/next/stop endpoints.
@@ -531,6 +559,7 @@ fn register_runtime(
     markets: Arc<Mutex<Vec<MarketSpec>>>,
     couplings: Arc<Mutex<Vec<CouplingSpec>>>,
     aggressors: Arc<Mutex<HashMap<String, AggressorSpec>>>,
+    aggressor_fleets: Arc<Mutex<HashMap<String, AggressorFleetSpec>>>,
     scenarios: crate::scenarios::SharedScenarios,
     bias_scale: crate::scenarios::SharedBiasScale,
     curve: crate::scenarios::SharedCurve,
@@ -552,6 +581,7 @@ fn register_runtime(
     register_market_makers(ctx, market_makers, anchor);
     register_mm_fleets(ctx, mm_fleets);
     register_aggressors(ctx, aggressors, anchor);
+    register_aggressor_fleets(ctx, aggressor_fleets);
     register_scenarios(ctx, scenarios);
     register_bias_scale(ctx, bias_scale);
     register_curve(ctx, curve);
@@ -925,6 +955,79 @@ fn register_aggressors(
         // via the i64 cast + .max().
         c.rate_ms = (v as i64).max(50) as u64;
     });
+}
+
+AsPlist! {
+    pub struct MakeAggressorFleetArgs {
+        name: String,
+        area<":area">: String,
+        window_quarters<":window-quarters">: Option<i64> {= None},
+        /// Per-profile fire size, MW. The fleet spawns one aggressor
+        /// per (contract, profile) pair.
+        profile_sizes<":profile-sizes">: Option<Vec<f64>> {= None},
+        /// Per-profile inter-fire base, ms. Effective rate for an
+        /// aggressor at quarter offset Q is `base × (Q + 1)`.
+        profile_rate_bases<":profile-rate-bases">: Option<Vec<i64>> {= None},
+        side_bias<":side-bias">: Option<f64> {= None},
+        max_slippage<":max-slippage">: Option<f64> {= None},
+        seed_base<":seed-base">: Option<i64> {= None},
+    }
+}
+
+fn register_aggressor_fleets(
+    ctx: &mut TulispContext,
+    aggressor_fleets: Arc<Mutex<HashMap<String, AggressorFleetSpec>>>,
+) {
+    ctx.defun(
+        "%make-aggressor-fleet",
+        move |args: Plist<MakeAggressorFleetArgs>| -> Result<String, Error> {
+            let a = args.into_inner();
+            let default_params = AggressorFleetParams::default();
+            let profile_sizes = a
+                .profile_sizes
+                .map(|v| v.into_iter().map(f64_to_dec).collect::<Vec<_>>())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(default_params.profile_sizes.clone());
+            let profile_rate_bases = a
+                .profile_rate_bases
+                .map(|v| v.into_iter().map(|x| x.max(50) as u64).collect::<Vec<_>>())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(default_params.profile_rate_bases.clone());
+            if profile_sizes.len() != profile_rate_bases.len() {
+                return Err(Error::os_error(format!(
+                    "make-aggressor-fleet {:?}: :profile-sizes ({}) and :profile-rate-bases ({}) must have the same length",
+                    a.name,
+                    profile_sizes.len(),
+                    profile_rate_bases.len()
+                )));
+            }
+            let params = AggressorFleetParams {
+                profile_sizes,
+                profile_rate_bases,
+                side_bias: a.side_bias.unwrap_or(default_params.side_bias).clamp(0.0, 1.0),
+                max_slippage: a
+                    .max_slippage
+                    .map(f64_to_dec)
+                    .unwrap_or(default_params.max_slippage),
+            };
+            let mut map = aggressor_fleets.lock();
+            if let Some(existing) = map.get(&a.name) {
+                *existing.shared_params.write() = params;
+            } else {
+                map.insert(
+                    a.name.clone(),
+                    AggressorFleetSpec {
+                        name: a.name.clone(),
+                        area: a.area,
+                        window_quarters: a.window_quarters.unwrap_or(48).max(1),
+                        shared_params: Arc::new(RwLock::new(params)),
+                        seed_base: a.seed_base.unwrap_or(0) as u64,
+                    },
+                );
+            }
+            Ok(a.name)
+        },
+    );
 }
 
 fn register_watches(
@@ -1554,6 +1657,81 @@ mod tests {
         assert_eq!(p.size_bands.len(), 4);
         assert_eq!(p.spread_bands.len(), 4);
         assert_eq!(p.refresh_ms, 2000);
+    }
+
+    #[tokio::test]
+    async fn make_aggressor_fleet_registers_spec() {
+        let f = write_tmp(
+            r#"
+            (%make-aggressor-fleet
+              :name "tn-ag"
+              :area "10YDE-EON------1"
+              :window-quarters 12
+              :profile-sizes '(0.3 0.7 1.4 2.0)
+              :profile-rate-bases '(1000 3000 7000 16000)
+              :side-bias 0.5
+              :max-slippage 5.0
+              :seed-base 9000)
+            "#,
+        );
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let fleets = cfg.aggressor_fleets();
+        assert_eq!(fleets.len(), 1);
+        let fleet = &fleets[0];
+        assert_eq!(fleet.name, "tn-ag");
+        assert_eq!(fleet.window_quarters, 12);
+        assert_eq!(fleet.seed_base, 9000);
+        let p = fleet.shared_params.read();
+        assert_eq!(p.profile_sizes.len(), 4);
+        assert_eq!(p.profile_rate_bases, vec![1000, 3000, 7000, 16000]);
+        assert_eq!(p.max_slippage, rust_decimal::dec!(5.0));
+    }
+
+    #[tokio::test]
+    async fn make_aggressor_fleet_rejects_mismatched_profile_lengths() {
+        let f = write_tmp(
+            r#"
+            (%make-aggressor-fleet
+              :name "bad"
+              :area "10YDE-EON------1"
+              :profile-sizes '(0.3 0.7)
+              :profile-rate-bases '(1000 3000 7000))
+            "#,
+        );
+        match Config::new(f.path().to_str().unwrap()) {
+            Ok(_) => panic!("expected mismatched-length error"),
+            Err(e) => assert!(e.contains("same length"), "got: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remake_aggressor_fleet_preserves_shared_params_arc() {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = tempfile::Builder::new().suffix(".lisp").tempfile().unwrap();
+        f.write_all(
+            br#"(%make-aggressor-fleet :name "tn-ag" :area "10YDE-EON------1" :side-bias 0.3)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
+        let arc_before = cfg.aggressor_fleets()[0].shared_params.clone();
+        assert!((arc_before.read().side_bias - 0.3).abs() < 1e-9);
+
+        f.as_file().set_len(0).unwrap();
+        f.as_file().seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(
+            br#"(%make-aggressor-fleet :name "tn-ag" :area "10YDE-EON------1" :side-bias 0.7)"#,
+        )
+        .unwrap();
+        f.flush().unwrap();
+        cfg.reload().unwrap();
+
+        let arc_after = cfg.aggressor_fleets()[0].shared_params.clone();
+        assert!(
+            Arc::ptr_eq(&arc_before, &arc_after),
+            "SharedAggressorFleetParams Arc must survive hot reload"
+        );
+        assert!((arc_after.read().side_bias - 0.7).abs() < 1e-9);
     }
 
     #[tokio::test]
