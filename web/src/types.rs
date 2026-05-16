@@ -21,6 +21,25 @@ pub struct ClockResp {
     pub tz: String,
 }
 
+/// One weather location row off /api/weather. `area_code` is None
+/// for the unlinked fallback location; the panel filters those out
+/// because every configured area carries its own location in the
+/// shipping config.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct WeatherLoc {
+    pub name: String,
+    pub area_code: Option<String>,
+    pub lat: f64,
+    pub lon: f64,
+    pub cloud_cover: f64,
+    pub mean_wind: f64,
+    pub wind_direction: f64,
+    pub solar_now: f64,
+    pub wind_now: f64,
+    pub temp_c_now: f64,
+}
+
 /// One stage of a scenario timeline. Hours are sim-local (the host
 /// interprets them through the configured clock); biases drive the
 /// MM bias-tick. Weather overrides are None when the stage leaves

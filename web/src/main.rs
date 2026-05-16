@@ -9,7 +9,7 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 mod types;
-use types::{ClockResp, InfoResp, PublicTrade, Scenario};
+use types::{ClockResp, InfoResp, PublicTrade, Scenario, WeatherLoc};
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -87,6 +87,113 @@ fn Shell() -> impl IntoView {
             <span class="page-meta muted">{trades_line}</span>
         </header>
         <Scenarios/>
+        <Weather/>
+    }
+}
+
+const WEATHER_POLL: Duration = Duration::from_secs(10);
+
+async fn fetch_weather() -> Option<Vec<WeatherLoc>> {
+    Request::get("/api/weather").send().await.ok()?.json().await.ok()
+}
+
+#[component]
+fn Weather() -> impl IntoView {
+    let (locs, set_locs) = signal(Vec::<WeatherLoc>::new());
+    let (loaded, set_loaded) = signal(false);
+
+    leptos::task::spawn_local(async move {
+        loop {
+            if let Some(list) = fetch_weather().await {
+                set_locs.set(list);
+                set_loaded.set(true);
+            }
+            TimeoutFuture::new(WEATHER_POLL.as_millis() as u32).await;
+        }
+    });
+
+    let body = move || {
+        let list: Vec<_> = locs
+            .get()
+            .into_iter()
+            // Hide the unlinked fallback location; every configured
+            // area gets its own slot in the shipping config.
+            .filter(|l| l.area_code.is_some())
+            .collect();
+        if list.is_empty() {
+            return view! {
+                <i class="muted">
+                    {move || if loaded.get() { "no weather locations" } else { "loading…" }}
+                </i>
+            }
+            .into_any();
+        }
+        view! {
+            <div class="weather-grid">
+                {list.into_iter().map(|l| view! { <WeatherCell loc=l/> }).collect_view()}
+            </div>
+        }
+        .into_any()
+    };
+
+    view! {
+        <section class="panel panel-weather">
+            <h2>"Weather (now)"</h2>
+            {body}
+        </section>
+    }
+}
+
+#[component]
+fn WeatherCell(loc: WeatherLoc) -> impl IntoView {
+    let (open, set_open) = signal(false);
+    let tag = loc
+        .area_code
+        .as_deref()
+        .map(area_tag)
+        .unwrap_or("—")
+        .to_string();
+    view! {
+        <div
+            class="weather-cell"
+            class:open=move || open.get()
+            on:click=move |_| set_open.update(|o| *o = !*o)
+        >
+            <div class="weather-head">
+                <span class="area-badge">{tag}</span>
+                <span class="muted">{format!("☁ {:.2}", loc.cloud_cover)}</span>
+            </div>
+            <div class="weather-metric">
+                "solar " <span class="muted">{format!("{} W/m²", loc.solar_now.round() as i64)}</span>
+            </div>
+            <div class="weather-metric">
+                "wind " <span class="muted">{format!("{:.1} m/s", loc.wind_now)}</span>
+            </div>
+            <div class="weather-metric">
+                "temp " <span class="muted">{format!("{:.1} °C", loc.temp_c_now)}</span>
+            </div>
+            <div class="weather-detail">
+                {format!("lat {:.1} · lon {:.1}", loc.lat, loc.lon)}<br/>
+                {format!("wind direction {}°", loc.wind_direction.round() as i64)}<br/>
+                {format!("mean wind {:.1} m/s", loc.mean_wind)}
+            </div>
+        </div>
+    }
+}
+
+/// Short tag for an EIC area code — `10YDE-EON------1` → `TN`, etc.
+/// Mirrors the JS UI's ALL_AREAS table.
+fn area_tag(code: &str) -> &'static str {
+    match code {
+        "10YDE-EON------1" => "TN",
+        "10YDE-RWENET---I" => "AM",
+        "10YDE-VE-------2" => "HZ",
+        "10YDE-ENBW-----N" => "BW",
+        "10YFR-RTE------C" => "FR",
+        "10YNL----------L" => "NL",
+        "10YBE----------2" => "BE",
+        "10YAT-APG------L" => "AT",
+        _ => "?",
     }
 }
 
