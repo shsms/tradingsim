@@ -10,7 +10,7 @@ pub mod scenarios;
 pub mod weather;
 
 pub use chart::PriceChart;
-pub use filter_bar::{FilterBar, load_filter};
+pub use filter_bar::{ContractPill, FilterBar, load_filter};
 pub use gridpools::Gridpools;
 pub use public_trades::{PublicTrades, TRADES_BUFFER_CAP};
 pub use pulse::{PulseBar, SparkState, TzMode, load_tz_mode};

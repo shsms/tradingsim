@@ -108,9 +108,16 @@ fn home_areas() -> Vec<&'static str> {
 pub fn PriceChart() -> impl IntoView {
     let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
     let sim_tz = expect_context::<RwSignal<String>>();
+    let focused_period = expect_context::<RwSignal<Option<String>>>();
     let window_min = RwSignal::new(load_window());
     let chart_period = RwSignal::new(load_chart_period());
     let canvas_ref = NodeRef::<Canvas>::new();
+
+    // Pinned period the chart actually uses each draw: its own
+    // dropdown choice wins; the click-focused pill (from a trade
+    // row) is the secondary pin; auto picks the freshest contract
+    // beyond that.
+    let effective_pin = move || chart_period.get().or_else(|| focused_period.get());
 
     // 1 s redraw tick; throttle vs the WS print rate (the resampler
     // averages within the bucket anyway, so per-print redraws would
@@ -119,7 +126,9 @@ pub fn PriceChart() -> impl IntoView {
         loop {
             if let Some(canvas) = canvas_ref.get_untracked() {
                 let win_ms = window_min.get_untracked() as f64 * 60_000.0;
-                let pinned = chart_period.get_untracked();
+                let pinned = chart_period
+                    .get_untracked()
+                    .or_else(|| focused_period.get_untracked());
                 trades.with_untracked(|v| draw(&canvas, v, win_ms, pinned.as_deref()));
             }
             TimeoutFuture::new(1000).await;
@@ -142,11 +151,18 @@ pub fn PriceChart() -> impl IntoView {
 
     let title = move || {
         let win_ms = window_min.get() as f64 * 60_000.0;
-        let pinned = chart_period.get();
+        let dropdown = chart_period.get();
+        let pinned = effective_pin();
         let trades_snapshot = trades.get();
         let tz = sim_tz.get();
         let eff = effective_period_iso(&trades_snapshot, &home_areas(), win_ms, pinned.as_deref());
-        let tag = if pinned.is_some() { "pinned" } else { "auto" };
+        let tag = if dropdown.is_some() {
+            "picked"
+        } else if focused_period.get().is_some() {
+            "pinned"
+        } else {
+            "auto"
+        };
         match eff {
             Some(iso) => format!("Price tape — delivery {} ({tag})", short_time(&iso, &tz)),
             None => "Price tape — delivery — (auto)".to_string(),

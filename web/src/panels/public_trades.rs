@@ -43,6 +43,7 @@ pub fn PublicTrades() -> impl IntoView {
     let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
     let filter = expect_context::<RwSignal<FilterState>>();
     let sim_tz = expect_context::<RwSignal<String>>();
+    let focused_period = expect_context::<RwSignal<Option<String>>>();
     let period_filter = RwSignal::new(load_period_filter());
 
     // Drop a stale filter when the contract leaves the buffer
@@ -93,11 +94,17 @@ pub fn PublicTrades() -> impl IntoView {
     let body = move || {
         let active = filter.with(|f| f.active_areas.clone());
         let pinned = period_filter.get();
+        let focused = focused_period.get();
         let tz = sim_tz.get();
         let rows: Vec<_> = trades.with(|v| {
             v.iter()
                 .filter(|t| {
                     if let Some(p) = pinned.as_deref()
+                        && t.period != p
+                    {
+                        return false;
+                    }
+                    if let Some(p) = focused.as_deref()
                         && t.period != p
                     {
                         return false;
@@ -110,7 +117,7 @@ pub fn PublicTrades() -> impl IntoView {
                 .collect()
         });
         if rows.is_empty() {
-            let msg = if pinned.is_some() {
+            let msg = if pinned.is_some() || focused.is_some() {
                 "no prints for this delivery"
             } else {
                 "no prints for the active areas"
@@ -137,8 +144,20 @@ pub fn PublicTrades() -> impl IntoView {
                     }
                     .into_any()
                 };
+                // Click the row to pin the chart + this panel to that
+                // contract; clicking again on the same period clears
+                // the pin (matches JS UI's setPeriodFilter toggle).
+                let row_period = t.period.clone();
+                let on_click = move |_| {
+                    focused_period.update(|cur| {
+                        *cur = match cur.as_deref() {
+                            Some(p) if p == row_period => None,
+                            _ => Some(row_period.clone()),
+                        };
+                    });
+                };
                 view! {
-                    <tr>
+                    <tr on:click=on_click>
                         <td>{format!("#{}", t.id)}</td>
                         <td>{t.quantity}</td>
                         <td>{t.price}</td>

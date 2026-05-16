@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 
+use crate::intl::short_time;
 use crate::util::{ALL_AREAS, AreaGroup};
 
 #[derive(Debug, Clone)]
@@ -66,6 +67,32 @@ fn save_filter(state: &FilterState) {
         KEY_NEIGHBOURS,
         if state.show_neighbours { "true" } else { "false" },
     );
+}
+
+/// Visible while a trade-row click has pinned a delivery period. Click
+/// the pill to clear the pin. Sits above the area chips because the
+/// focused-period scope crosses every panel (chart + trades),
+/// whereas the area chips only scope the panels below them.
+#[component]
+pub fn ContractPill() -> impl IntoView {
+    let focused = expect_context::<RwSignal<Option<String>>>();
+    let display_tz = expect_context::<RwSignal<String>>();
+    let clear = move |_| focused.set(None);
+    let body = move || {
+        let p = focused.get()?;
+        let tz = display_tz.get();
+        let label = short_time(&p, &tz);
+        Some(view! {
+            <section class="filter-bar" aria-label="active delivery">
+                <span>"focused"</span>
+                <span class="contract-pill" on:click=clear>
+                    <span>{label}</span>
+                    <span>"×"</span>
+                </span>
+            </section>
+        })
+    };
+    view! { {body} }
 }
 
 #[component]

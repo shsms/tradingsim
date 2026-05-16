@@ -11,8 +11,8 @@ mod types;
 mod util;
 
 use panels::{
-    FilterBar, Gridpools, PriceChart, PublicTrades, PulseBar, Scenarios, SparkState, TzMode,
-    TRADES_BUFFER_CAP, Weather, load_filter, load_tz_mode,
+    ContractPill, FilterBar, Gridpools, PriceChart, PublicTrades, PulseBar, Scenarios, SparkState,
+    TzMode, TRADES_BUFFER_CAP, Weather, load_filter, load_tz_mode,
 };
 use types::{ClockResp, InfoResp, PublicTrade, Scenario};
 
@@ -87,6 +87,13 @@ fn Shell() -> impl IntoView {
         None => "loading…".to_string(),
     };
 
+    // Click-pinned delivery period: a trade row sets this, the chart
+    // honours it as a soft pin (overrides the auto-pick but yields to
+    // the chart's own dropdown), the trades panel scopes to it, and
+    // the filter bar surfaces a clearable pill while it's set.
+    let focused_period = RwSignal::new(None::<String>);
+    provide_context(focused_period);
+
     // WS-driven shared state. Trades + trade_count feed the public
     // trades panel + the pulse-bar pills; spark_state feeds the
     // sparkbars; weather_loaded comes from the Weather panel's
@@ -136,6 +143,7 @@ fn Shell() -> impl IntoView {
                 <Scenarios/>
             </div>
             <Gridpools/>
+            <ContractPill/>
             <FilterBar/>
             <div class="tier-row tier-weather-trades">
                 <Weather/>
