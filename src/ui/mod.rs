@@ -48,6 +48,9 @@ pub fn build_router(
         .route("/", get(index))
         .route("/style.css", get(style_css))
         .route("/app.js", get(app_js))
+        .route("/leptos", get(leptos_root))
+        .route("/leptos/", get(leptos_root))
+        .route("/leptos/{*path}", get(leptos_asset))
         .route("/api/info", get(api_info))
         .route("/api/clock", get(api_clock))
         .route("/api/gridpools", get(api_gridpools))
@@ -100,6 +103,41 @@ async fn app_js() -> impl IntoResponse {
         )],
         include_str!("../../ui-assets/app.js"),
     )
+}
+
+/// Trunk's `web/dist/` output: `index.html` + hashed `*.js` / `*.wasm`
+/// / `*.css` siblings. `build.rs` ensures the folder exists so
+/// `cargo build` works before `trunk build` has run — the /leptos
+/// routes just 404 until the bundle is built.
+#[derive(rust_embed::Embed)]
+#[folder = "web/dist/"]
+struct LeptosDist;
+
+async fn leptos_root() -> axum::response::Response {
+    leptos_asset_inner("index.html")
+}
+
+async fn leptos_asset(Path(path): Path<String>) -> axum::response::Response {
+    leptos_asset_inner(&path)
+}
+
+fn leptos_asset_inner(path: &str) -> axum::response::Response {
+    let path = if path.is_empty() { "index.html" } else { path };
+    let Some(file) = LeptosDist::get(path) else {
+        return (
+            StatusCode::NOT_FOUND,
+            "leptos shell asset not found — run `trunk build` in web/",
+        )
+            .into_response();
+    };
+    let mime = match path.rsplit_once('.').map(|(_, e)| e) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
+    };
+    ([(axum::http::header::CONTENT_TYPE, mime)], file.data.into_owned()).into_response()
 }
 
 #[derive(Serialize)]

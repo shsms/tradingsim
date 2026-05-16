@@ -95,7 +95,17 @@ cargo build
 cargo test                                # unit tests
 cargo run --bin tradingsim                # stub, exits
 cargo run --bin tsctl -- --help           # stub
+
+# Leptos web shell (port in progress; lives next to the JS UI).
+# `cargo build` still works without this — the /leptos routes
+# just 404 until the bundle is built.
+(cd web && trunk build)                   # rebuild web/dist/
 ```
+
+The Leptos shell is served under `/leptos` while the JS UI keeps
+serving `/`. `web/dist/` is rust-embedded by `src/ui/mod.rs`; the
+host crate's `build.rs` creates the folder if missing so the
+embed compiles on a fresh clone.
 
 The server defaults to `[::1]:8810` for all gRPC (ElectricityTrading
 + WeatherForecast multiplexed on one socket) and `127.0.0.1:8811`

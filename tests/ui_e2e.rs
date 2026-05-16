@@ -209,6 +209,32 @@ async fn index_serves_embedded_html() {
 }
 
 #[tokio::test]
+async fn leptos_root_serves_trunk_bundle() {
+    // The /leptos route mounts the trunk-generated index.html. If
+    // `trunk build` hasn't run, web/dist/ is empty and the route
+    // returns 404 — accept either, so this test stays green on a
+    // fresh clone where only `cargo build` has run.
+    let (app, _) = build_app();
+    let res = app
+        .oneshot(Request::builder().uri("/leptos").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
+        "unexpected /leptos status: {status}",
+    );
+    if status == StatusCode::OK {
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&bytes).unwrap();
+        assert!(html.contains("<title>tradingsim</title>"));
+        // Trunk injects an absolute asset path; confirm public_url
+        // is wired so the shell coexists with the JS UI at `/`.
+        assert!(html.contains("/leptos/"), "expected /leptos/-prefixed asset paths");
+    }
+}
+
+#[tokio::test]
 async fn api_info_returns_version_and_counts() {
     let (app, _) = build_app();
     let (status, j) = get_json(&app, "/api/info").await;

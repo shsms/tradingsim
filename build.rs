@@ -6,6 +6,13 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), std::io::Error> {
+    // `src/ui/mod.rs` rust-embeds `web/dist/` (the trunk build of the
+    // Leptos shell). Keep the folder present even on fresh clones so
+    // the host crate compiles before `trunk build` has run — the
+    // /leptos routes just 404 until then.
+    std::fs::create_dir_all("web/dist")?;
+    println!("cargo:rerun-if-changed=web/dist");
+
     let trading_root = std::env::var("TRADINGSIM_PROTO_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("submodules/frequenz-api-electricity-trading"));
