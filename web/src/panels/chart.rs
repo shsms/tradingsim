@@ -19,6 +19,36 @@ const WINDOW_MS: f64 = 30.0 * 60.0 * 1000.0;
 const PERIOD_STEP_MS: f64 = 15.0 * 60.0 * 1000.0;
 const EMA_ALPHA: f64 = 0.4;
 const LINE_COLOR: &str = "#58a6ff";
+const BORDER_COLOR: &str = "#30363d";
+const MUTED_COLOR: &str = "#8b949e";
+const Y_STEPS: i32 = 5;
+
+fn pick_x_step(window_ms: f64) -> f64 {
+    const M: f64 = 60_000.0;
+    for c in [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0] {
+        let step = c * M;
+        if window_ms / step <= 8.0 {
+            return step;
+        }
+    }
+    window_ms
+}
+
+fn format_back(mins: i64) -> String {
+    if mins == 0 {
+        return "now".to_string();
+    }
+    if mins < 60 {
+        return format!("-{mins}m");
+    }
+    let h = mins / 60;
+    let m = mins % 60;
+    if m == 0 {
+        format!("-{h}h")
+    } else {
+        format!("-{h}h{m}m")
+    }
+}
 
 #[component]
 pub fn PriceChart() -> impl IntoView {
@@ -145,25 +175,31 @@ fn draw(canvas: &web_sys::HtmlCanvasElement, trades: &[PublicTrade]) {
     ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0).ok();
     ctx.clear_rect(0.0, 0.0, css_w, css_h);
 
-    let pad_l = 8.0;
+    // Padding leaves room for the y-axis labels on the left and the
+    // x-axis "back N min" labels along the bottom.
+    let pad_l = 38.0;
     let pad_r = 8.0;
     let pad_t = 6.0;
-    let pad_b = 6.0;
+    let pad_b = 18.0;
     let inner_w = css_w - pad_l - pad_r;
     let inner_h = css_h - pad_t - pad_b;
 
     let home = home_areas();
     let period_ms = effective_period_ms(trades, &home, WINDOW_MS);
     let line = buckets(trades, &home, WINDOW_MS, period_ms);
-    if line.len() < 2 {
-        return;
-    }
+
     let now = Date::now();
     let tmin = now - WINDOW_MS;
     let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
     for p in &line {
         ymin = ymin.min(p.price);
         ymax = ymax.max(p.price);
+    }
+    if !ymin.is_finite() {
+        // Flat placeholder range so the axes still draw before any
+        // data lands. JS UI does the same so the panel doesn't pop.
+        ymin = 70.0;
+        ymax = 100.0;
     }
     if ymax - ymin < 1.0 {
         ymax = ymin + 1.0;
@@ -174,6 +210,38 @@ fn draw(canvas: &web_sys::HtmlCanvasElement, trades: &[PublicTrade]) {
     let xs = |t: f64| pad_l + ((t - tmin) / WINDOW_MS) * inner_w;
     let ys = |p: f64| pad_t + (1.0 - (p - ymin) / (ymax - ymin)) * inner_h;
 
+    // Axes: horizontal grid lines + price labels left, time labels
+    // along the bottom.
+    ctx.set_stroke_style_str(BORDER_COLOR);
+    ctx.set_fill_style_str(MUTED_COLOR);
+    ctx.set_font("10px ui-monospace, monospace");
+    ctx.set_line_width(1.0);
+    let y_range = ymax - ymin;
+    let y_decimals: usize = if y_range >= 10.0 { 0 } else if y_range >= 2.0 { 1 } else { 2 };
+    for i in 0..=Y_STEPS {
+        let y = pad_t + (i as f64 / Y_STEPS as f64) * inner_h;
+        ctx.begin_path();
+        ctx.move_to(pad_l, y);
+        ctx.line_to(css_w - pad_r, y);
+        ctx.stroke();
+        let v = ymax - (i as f64 / Y_STEPS as f64) * (ymax - ymin);
+        ctx.set_text_align("right");
+        ctx.fill_text(&format!("{v:.*}", y_decimals), pad_l - 4.0, y + 3.0).ok();
+    }
+    ctx.set_text_align("center");
+    let x_step = pick_x_step(WINDOW_MS);
+    let mut offset = 0.0;
+    while offset <= WINDOW_MS {
+        let t = now - offset;
+        let x = xs(t);
+        let mins = (offset / 60_000.0).round() as i64;
+        ctx.fill_text(&format_back(mins), x, css_h - 4.0).ok();
+        offset += x_step;
+    }
+
+    if line.len() < 2 {
+        return;
+    }
     ctx.set_stroke_style_str(LINE_COLOR);
     ctx.set_line_width(2.0);
     ctx.set_line_join("round");
