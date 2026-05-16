@@ -14,6 +14,11 @@ async fn fetch_scenarios() -> Option<Vec<Scenario>> {
     Request::get("/api/scenarios").send().await.ok()?.json().await.ok()
 }
 
+async fn post_action(name: &str, action: &str) {
+    let url = format!("/api/scenarios/{name}/{action}");
+    let _ = Request::post(&url).send().await;
+}
+
 #[component]
 pub fn Scenarios() -> impl IntoView {
     let (scenarios, set_scenarios) = signal(Vec::<Scenario>::new());
@@ -33,12 +38,24 @@ pub fn Scenarios() -> impl IntoView {
     });
 
     let act = move |name: String, action: &'static str| {
-        // Scenario names come from the lisp config — slug-style
-        // identifiers in practice, so no URL encoding needed here
-        // even though the JS UI defensively encodes them.
         leptos::task::spawn_local(async move {
-            let url = format!("/api/scenarios/{name}/{action}");
-            let _ = Request::post(&url).send().await;
+            post_action(&name, action).await;
+            if let Some(list) = fetch_scenarios().await {
+                set_scenarios.set(list);
+            }
+        });
+    };
+
+    // Switching from one active scenario to another: stop the
+    // current then start the picked one. Errors swallowed because
+    // the next poll reflects the truth either way.
+    let switch_to = move |target: String| {
+        leptos::task::spawn_local(async move {
+            let list = fetch_scenarios().await.unwrap_or_default();
+            if let Some(active) = list.iter().find(|s| s.current_stage.is_some()) {
+                post_action(&active.name, "stop").await;
+            }
+            post_action(&target, "start").await;
             if let Some(list) = fetch_scenarios().await {
                 set_scenarios.set(list);
             }
@@ -55,59 +72,18 @@ pub fn Scenarios() -> impl IntoView {
             }
             .into_any();
         }
-        let rows = list
-            .into_iter()
-            .map(|s| {
-                let n = s.name.clone();
-                let summary = match s.current_stage {
-                    Some(idx) => format!(
-                        "{} · stage {}/{}",
-                        s.name,
-                        idx + 1,
-                        s.stages.len()
-                    ),
-                    None => s.name.clone(),
-                };
-                let active = s.current_stage.is_some();
-                let on_start = {
-                    let n = n.clone();
-                    move |_| act(n.clone(), "start")
-                };
-                let on_prev = {
-                    let n = n.clone();
-                    move |_| act(n.clone(), "prev")
-                };
-                let on_next = {
-                    let n = n.clone();
-                    move |_| act(n.clone(), "next")
-                };
-                let on_stop = {
-                    let n = n.clone();
-                    move |_| act(n.clone(), "stop")
-                };
-                view! {
-                    <div class="scenario">
-                        <div class="scenario-head">
-                            <strong>{summary}</strong>
-                            <span class="muted">{s.description}</span>
-                            <span class="scenario-controls" style="margin-left:auto">
-                                {(!active).then(|| view! {
-                                    <button on:click=on_start>"Start"</button>
-                                })}
-                                {active.then(|| view! {
-                                    <>
-                                        <button on:click=on_prev>"Prev"</button>
-                                        <button on:click=on_next>"Next"</button>
-                                        <button on:click=on_stop>"Stop"</button>
-                                    </>
-                                })}
-                            </span>
-                        </div>
-                    </div>
-                }
-            })
-            .collect_view();
-        view! { <div>{rows}</div> }.into_any()
+        let active = list.iter().find(|s| s.current_stage.is_some()).cloned();
+        match active {
+            Some(a) => {
+                let inactive: Vec<_> = list
+                    .into_iter()
+                    .filter(|s| s.current_stage.is_none())
+                    .collect();
+                view! { <ActiveScenarioRow scenario=a others=inactive on_action=act on_switch=switch_to/> }
+                    .into_any()
+            }
+            None => view! { <IdlePicker scenarios=list on_start=act/> }.into_any(),
+        }
     };
 
     view! {
@@ -115,5 +91,101 @@ pub fn Scenarios() -> impl IntoView {
             <h2>"Scenarios"</h2>
             {body}
         </section>
+    }
+}
+
+#[component]
+fn IdlePicker<F>(scenarios: Vec<Scenario>, on_start: F) -> impl IntoView
+where
+    F: Fn(String, &'static str) + Copy + 'static,
+{
+    let on_change = move |ev| {
+        let name = event_target_value(&ev);
+        if !name.is_empty() {
+            on_start(name, "start");
+        }
+    };
+    view! {
+        <div class="scenario-picker">
+            <span class="muted">"Start a scenario:"</span>
+            <select on:change=on_change>
+                <option value="">"— pick one —"</option>
+                {scenarios.into_iter().map(|s| view! {
+                    <option value=s.name.clone()>
+                        {format!("{} — {}", s.name, s.description)}
+                    </option>
+                }).collect_view()}
+            </select>
+        </div>
+    }
+}
+
+#[component]
+fn ActiveScenarioRow<F, S>(
+    scenario: Scenario,
+    others: Vec<Scenario>,
+    on_action: F,
+    on_switch: S,
+) -> impl IntoView
+where
+    F: Fn(String, &'static str) + Copy + 'static,
+    S: Fn(String) + Copy + 'static,
+{
+    let cur = scenario.current_stage.unwrap_or(0);
+    let last = scenario.stages.len().saturating_sub(1);
+    let n = scenario.name.clone();
+    let summary = format!(
+        "{} · stage {}/{}",
+        scenario.name,
+        cur + 1,
+        scenario.stages.len()
+    );
+    let prev_dis = cur == 0;
+    let next_dis = cur >= last;
+
+    let on_prev = {
+        let n = n.clone();
+        move |_| on_action(n.clone(), "prev")
+    };
+    let on_next = {
+        let n = n.clone();
+        move |_| on_action(n.clone(), "next")
+    };
+    let on_stop = {
+        let n = n.clone();
+        move |_| on_action(n.clone(), "stop")
+    };
+    let on_switch_change = move |ev| {
+        let v = event_target_value(&ev);
+        if !v.is_empty() {
+            on_switch(v);
+        }
+    };
+
+    view! {
+        <div class="scenario active">
+            <div class="scenario-head">
+                <strong>{summary}</strong>
+                {scenario.manual_override.then(|| view! {
+                    <span class="badge-manual">"manual"</span>
+                })}
+                <span class="scenario-controls" style="margin-left:auto">
+                    <button on:click=on_prev disabled=prev_dis>"Prev"</button>
+                    <button on:click=on_next disabled=next_dis>"Next"</button>
+                    <button on:click=on_stop>"Stop"</button>
+                </span>
+            </div>
+            {(!others.is_empty()).then(|| view! {
+                <div class="scenario-picker">
+                    <span class="muted">"Switch to:"</span>
+                    <select on:change=on_switch_change>
+                        <option value="">"—"</option>
+                        {others.into_iter().map(|s| {
+                            view! { <option value=s.name.clone()>{s.name.clone()}</option> }
+                        }).collect_view()}
+                    </select>
+                </div>
+            })}
+        </div>
     }
 }
