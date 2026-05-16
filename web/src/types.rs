@@ -20,3 +20,21 @@ pub struct ClockResp {
     /// operator still sees the simulator's home zone.
     pub tz: String,
 }
+
+/// One print off the /ws/public-trades broadcast. Prices + quantities
+/// arrive as the host's `Decimal::to_string()` output; parsed lazily
+/// only when a panel needs the numeric value. Fields beyond `id` /
+/// `price` are unused until the trades / chart panels port — keep
+/// them deserialized so the wire shape stays a single source of
+/// truth.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct PublicTrade {
+    pub id: u64,
+    pub buy_area: String,
+    pub sell_area: String,
+    pub period: String,
+    pub price: String,
+    pub quantity: String,
+    pub execution_time: String,
+}

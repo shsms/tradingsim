@@ -1,10 +1,12 @@
 #![allow(non_snake_case)] // Leptos components are PascalCase by convention.
 
+use futures::StreamExt;
 use gloo_net::http::Request;
+use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 
 mod types;
-use types::{ClockResp, InfoResp};
+use types::{ClockResp, InfoResp, PublicTrade};
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -40,11 +42,46 @@ fn Shell() -> impl IntoView {
         _ => String::new(),
     };
 
+    // Live trade tape counter. /ws/public-trades emits a snapshot
+    // (the recent history ring) on connect, then one frame per
+    // print. Counting them is enough to prove the stream end-to-end
+    // — the proper tape panel lands next.
+    let (trade_count, set_trade_count) = signal(0_usize);
+    let (latest, set_latest) = signal(None::<PublicTrade>);
+    leptos::task::spawn_local(async move {
+        let mut ws = match WebSocket::open("/ws/public-trades") {
+            Ok(ws) => ws,
+            Err(e) => {
+                leptos::logging::log!("ws open failed: {e:?}");
+                return;
+            }
+        };
+        while let Some(msg) = ws.next().await {
+            if let Ok(Message::Text(s)) = msg
+                && let Ok(t) = serde_json::from_str::<PublicTrade>(&s)
+            {
+                set_trade_count.update(|n| *n += 1);
+                set_latest.set(Some(t));
+            }
+        }
+    });
+
+    let trades_line = move || match latest.get() {
+        Some(t) => format!(
+            "trades: {} (last #{} @ {})",
+            trade_count.get(),
+            t.id,
+            t.price,
+        ),
+        None => format!("trades: {}", trade_count.get()),
+    };
+
     view! {
         <header class="page-header">
             <h1>"tradingsim"</h1>
             <span class="page-meta muted">{info_line}</span>
             <span class="page-meta muted">{tz_line}</span>
+            <span class="page-meta muted">{trades_line}</span>
         </header>
     }
 }
