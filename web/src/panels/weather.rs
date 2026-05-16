@@ -6,6 +6,7 @@ use gloo_net::http::Request;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
+use crate::panels::filter_bar::FilterState;
 use crate::types::WeatherLoc;
 use crate::util::area_tag;
 
@@ -19,6 +20,7 @@ async fn fetch_weather() -> Option<Vec<WeatherLoc>> {
 pub fn Weather() -> impl IntoView {
     let (locs, set_locs) = signal(Vec::<WeatherLoc>::new());
     let (loaded, set_loaded) = signal(false);
+    let filter = expect_context::<RwSignal<FilterState>>();
 
     leptos::task::spawn_local(async move {
         loop {
@@ -31,17 +33,27 @@ pub fn Weather() -> impl IntoView {
     });
 
     let body = move || {
+        let active = filter.with(|f| f.active_areas.clone());
         let list: Vec<_> = locs
             .get()
             .into_iter()
-            // Hide the unlinked fallback location; every configured
-            // area gets its own slot in the shipping config.
-            .filter(|l| l.area_code.is_some())
+            // Hide the unlinked fallback location (no area_code) and
+            // any location whose area isn't on the active-chips list.
+            .filter(|l| {
+                l.area_code
+                    .as_deref()
+                    .map(|c| active.contains(c))
+                    .unwrap_or(false)
+            })
             .collect();
         if list.is_empty() {
             return view! {
                 <i class="muted">
-                    {move || if loaded.get() { "no weather locations" } else { "loading…" }}
+                    {move || if loaded.get() {
+                        "no weather for the active areas"
+                    } else {
+                        "loading…"
+                    }}
                 </i>
             }
             .into_any();

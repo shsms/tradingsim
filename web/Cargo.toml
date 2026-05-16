@@ -24,3 +24,6 @@ serde_json = "1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 # `TimeoutFuture` for the polling loops that match the JS UI's setInterval cadence.
 gloo-timers = { version = "0.3", features = ["futures"] }
+# Direct dep for `web_sys::Storage` (filter-chip persistence) — most
+# other web-sys access lands through leptos / gloo-net's transitive enables.
+web-sys = { version = "0.3", features = ["Storage", "Window"] }

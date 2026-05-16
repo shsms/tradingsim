@@ -9,7 +9,7 @@ mod panels;
 mod types;
 mod util;
 
-use panels::{PublicTrades, Scenarios, TRADES_BUFFER_CAP, Weather};
+use panels::{FilterBar, PublicTrades, Scenarios, TRADES_BUFFER_CAP, Weather, load_filter};
 use types::{ClockResp, InfoResp, PublicTrade};
 
 fn main() {
@@ -19,6 +19,10 @@ fn main() {
 
 #[component]
 fn Shell() -> impl IntoView {
+    // Filter state shared with FilterBar, Weather, PublicTrades —
+    // hydrated from localStorage so chip picks survive reload.
+    provide_context(RwSignal::new(load_filter()));
+
     // Initial /api/info + /api/clock fetch. Both are fired once on
     // mount; refresh-on-tick comes when the header pulse bar lands.
     let info = LocalResource::new(|| async {
@@ -95,6 +99,7 @@ fn Shell() -> impl IntoView {
             <span class="page-meta muted">{trades_line}</span>
         </header>
         <Scenarios/>
+        <FilterBar/>
         <Weather/>
         <PublicTrades/>
     }

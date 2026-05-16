@@ -3,6 +3,7 @@
 
 use leptos::prelude::*;
 
+use crate::panels::filter_bar::FilterState;
 use crate::types::PublicTrade;
 use crate::util::{area_tag, short_time_sec_utc, short_time_utc};
 
@@ -15,12 +16,29 @@ const TRADES_DISPLAY_CAP: usize = 10;
 #[component]
 pub fn PublicTrades() -> impl IntoView {
     let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
+    let filter = expect_context::<RwSignal<FilterState>>();
 
     let body = move || {
-        let rows: Vec<_> = trades.with(|v| v.iter().take(TRADES_DISPLAY_CAP).cloned().collect());
+        let active = filter.with(|f| f.active_areas.clone());
+        let rows: Vec<_> = trades.with(|v| {
+            v.iter()
+                .filter(|t| {
+                    active.contains(t.buy_area.as_str())
+                        || active.contains(t.sell_area.as_str())
+                })
+                .take(TRADES_DISPLAY_CAP)
+                .cloned()
+                .collect()
+        });
         if rows.is_empty() {
-            return view! { <tr><td colspan="6" class="muted"><i>"awaiting prints…"</i></td></tr> }
-                .into_any();
+            return view! {
+                <tr>
+                    <td colspan="6" class="muted">
+                        <i>"no prints for the active areas"</i>
+                    </td>
+                </tr>
+            }
+            .into_any();
         }
         rows.into_iter()
             .map(|t| {
