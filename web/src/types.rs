@@ -21,6 +21,57 @@ pub struct ClockResp {
     pub tz: String,
 }
 
+/// One gridpool row off /api/gridpools — id + name + the EIC areas
+/// the pool participates in + cached order/trade counts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GridpoolResp {
+    pub id: u64,
+    pub name: String,
+    pub areas: Vec<String>,
+    pub orders: usize,
+    pub trades: usize,
+}
+
+/// One order in a gridpool's drill-down. Enum-valued fields ride as
+/// the proto's SCREAMING_SNAKE names (`MARKET_SIDE_BUY`,
+/// `ORDER_STATE_ACTIVE`, …); the panel shortens them for display.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GridpoolOrder {
+    pub id: u64,
+    pub side: String,
+    pub area: String,
+    pub period: String,
+    pub order_type: String,
+    pub price: String,
+    pub quantity: String,
+    pub open_quantity: String,
+    pub filled_quantity: String,
+    pub state: String,
+    pub state_reason: String,
+    pub state_actor: String,
+    pub create_time: String,
+    pub modification_time: String,
+    pub valid_until: Option<String>,
+    pub tag: Option<String>,
+}
+
+/// One fill against a gridpool order. `order_id` lets the panel
+/// cross-reference back to the parent order on its own.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GridpoolTrade {
+    pub id: u64,
+    pub order_id: u64,
+    pub side: String,
+    pub area: String,
+    pub period: String,
+    pub execution_time: String,
+    pub price: String,
+    pub quantity: String,
+    pub state: String,
+}
+
 /// One weather location row off /api/weather. `area_code` is None
 /// for the unlinked fallback location; the panel filters those out
 /// because every configured area carries its own location in the

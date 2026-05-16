@@ -9,7 +9,9 @@ mod panels;
 mod types;
 mod util;
 
-use panels::{FilterBar, PublicTrades, Scenarios, TRADES_BUFFER_CAP, Weather, load_filter};
+use panels::{
+    FilterBar, Gridpools, PublicTrades, Scenarios, TRADES_BUFFER_CAP, Weather, load_filter,
+};
 use types::{ClockResp, InfoResp, PublicTrade};
 
 fn main() {
@@ -99,6 +101,7 @@ fn Shell() -> impl IntoView {
             <span class="page-meta muted">{trades_line}</span>
         </header>
         <Scenarios/>
+        <Gridpools/>
         <FilterBar/>
         <Weather/>
         <PublicTrades/>
