@@ -9,8 +9,11 @@ use gloo_net::http::Request;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
-use crate::types::{GridpoolOrder, GridpoolResp};
-use crate::util::{area_tag, short_order_state, short_side, short_time_sec_utc, short_time_utc};
+use crate::types::{GridpoolOrder, GridpoolResp, GridpoolTrade};
+use crate::util::{
+    area_tag, short_order_state, short_side, short_time_sec_utc, short_time_utc,
+    short_trade_state,
+};
 
 const GRIDPOOL_POLL: Duration = Duration::from_secs(3);
 
@@ -23,12 +26,19 @@ async fn fetch_orders(pool_id: u64) -> Option<Vec<GridpoolOrder>> {
     Request::get(&url).send().await.ok()?.json().await.ok()
 }
 
+async fn fetch_trades(pool_id: u64, order_id: u64) -> Option<Vec<GridpoolTrade>> {
+    let url = format!("/api/gridpools/{pool_id}/orders/{order_id}/trades");
+    Request::get(&url).send().await.ok()?.json().await.ok()
+}
+
 #[component]
 pub fn Gridpools() -> impl IntoView {
     let (pools, set_pools) = signal(Vec::<GridpoolResp>::new());
     let (selected, set_selected) = signal(None::<u64>);
     let (orders, set_orders) = signal(Vec::<GridpoolOrder>::new());
     let (period_filter, set_period_filter) = signal(None::<String>);
+    let (selected_order, set_selected_order) = signal(None::<u64>);
+    let (trades, set_trades) = signal(Vec::<GridpoolTrade>::new());
     let (loaded, set_loaded) = signal(false);
 
     let refresh_orders = move || {
@@ -43,11 +53,33 @@ pub fn Gridpools() -> impl IntoView {
         });
     };
 
+    let refresh_trades = move || {
+        let (Some(pool), Some(order)) =
+            (selected.get_untracked(), selected_order.get_untracked())
+        else {
+            set_trades.set(Vec::new());
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            if let Some(list) = fetch_trades(pool, order).await {
+                set_trades.set(list);
+            }
+        });
+    };
+
     // Selection-change immediate fetch so the orders pane updates
     // without waiting for the next poll tick.
     Effect::new(move |_| {
         selected.track();
+        // Reset child state when the parent pool changes.
+        set_selected_order.set(None);
+        set_period_filter.set(None);
         refresh_orders();
+    });
+
+    Effect::new(move |_| {
+        selected_order.track();
+        refresh_trades();
     });
 
     // Drop a stale period filter whenever the orders list changes —
@@ -61,6 +93,18 @@ pub fn Gridpools() -> impl IntoView {
         });
         if !active {
             set_period_filter.set(None);
+        }
+        // Drop a selected order that's vanished from the list
+        // (filled + pruned, or cancelled) so the trades pane doesn't
+        // keep showing stale fills.
+        let order_alive = orders.with(|os| {
+            selected_order
+                .get_untracked()
+                .map(|oid| os.iter().any(|o| o.id == oid))
+                .unwrap_or(true)
+        });
+        if !order_alive {
+            set_selected_order.set(None);
         }
     });
 
@@ -79,6 +123,7 @@ pub fn Gridpools() -> impl IntoView {
                 set_loaded.set(true);
             }
             refresh_orders();
+            refresh_trades();
             TimeoutFuture::new(GRIDPOOL_POLL.as_millis() as u32).await;
         }
     });
@@ -173,10 +218,18 @@ pub fn Gridpools() -> impl IntoView {
             };
             return view! { <i class="muted">{msg}</i> }.into_any();
         }
+        let cur_order = selected_order.get();
         let rows = visible.into_iter().map(|o| {
             let side_cls = if o.side == "MARKET_SIDE_BUY" { "buy" } else { "sell" };
+            let oid = o.id;
+            let cls = if cur_order == Some(oid) {
+                "gp-order-row selected"
+            } else {
+                "gp-order-row"
+            };
+            let on_click = move |_| set_selected_order.set(Some(oid));
             view! {
-                <tr class="gp-order-row">
+                <tr class=cls on:click=on_click>
                     <td>{o.id.to_string()}</td>
                     <td class=side_cls>{short_side(&o.side).to_string()}</td>
                     <td><span class="area-badge">{area_tag(&o.area)}</span></td>
@@ -204,6 +257,46 @@ pub fn Gridpools() -> impl IntoView {
         .into_any()
     };
 
+    let trades_body = move || {
+        if selected.get().is_none() {
+            return view! { <i class="muted">"select a gridpool"</i> }.into_any();
+        }
+        if selected_order.get().is_none() {
+            return view! { <i class="muted">"select an order"</i> }.into_any();
+        }
+        let list = trades.get();
+        if list.is_empty() {
+            return view! { <i class="muted">"no trades yet for this order"</i> }.into_any();
+        }
+        let rows = list
+            .into_iter()
+            .map(|t| {
+                view! {
+                    <tr>
+                        <td>{t.id.to_string()}</td>
+                        <td><span class="area-badge">{area_tag(&t.area)}</span></td>
+                        <td>{short_time_sec_utc(&t.execution_time)}</td>
+                        <td>{t.price}</td>
+                        <td>{t.quantity}</td>
+                        <td>{short_trade_state(&t.state).to_string()}</td>
+                    </tr>
+                }
+            })
+            .collect_view();
+        view! {
+            <div class="scroll">
+                <table>
+                    <thead><tr>
+                        <th>"id"</th><th>"area"</th><th>"exec"</th>
+                        <th>"price"</th><th>"qty"</th><th>"state"</th>
+                    </tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+            </div>
+        }
+        .into_any()
+    };
+
     view! {
         <section class="panel panel-gridpools">
             <h2>"Gridpools"</h2>
@@ -221,7 +314,8 @@ pub fn Gridpools() -> impl IntoView {
                     {orders_body}
                 </div>
                 <div class="gridpool-trades">
-                    <i class="muted">"trades pane — porting"</i>
+                    <h2>"Trades"</h2>
+                    {trades_body}
                 </div>
             </div>
         </section>

@@ -70,7 +70,6 @@ pub fn short_order_state(s: &str) -> &str {
     }
 }
 
-#[allow(dead_code)]
 pub fn short_trade_state(s: &str) -> &str {
     match s {
         "TRADE_STATE_ACTIVE" => "active",
