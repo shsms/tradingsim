@@ -22,3 +22,5 @@ serde_json = "1"
 # `Stream::next()` on the gloo-net WebSocket comes from futures-util's
 # StreamExt; pulled here via the umbrella crate.
 futures = { version = "0.3", default-features = false, features = ["std"] }
+# `TimeoutFuture` for the polling loops that match the JS UI's setInterval cadence.
+gloo-timers = { version = "0.3", features = ["futures"] }
