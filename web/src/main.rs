@@ -10,6 +10,7 @@ mod panels;
 mod types;
 mod util;
 
+use panels::chart::{PricePoint, record_trade};
 use panels::{
     ContractPill, FilterBar, Gridpools, PriceChart, PublicTrades, PulseBar, Scenarios, SparkState,
     TzMode, TRADES_BUFFER_CAP, Weather, load_filter, load_tz_mode,
@@ -100,10 +101,15 @@ fn Shell() -> impl IntoView {
     // first successful poll so the pulse-bar pill can light up.
     let (trade_count, set_trade_count) = signal(0_usize);
     let (trades, set_trades) = signal(Vec::<PublicTrade>::new());
+    // Dedicated price ring for the chart — capped by time (4 h)
+    // rather than count, so the auto-pin flip at each 15-min
+    // boundary lands on a contract that already has history.
+    let chart_prices = RwSignal::new(Vec::<PricePoint>::new());
     let spark = RwSignal::new(SparkState::default());
     let weather_loaded = RwSignal::new(false);
     provide_context(trades);
     provide_context(trade_count);
+    provide_context(chart_prices);
     provide_context(spark);
     provide_context(weather_loaded);
     leptos::task::spawn_local(async move {
@@ -120,6 +126,7 @@ fn Shell() -> impl IntoView {
             {
                 set_trade_count.update(|n| *n += 1);
                 let buy_area = t.buy_area.clone();
+                chart_prices.update(|v| record_trade(v, &t));
                 set_trades.update(|v| {
                     v.insert(0, t);
                     if v.len() > TRADES_BUFFER_CAP {

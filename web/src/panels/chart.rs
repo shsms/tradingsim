@@ -14,6 +14,51 @@ use crate::intl::short_time;
 use crate::types::PublicTrade;
 use crate::util::{ALL_AREAS, AreaGroup};
 
+/// Chart history window — how far back the price buffer keeps
+/// prints. Matches the JS UI's `MAX_WINDOW_MS`. Capping by time
+/// (instead of by count, like the public-trades display ring) keeps
+/// the auto-pin flip at each 15-min boundary in a state where the
+/// new contract already has a history to draw against, rather than
+/// emptying the canvas until enough prints accumulate.
+pub const PRICE_BUFFER_MS: f64 = 4.0 * 60.0 * 60.0 * 1000.0;
+
+/// One row in the chart's history buffer — pre-parsed exec /
+/// delivery epochs + parsed price so the redraw doesn't re-parse a
+/// 4-hour buffer of `Decimal::to_string()` outputs on every tick.
+#[derive(Debug, Clone, Copy)]
+pub struct PricePoint {
+    pub t: f64,
+    pub price: f64,
+    pub period_ms: f64,
+}
+
+/// Push a public-trade print into the chart history. Rejects prints
+/// that don't touch a home area or that fail to parse; trims the
+/// front of the buffer to PRICE_BUFFER_MS of history.
+pub fn record_trade(buf: &mut Vec<PricePoint>, t: &PublicTrade) {
+    let is_home = ALL_AREAS
+        .iter()
+        .any(|a| a.group == AreaGroup::Home && (a.code == t.buy_area || a.code == t.sell_area));
+    if !is_home {
+        return;
+    }
+    let exec = Date::parse(&t.execution_time);
+    let pms = Date::parse(&t.period);
+    let Ok(price) = t.price.parse::<f64>() else { return };
+    if !exec.is_finite() || !pms.is_finite() {
+        return;
+    }
+    buf.push(PricePoint { t: exec, price, period_ms: pms });
+    let cutoff = Date::now() - PRICE_BUFFER_MS;
+    while let Some(front) = buf.first() {
+        if front.t < cutoff {
+            buf.remove(0);
+        } else {
+            break;
+        }
+    }
+}
+
 const PERIOD_STEP_MS: f64 = 15.0 * 60.0 * 1000.0;
 const EMA_ALPHA: f64 = 0.4;
 const LINE_COLOR: &str = "#58a6ff";
@@ -96,17 +141,9 @@ fn format_back(mins: i64) -> String {
     }
 }
 
-fn home_areas() -> Vec<&'static str> {
-    ALL_AREAS
-        .iter()
-        .filter(|a| a.group == AreaGroup::Home)
-        .map(|a| a.code)
-        .collect()
-}
-
 #[component]
 pub fn PriceChart() -> impl IntoView {
-    let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
+    let prices = expect_context::<RwSignal<Vec<PricePoint>>>();
     let sim_tz = expect_context::<RwSignal<String>>();
     let focused_period = expect_context::<RwSignal<Option<String>>>();
     let window_min = RwSignal::new(load_window());
@@ -129,7 +166,7 @@ pub fn PriceChart() -> impl IntoView {
                 let pinned = chart_period
                     .get_untracked()
                     .or_else(|| focused_period.get_untracked());
-                trades.with_untracked(|v| draw(&canvas, v, win_ms, pinned.as_deref()));
+                prices.with_untracked(|v| draw(&canvas, v, win_ms, pinned.as_deref()));
             }
             TimeoutFuture::new(1000).await;
         }
@@ -175,16 +212,18 @@ pub fn PriceChart() -> impl IntoView {
         format!("Price tape — delivery {} ({tag})", short_time(&iso, &tz))
     };
 
-    // Distinct delivery periods seen in the trade buffer, memoised so
-    // the dropdown only re-renders when the set actually changes —
-    // not on every WS message that adds a print to a period already
-    // in the list.
+    // Distinct delivery periods seen in the chart's price buffer,
+    // memoised so the dropdown only re-renders when the set actually
+    // changes — not on every WS message that adds a print to a
+    // period already in the list.
     let distinct_periods: Memo<Vec<String>> = Memo::new(move |_| {
-        let mut periods: Vec<String> =
-            trades.with(|v| v.iter().map(|t| t.period.clone()).collect());
-        periods.sort();
-        periods.dedup();
-        periods
+        let mut ms: Vec<i64> =
+            prices.with(|v| v.iter().map(|p| p.period_ms as i64).collect());
+        ms.sort_unstable();
+        ms.dedup();
+        ms.into_iter()
+            .map(|m| String::from(Date::new(&(m as f64).into()).to_iso_string()))
+            .collect()
     });
 
     let period_options = move || {
@@ -261,7 +300,7 @@ struct Point {
     price: f64,
 }
 
-fn buckets(prices: &[PublicTrade], home: &[&str], window_ms: f64, period_ms: f64) -> Vec<Point> {
+fn buckets(prices: &[PricePoint], window_ms: f64, period_ms: f64) -> Vec<Point> {
     let now = Date::now();
     let tmin = now - window_ms;
     // Pick a bucket size so the window holds ~60 buckets — enough
@@ -269,19 +308,13 @@ fn buckets(prices: &[PublicTrade], home: &[&str], window_ms: f64, period_ms: f64
     // out per bucket. Snapped to whole seconds.
     let bucket_ms = (window_ms / 60.0 / 1000.0).round().max(5.0) * 1000.0;
     let mut sums: BTreeMap<i64, (f64, u32)> = BTreeMap::new();
-    for t in prices {
-        if !home.contains(&t.buy_area.as_str()) && !home.contains(&t.sell_area.as_str()) {
+    for p in prices {
+        if p.t < tmin || p.period_ms != period_ms {
             continue;
         }
-        let ms = Date::parse(&t.execution_time);
-        let pms = Date::parse(&t.period);
-        if !ms.is_finite() || !pms.is_finite() || ms < tmin || pms != period_ms {
-            continue;
-        }
-        let Ok(price) = t.price.parse::<f64>() else { continue };
-        let b = (ms / bucket_ms).floor() as i64;
+        let b = (p.t / bucket_ms).floor() as i64;
         let e = sums.entry(b).or_insert((0.0, 0));
-        e.0 += price;
+        e.0 += p.price;
         e.1 += 1;
     }
     let mut out = Vec::with_capacity(sums.len());
@@ -303,7 +336,7 @@ fn buckets(prices: &[PublicTrade], home: &[&str], window_ms: f64, period_ms: f64
 
 fn draw(
     canvas: &web_sys::HtmlCanvasElement,
-    trades: &[PublicTrade],
+    prices: &[PricePoint],
     window_ms: f64,
     pinned: Option<&str>,
 ) {
@@ -329,9 +362,8 @@ fn draw(
     let inner_w = css_w - pad_l - pad_r;
     let inner_h = css_h - pad_t - pad_b;
 
-    let home = home_areas();
     let period_ms = effective_period_ms(pinned);
-    let line = buckets(trades, &home, window_ms, period_ms);
+    let line = buckets(prices, window_ms, period_ms);
 
     let now = Date::now();
     let tmin = now - window_ms;
