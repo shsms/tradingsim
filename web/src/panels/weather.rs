@@ -25,12 +25,22 @@ pub fn Weather() -> impl IntoView {
 
     leptos::task::spawn_local(async move {
         loop {
-            if let Some(list) = fetch_weather().await {
+            let got = fetch_weather().await;
+            let success = got.is_some();
+            if let Some(list) = got {
                 set_locs.set(list);
                 set_loaded.set(true);
                 weather_loaded.set(true);
             }
-            TimeoutFuture::new(WEATHER_POLL.as_millis() as u32).await;
+            // Fast retry until the first successful fetch lands so a
+            // transient hiccup at startup doesn't leave the panel
+            // staring at "loading…" for a full poll interval.
+            let delay = if success {
+                WEATHER_POLL.as_millis() as u32
+            } else {
+                1000
+            };
+            TimeoutFuture::new(delay).await;
         }
     });
 

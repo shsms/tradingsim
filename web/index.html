@@ -4,6 +4,16 @@
 <meta charset="utf-8">
 <title>tradingsim</title>
 <link data-trunk rel="css" href="../ui-assets/style.css">
+<!-- Warm the browser's HTTP cache for the panels' first API calls
+     in parallel with the WASM download. When the panels mount and
+     call fetch() on these URLs the response is already in cache
+     instead of starting a fresh round-trip — biggest win on
+     higher-latency links to a remote tradingsim. -->
+<link rel="preload" href="/api/info" as="fetch" crossorigin="anonymous">
+<link rel="preload" href="/api/clock" as="fetch" crossorigin="anonymous">
+<link rel="preload" href="/api/weather" as="fetch" crossorigin="anonymous">
+<link rel="preload" href="/api/scenarios" as="fetch" crossorigin="anonymous">
+<link rel="preload" href="/api/gridpools" as="fetch" crossorigin="anonymous">
 </head>
 <body></body>
 </html>
