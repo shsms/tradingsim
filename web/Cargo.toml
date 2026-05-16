@@ -30,5 +30,7 @@ web-sys = { version = "0.3", features = [
     "Storage", "Window",
     # Body class manipulation for the density toggle.
     "Document", "HtmlElement", "Element", "DomTokenList",
+    # Canvas + 2d context for the price chart.
+    "HtmlCanvasElement", "CanvasRenderingContext2d",
 ] }
 js-sys = "0.3"
