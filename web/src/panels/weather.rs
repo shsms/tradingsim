@@ -71,6 +71,10 @@ pub fn Weather() -> impl IntoView {
     view! {
         <section class="panel panel-weather">
             <h2>"Weather (now)"</h2>
+            <div class="muted" style="margin-bottom:6px">
+                "Rows match the active area chips. Click a row for lat/lon "
+                "and wind direction."
+            </div>
             {body}
         </section>
     }
