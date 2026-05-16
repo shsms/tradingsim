@@ -19,8 +19,8 @@
 ;; Watch the support files so saving them also triggers a reload.
 (watch-file "sim/common.lisp")
 
-(set-grpc-socket-addr "[::1]:8810")
-(set-ui-addr "127.0.0.1:8811")
+(set-grpc-socket-addr "[::1]:4400")
+(set-ui-addr "127.0.0.1:4401")
 (set-physics-tick-ms 100)
 
 ;; Bias-scale knob — EUR per (bias - 0.5) unit pushed into the MM's
