@@ -50,7 +50,11 @@ fn Shell() -> impl IntoView {
     // print. Counting them is enough to prove the stream end-to-end
     // — the proper tape panel lands next.
     let (trade_count, set_trade_count) = signal(0_usize);
-    let (latest, set_latest) = signal(None::<PublicTrade>);
+    let (trades, set_trades) = signal(Vec::<PublicTrade>::new());
+    // The recent-trades ring is consumed by the public-trades panel
+    // (and later the price chart + sparkbars). Provide it via context
+    // so the WS plumbing stays in one place.
+    provide_context(trades);
     leptos::task::spawn_local(async move {
         let mut ws = match WebSocket::open("/ws/public-trades") {
             Ok(ws) => ws,
@@ -64,19 +68,27 @@ fn Shell() -> impl IntoView {
                 && let Ok(t) = serde_json::from_str::<PublicTrade>(&s)
             {
                 set_trade_count.update(|n| *n += 1);
-                set_latest.set(Some(t));
+                set_trades.update(|v| {
+                    v.insert(0, t);
+                    if v.len() > TRADES_BUFFER_CAP {
+                        v.truncate(TRADES_BUFFER_CAP);
+                    }
+                });
             }
         }
     });
 
-    let trades_line = move || match latest.get() {
-        Some(t) => format!(
-            "trades: {} (last #{} @ {})",
-            trade_count.get(),
-            t.id,
-            t.price,
-        ),
-        None => format!("trades: {}", trade_count.get()),
+    let trades_line = move || {
+        let latest = trades.with(|v| v.first().cloned());
+        match latest {
+            Some(t) => format!(
+                "trades: {} (last #{} @ {})",
+                trade_count.get(),
+                t.id,
+                t.price,
+            ),
+            None => format!("trades: {}", trade_count.get()),
+        }
     };
 
     view! {
@@ -88,8 +100,14 @@ fn Shell() -> impl IntoView {
         </header>
         <Scenarios/>
         <Weather/>
+        <PublicTrades/>
     }
 }
+
+// Matches the JS UI's TRADES_BUFFER_CAP — enough history to back
+// the price chart's resampler without growing unbounded.
+const TRADES_BUFFER_CAP: usize = 500;
+const TRADES_DISPLAY_CAP: usize = 10;
 
 const WEATHER_POLL: Duration = Duration::from_secs(10);
 
@@ -179,6 +197,87 @@ fn WeatherCell(loc: WeatherLoc) -> impl IntoView {
             </div>
         </div>
     }
+}
+
+#[component]
+fn PublicTrades() -> impl IntoView {
+    let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
+
+    let body = move || {
+        let rows: Vec<_> = trades.with(|v| v.iter().take(TRADES_DISPLAY_CAP).cloned().collect());
+        if rows.is_empty() {
+            return view! { <tr><td colspan="6" class="muted"><i>"awaiting prints…"</i></td></tr> }
+                .into_any();
+        }
+        rows.into_iter()
+            .map(|t| {
+                let area_cell = if t.buy_area == t.sell_area {
+                    view! {
+                        <td><span class="area-badge">{area_tag(&t.buy_area)}</span></td>
+                    }
+                    .into_any()
+                } else {
+                    view! {
+                        <td>
+                            <span class="area-badge">{area_tag(&t.buy_area)}</span>
+                            <span class="area-cross">"→"</span>
+                            <span class="area-badge">{area_tag(&t.sell_area)}</span>
+                        </td>
+                    }
+                    .into_any()
+                };
+                view! {
+                    <tr>
+                        <td>{format!("#{}", t.id)}</td>
+                        <td>{t.quantity}</td>
+                        <td>{t.price}</td>
+                        {area_cell}
+                        <td class="muted">{short_time_utc(&t.period)}</td>
+                        <td class="muted">{short_time_sec_utc(&t.execution_time)}</td>
+                    </tr>
+                }
+                .into_any()
+            })
+            .collect_view()
+            .into_any()
+    };
+
+    view! {
+        <section class="panel panel-trades">
+            <div class="book-head">
+                <h2>"Public trades"</h2>
+            </div>
+            <div class="scroll">
+                <table class="trades-table">
+                    <colgroup>
+                        <col class="col-id"/>
+                        <col class="col-qty"/>
+                        <col class="col-price"/>
+                        <col class="col-area"/>
+                        <col class="col-delivery"/>
+                        <col class="col-exec"/>
+                    </colgroup>
+                    <thead><tr>
+                        <th>"id"</th><th>"qty"</th><th>"price"</th>
+                        <th>"area"</th><th>"delivery"</th><th>"exec"</th>
+                    </tr></thead>
+                    <tbody>{body}</tbody>
+                </table>
+            </div>
+        </section>
+    }
+}
+
+/// Slice HH:MM out of an RFC-3339 UTC timestamp. The JS UI uses
+/// `Intl.DateTimeFormat` keyed on the configured sim tz; that
+/// arrives with the pulse-bar commit. Until then, prints carry
+/// the wire-side UTC time.
+fn short_time_utc(iso: &str) -> String {
+    iso.get(11..16).unwrap_or("--:--").to_string()
+}
+
+fn short_time_sec_utc(iso: &str) -> String {
+    iso.get(11..19).unwrap_or("--:--:--").to_string()
 }
 
 /// Short tag for an EIC area code — `10YDE-EON------1` → `TN`, etc.
