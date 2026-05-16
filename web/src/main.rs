@@ -111,11 +111,17 @@ fn Shell() -> impl IntoView {
             <span class="page-meta muted">{trades_line}</span>
         </header>
         <PulseBar/>
-        <PriceChart/>
-        <Scenarios/>
-        <Gridpools/>
-        <FilterBar/>
-        <Weather/>
-        <PublicTrades/>
+        <div class="grid">
+            <div class="tier-row tier-chart-scenarios">
+                <PriceChart/>
+                <Scenarios/>
+            </div>
+            <Gridpools/>
+            <FilterBar/>
+            <div class="tier-row tier-weather-trades">
+                <Weather/>
+                <PublicTrades/>
+            </div>
+        </div>
     }
 }
