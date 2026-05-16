@@ -149,13 +149,22 @@ pub fn PriceChart() -> impl IntoView {
         save_chart_period(next.as_deref());
     };
 
+    // Re-tick the title once per second so the (auto) timestamp
+    // rolls over at each 15-min boundary; without this it would stay
+    // frozen at whatever boundary was current on mount.
+    let (title_tick, set_title_tick) = signal(0_u64);
+    leptos::task::spawn_local(async move {
+        loop {
+            TimeoutFuture::new(1000).await;
+            set_title_tick.update(|n| *n = n.wrapping_add(1));
+        }
+    });
     let title = move || {
-        let win_ms = window_min.get() as f64 * 60_000.0;
+        let _ = title_tick.get();
         let dropdown = chart_period.get();
         let pinned = effective_pin();
-        let trades_snapshot = trades.get();
         let tz = sim_tz.get();
-        let eff = effective_period_iso(&trades_snapshot, &home_areas(), win_ms, pinned.as_deref());
+        let iso = effective_period_iso(pinned.as_deref());
         let tag = if dropdown.is_some() {
             "picked"
         } else if focused_period.get().is_some() {
@@ -163,20 +172,26 @@ pub fn PriceChart() -> impl IntoView {
         } else {
             "auto"
         };
-        match eff {
-            Some(iso) => format!("Price tape — delivery {} ({tag})", short_time(&iso, &tz)),
-            None => "Price tape — delivery — (auto)".to_string(),
-        }
+        format!("Price tape — delivery {} ({tag})", short_time(&iso, &tz))
     };
+
+    // Distinct delivery periods seen in the trade buffer, memoised so
+    // the dropdown only re-renders when the set actually changes —
+    // not on every WS message that adds a print to a period already
+    // in the list.
+    let distinct_periods: Memo<Vec<String>> = Memo::new(move |_| {
+        let mut periods: Vec<String> =
+            trades.with(|v| v.iter().map(|t| t.period.clone()).collect());
+        periods.sort();
+        periods.dedup();
+        periods
+    });
 
     let period_options = move || {
         let pinned = chart_period.get();
         let pinned_str = pinned.as_deref().unwrap_or("");
         let tz = sim_tz.get();
-        let mut periods: Vec<String> =
-            trades.with(|v| v.iter().map(|t| t.period.clone()).collect());
-        periods.sort();
-        periods.dedup();
+        let periods = distinct_periods.get();
         let mut opts: Vec<_> = vec![
             view! { <option value="auto" selected=pinned.is_none()>"auto (next contract)"</option> }
                 .into_any(),
@@ -218,54 +233,26 @@ pub fn PriceChart() -> impl IntoView {
     }
 }
 
-/// Effective delivery period (epoch ms) the chart pins on, or None
-/// if there's no data and no pinned choice. The pinned dropdown
-/// choice wins; otherwise picks the period with the freshest
-/// home-area print so the line is never empty just because the
-/// front contract hasn't gated yet.
-fn effective_period_ms(
-    trades: &[PublicTrade],
-    home: &[&str],
-    window_ms: f64,
-    pinned: Option<&str>,
-) -> Option<f64> {
+/// Effective delivery period (epoch ms) the chart pins on. The
+/// pinned dropdown / focused-pill choice wins; auto = the soonest
+/// upcoming 15-min boundary aligned to wallclock. Data-independent
+/// on purpose — peeking at the trade buffer for "most recent print"
+/// makes the auto pick flip between contracts each WS message as
+/// different MM legs fire.
+fn effective_period_ms(pinned: Option<&str>) -> f64 {
     if let Some(p) = pinned {
         let ms = Date::parse(p);
         if ms.is_finite() {
-            return Some(ms);
+            return ms;
         }
     }
     let now = Date::now();
-    let tmin = now - window_ms;
-    let mut latest_period: Option<f64> = None;
-    let mut latest_exec = f64::NEG_INFINITY;
-    for t in trades {
-        if !home.contains(&t.buy_area.as_str()) && !home.contains(&t.sell_area.as_str()) {
-            continue;
-        }
-        let exec = Date::parse(&t.execution_time);
-        if !exec.is_finite() || exec < tmin {
-            continue;
-        }
-        if exec > latest_exec {
-            latest_exec = exec;
-            latest_period = Some(Date::parse(&t.period));
-        }
-    }
-    latest_period.or_else(|| {
-        let fallback = (now / PERIOD_STEP_MS).ceil() * PERIOD_STEP_MS;
-        Some(fallback)
-    })
+    (now / PERIOD_STEP_MS).ceil() * PERIOD_STEP_MS
 }
 
-fn effective_period_iso(
-    trades: &[PublicTrade],
-    home: &[&str],
-    window_ms: f64,
-    pinned: Option<&str>,
-) -> Option<String> {
-    effective_period_ms(trades, home, window_ms, pinned)
-        .map(|ms| Date::new(&ms.into()).to_iso_string().into())
+fn effective_period_iso(pinned: Option<&str>) -> String {
+    let ms = effective_period_ms(pinned);
+    Date::new(&ms.into()).to_iso_string().into()
 }
 
 /// One smoothed point on the rendered line.
@@ -343,10 +330,7 @@ fn draw(
     let inner_h = css_h - pad_t - pad_b;
 
     let home = home_areas();
-    let period_ms = match effective_period_ms(trades, &home, window_ms, pinned) {
-        Some(p) => p,
-        None => return,
-    };
+    let period_ms = effective_period_ms(pinned);
     let line = buckets(trades, &home, window_ms, period_ms);
 
     let now = Date::now();
