@@ -5,6 +5,7 @@ use gloo_net::http::Request;
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 
+mod intl;
 mod panels;
 mod types;
 mod util;
@@ -26,13 +27,23 @@ fn Shell() -> impl IntoView {
     // hydrated from localStorage so chip picks survive reload.
     provide_context(RwSignal::new(load_filter()));
 
-    // Initial /api/info + /api/clock fetch. Both are fired once on
-    // mount; refresh-on-tick comes when the header pulse bar lands.
+    // Sim tz lifted to context so every panel formats prints in the
+    // simulator's home zone (Europe/Berlin in the shipped config)
+    // rather than the browser's local zone. Defaults to "UTC" until
+    // /api/clock returns, then panels re-render on the next signal
+    // read.
+    let sim_tz = RwSignal::new(String::from("UTC"));
+    provide_context(sim_tz);
+    leptos::task::spawn_local(async move {
+        if let Ok(r) = Request::get("/api/clock").send().await
+            && let Ok(c) = r.json::<ClockResp>().await
+        {
+            sim_tz.set(c.tz);
+        }
+    });
+
     let info = LocalResource::new(|| async {
         Request::get("/api/info").send().await.ok()?.json::<InfoResp>().await.ok()
-    });
-    let clock = LocalResource::new(|| async {
-        Request::get("/api/clock").send().await.ok()?.json::<ClockResp>().await.ok()
     });
 
     let info_line = move || match info.get().as_deref() {
@@ -48,9 +59,9 @@ fn Shell() -> impl IntoView {
         None => "loading…".to_string(),
     };
 
-    let tz_line = move || match clock.get().as_deref() {
-        Some(Some(c)) => format!("tz: {}", c.tz),
-        _ => String::new(),
+    let tz_line = move || {
+        let tz = sim_tz.get();
+        if tz == "UTC" { String::new() } else { format!("tz: {tz}") }
     };
 
     // WS-driven shared state. Trades + trade_count feed the public

@@ -4,9 +4,10 @@
 
 use leptos::prelude::*;
 
+use crate::intl::{short_time, short_time_sec};
 use crate::panels::filter_bar::FilterState;
 use crate::types::PublicTrade;
-use crate::util::{area_tag, short_time_sec_utc, short_time_utc};
+use crate::util::area_tag;
 
 /// Recent-trades ring cap. The chart resampler reads out of the same
 /// buffer so size needs to cover the longest chart window at the
@@ -41,6 +42,7 @@ fn save_period_filter(p: Option<&str>) {
 pub fn PublicTrades() -> impl IntoView {
     let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
     let filter = expect_context::<RwSignal<FilterState>>();
+    let sim_tz = expect_context::<RwSignal<String>>();
     let period_filter = RwSignal::new(load_period_filter());
 
     // Drop a stale filter when the contract leaves the buffer
@@ -67,6 +69,7 @@ pub fn PublicTrades() -> impl IntoView {
 
     let period_options = move || {
         let cur = period_filter.get();
+        let tz = sim_tz.get();
         let mut periods: Vec<String> =
             trades.with(|v| v.iter().map(|t| t.period.clone()).collect());
         periods.sort();
@@ -79,7 +82,7 @@ pub fn PublicTrades() -> impl IntoView {
         ];
         for p in periods {
             let selected = cur.as_deref() == Some(&p);
-            let label = short_time_utc(&p);
+            let label = short_time(&p, &tz);
             opts.push(
                 view! { <option value=p.clone() selected=selected>{label}</option> }.into_any(),
             );
@@ -90,6 +93,7 @@ pub fn PublicTrades() -> impl IntoView {
     let body = move || {
         let active = filter.with(|f| f.active_areas.clone());
         let pinned = period_filter.get();
+        let tz = sim_tz.get();
         let rows: Vec<_> = trades.with(|v| {
             v.iter()
                 .filter(|t| {
@@ -139,8 +143,8 @@ pub fn PublicTrades() -> impl IntoView {
                         <td>{t.quantity}</td>
                         <td>{t.price}</td>
                         {area_cell}
-                        <td class="muted">{short_time_utc(&t.period)}</td>
-                        <td class="muted">{short_time_sec_utc(&t.execution_time)}</td>
+                        <td class="muted">{short_time(&t.period, &tz)}</td>
+                        <td class="muted">{short_time_sec(&t.execution_time, &tz)}</td>
                     </tr>
                 }
                 .into_any()

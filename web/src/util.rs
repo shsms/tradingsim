@@ -34,18 +34,6 @@ pub fn area_tag(code: &str) -> &'static str {
     ALL_AREAS.iter().find(|a| a.code == code).map(|a| a.tag).unwrap_or("?")
 }
 
-/// Slice HH:MM out of an RFC-3339 UTC timestamp. The JS UI uses
-/// `Intl.DateTimeFormat` keyed on the configured sim tz; that
-/// arrives with the pulse-bar commit. Until then, prints carry
-/// the wire-side UTC time.
-pub fn short_time_utc(iso: &str) -> String {
-    iso.get(11..16).unwrap_or("--:--").to_string()
-}
-
-pub fn short_time_sec_utc(iso: &str) -> String {
-    iso.get(11..19).unwrap_or("--:--:--").to_string()
-}
-
 /// Strip the proto's SCREAMING_SNAKE prefixes for display. Unknown
 /// variants fall through unchanged so a future server addition shows
 /// up legibly rather than blank.

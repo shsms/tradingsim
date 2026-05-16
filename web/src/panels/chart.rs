@@ -10,8 +10,9 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::CanvasRenderingContext2d;
 
+use crate::intl::short_time;
 use crate::types::PublicTrade;
-use crate::util::{ALL_AREAS, AreaGroup, short_time_utc};
+use crate::util::{ALL_AREAS, AreaGroup};
 
 const PERIOD_STEP_MS: f64 = 15.0 * 60.0 * 1000.0;
 const EMA_ALPHA: f64 = 0.4;
@@ -106,6 +107,7 @@ fn home_areas() -> Vec<&'static str> {
 #[component]
 pub fn PriceChart() -> impl IntoView {
     let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
+    let sim_tz = expect_context::<RwSignal<String>>();
     let window_min = RwSignal::new(load_window());
     let chart_period = RwSignal::new(load_chart_period());
     let canvas_ref = NodeRef::<Canvas>::new();
@@ -142,10 +144,11 @@ pub fn PriceChart() -> impl IntoView {
         let win_ms = window_min.get() as f64 * 60_000.0;
         let pinned = chart_period.get();
         let trades_snapshot = trades.get();
+        let tz = sim_tz.get();
         let eff = effective_period_iso(&trades_snapshot, &home_areas(), win_ms, pinned.as_deref());
         let tag = if pinned.is_some() { "pinned" } else { "auto" };
         match eff {
-            Some(iso) => format!("Price tape — delivery {} ({tag})", short_time_utc(&iso)),
+            Some(iso) => format!("Price tape — delivery {} ({tag})", short_time(&iso, &tz)),
             None => "Price tape — delivery — (auto)".to_string(),
         }
     };
@@ -153,15 +156,9 @@ pub fn PriceChart() -> impl IntoView {
     let period_options = move || {
         let pinned = chart_period.get();
         let pinned_str = pinned.as_deref().unwrap_or("");
-        let mut periods: Vec<String> = trades.with(|v| {
-            let mut s: Vec<f64> = v.iter().map(|t| Date::parse(&t.period)).collect();
-            s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            s.dedup();
-            s.into_iter()
-                .filter(|ms| ms.is_finite())
-                .map(|ms| Date::new(&ms.into()).to_iso_string().into())
-                .collect()
-        });
+        let tz = sim_tz.get();
+        let mut periods: Vec<String> =
+            trades.with(|v| v.iter().map(|t| t.period.clone()).collect());
         periods.sort();
         periods.dedup();
         let mut opts: Vec<_> = vec![
@@ -171,7 +168,7 @@ pub fn PriceChart() -> impl IntoView {
         ];
         for p in periods {
             let selected = p == pinned_str;
-            let label = short_time_utc(&p);
+            let label = short_time(&p, &tz);
             opts.push(
                 view! { <option value=p.clone() selected=selected>{label}</option> }.into_any(),
             );

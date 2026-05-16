@@ -9,11 +9,9 @@ use gloo_net::http::Request;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
+use crate::intl::{short_time, short_time_sec};
 use crate::types::{GridpoolOrder, GridpoolResp, GridpoolTrade};
-use crate::util::{
-    area_tag, short_order_state, short_side, short_time_sec_utc, short_time_utc,
-    short_trade_state,
-};
+use crate::util::{area_tag, short_order_state, short_side, short_trade_state};
 
 const GRIDPOOL_POLL: Duration = Duration::from_secs(3);
 
@@ -33,6 +31,7 @@ async fn fetch_trades(pool_id: u64, order_id: u64) -> Option<Vec<GridpoolTrade>>
 
 #[component]
 pub fn Gridpools() -> impl IntoView {
+    let sim_tz = expect_context::<RwSignal<String>>();
     let (pools, set_pools) = signal(Vec::<GridpoolResp>::new());
     let (selected, set_selected) = signal(None::<u64>);
     let (orders, set_orders) = signal(Vec::<GridpoolOrder>::new());
@@ -172,6 +171,7 @@ pub fn Gridpools() -> impl IntoView {
     };
 
     let period_options = move || {
+        let tz = sim_tz.get();
         let mut periods: Vec<String> =
             orders.with(|os| os.iter().map(|o| o.period.clone()).collect());
         periods.sort();
@@ -180,7 +180,7 @@ pub fn Gridpools() -> impl IntoView {
         let mut opts: Vec<_> = vec![view! { <option value="">"all"</option> }.into_any()];
         for p in periods {
             let selected = cur.as_deref() == Some(&p);
-            let label = short_time_utc(&p);
+            let label = short_time(&p, &tz);
             let value = p;
             opts.push(
                 view! {
@@ -204,6 +204,7 @@ pub fn Gridpools() -> impl IntoView {
             return view! { <i class="muted">"select a gridpool"</i> }.into_any();
         }
         let filter = period_filter.get();
+        let tz = sim_tz.get();
         let visible: Vec<_> = orders.with(|os| {
             os.iter()
                 .filter(|o| filter.as_deref().is_none_or(|p| o.period == p))
@@ -233,12 +234,12 @@ pub fn Gridpools() -> impl IntoView {
                     <td>{o.id.to_string()}</td>
                     <td class=side_cls>{short_side(&o.side).to_string()}</td>
                     <td><span class="area-badge">{area_tag(&o.area)}</span></td>
-                    <td>{short_time_utc(&o.period)}</td>
+                    <td>{short_time(&o.period, &tz)}</td>
                     <td>{o.price}</td>
                     <td>{format!("{}/{}", o.filled_quantity, o.quantity)}</td>
                     <td>{short_order_state(&o.state).to_string()}</td>
-                    <td>{short_time_sec_utc(&o.create_time)}</td>
-                    <td>{short_time_sec_utc(&o.modification_time)}</td>
+                    <td>{short_time_sec(&o.create_time, &tz)}</td>
+                    <td>{short_time_sec(&o.modification_time, &tz)}</td>
                 </tr>
             }
         }).collect_view();
@@ -268,6 +269,7 @@ pub fn Gridpools() -> impl IntoView {
         if list.is_empty() {
             return view! { <i class="muted">"no trades yet for this order"</i> }.into_any();
         }
+        let tz = sim_tz.get();
         let rows = list
             .into_iter()
             .map(|t| {
@@ -275,7 +277,7 @@ pub fn Gridpools() -> impl IntoView {
                     <tr>
                         <td>{t.id.to_string()}</td>
                         <td><span class="area-badge">{area_tag(&t.area)}</span></td>
-                        <td>{short_time_sec_utc(&t.execution_time)}</td>
+                        <td>{short_time_sec(&t.execution_time, &tz)}</td>
                         <td>{t.price}</td>
                         <td>{t.quantity}</td>
                         <td>{short_trade_state(&t.state).to_string()}</td>

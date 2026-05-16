@@ -6,10 +6,9 @@
 use std::collections::HashMap;
 
 use gloo_timers::future::TimeoutFuture;
-use js_sys::{Date, Object, Reflect};
 use leptos::prelude::*;
-use wasm_bindgen::JsValue;
 
+use crate::intl::{now_hms, zone_label};
 use crate::util::{ALL_AREAS, AreaGroup};
 
 const BUCKETS: usize = 12;
@@ -90,21 +89,12 @@ fn save_density(comfortable: bool) {
     }
 }
 
-fn format_clock_now() -> String {
-    let d = Date::new_0();
-    let opts = Object::new();
-    let _ = Reflect::set(&opts, &"hour".into(), &"2-digit".into());
-    let _ = Reflect::set(&opts, &"minute".into(), &"2-digit".into());
-    let _ = Reflect::set(&opts, &"second".into(), &"2-digit".into());
-    let _ = Reflect::set(&opts, &"hour12".into(), &JsValue::FALSE);
-    String::from(d.to_locale_time_string_with_options("en-GB", &opts))
-}
-
 #[component]
 pub fn PulseBar() -> impl IntoView {
     let trade_count = expect_context::<ReadSignal<usize>>();
     let weather_loaded = expect_context::<RwSignal<bool>>();
     let spark = expect_context::<RwSignal<SparkState>>();
+    let sim_tz = expect_context::<RwSignal<String>>();
 
     // Sparkbar rotation tick — empties the oldest bucket every
     // BUCKET_MS so a quiet 60 s decays a previously busy area to
@@ -116,16 +106,22 @@ pub fn PulseBar() -> impl IntoView {
         }
     });
 
-    // Wallclock tick. Browser-local for now — sim-tz formatting
-    // shares the Intl helper with the trades / scenarios panels
-    // once that lands.
-    let (clock, set_clock) = signal(format_clock_now());
+    // Wallclock tick in the sim's tz, with the short zone label
+    // (CEST / CET / UTC) as suffix so a remote operator can tell at
+    // a glance whether they're looking at 21:30 CEST or 21:30 UTC.
+    // The tick signal toggles each second so the formatter re-runs.
+    let (tick, set_tick) = signal(0_u64);
     leptos::task::spawn_local(async move {
         loop {
-            set_clock.set(format_clock_now());
             TimeoutFuture::new(1000).await;
+            set_tick.update(|n| *n = n.wrapping_add(1));
         }
     });
+    let clock_view = move || {
+        let _ = tick.get();
+        let tz = sim_tz.get();
+        format!("{} {}", now_hms(&tz), zone_label(&tz))
+    };
 
     // Density toggle: hydrate from localStorage, then mirror to
     // the body class on every change.
@@ -185,7 +181,7 @@ pub fn PulseBar() -> impl IntoView {
             <div class="pulse-sep"></div>
             <div class="pulse-group pulse-right">
                 <span class="chip" on:click=toggle_density>{density_label}</span>
-                <span class="pulse-clock">{clock}</span>
+                <span class="pulse-clock">{clock_view}</span>
             </div>
         </section>
     }
