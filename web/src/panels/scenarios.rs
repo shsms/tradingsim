@@ -6,7 +6,8 @@
 use gloo_net::http::Request;
 use leptos::prelude::*;
 
-use crate::types::Scenario;
+use crate::intl::now_hour_in_tz;
+use crate::types::{Scenario, Stage};
 
 async fn fetch_scenarios() -> Option<Vec<Scenario>> {
     Request::get("/api/scenarios").send().await.ok()?.json().await.ok()
@@ -107,15 +108,11 @@ where
     F: Fn(String, &'static str) + Copy + 'static,
     S: Fn(String) + Copy + 'static,
 {
+    let sim_tz = expect_context::<RwSignal<String>>();
     let cur = scenario.current_stage.unwrap_or(0);
     let last = scenario.stages.len().saturating_sub(1);
     let n = scenario.name.clone();
-    let summary = format!(
-        "{} · stage {}/{}",
-        scenario.name,
-        cur + 1,
-        scenario.stages.len()
-    );
+    let header_name = scenario.name.clone();
     let prev_dis = cur == 0;
     let next_dis = cur >= last;
 
@@ -138,10 +135,94 @@ where
         }
     };
 
+    // Stage-jump closure: name+idx in, async POST + refresh out.
+    // Captures nothing reactively, so it's Copy and reusable across
+    // every block / row click handler below.
+    let scenarios_sig = expect_context::<RwSignal<Vec<Scenario>>>();
+    let jump = move |name: String, idx: usize| {
+        leptos::task::spawn_local(async move {
+            let _ = Request::post(&format!("/api/scenarios/{name}/jump/{idx}")).send().await;
+            if let Some(list) = fetch_scenarios().await {
+                scenarios_sig.set(list);
+            }
+        });
+    };
+
+    let stages = scenario.stages.clone();
+    let stage_blocks = stages
+        .iter()
+        .enumerate()
+        .map(|(i, st)| {
+            let name = scenario.name.clone();
+            let left = (st.hour_from / 24.0) * 100.0;
+            let width = ((st.hour_to - st.hour_from) / 24.0) * 100.0;
+            let mut cls = String::from("timeline-stage");
+            if i == cur {
+                cls.push_str(" current");
+            } else if i < cur {
+                cls.push_str(" done");
+            }
+            let title = format!(
+                "{} — bias {:.2} → {:.2}",
+                st.name, st.bias_from, st.bias_to
+            );
+            let on_block_click = move |_| jump(name.clone(), i);
+            view! {
+                <div
+                    class=cls
+                    style=format!("left:{left}%;width:{width}%")
+                    title=title
+                    on:click=on_block_click
+                >
+                    {(i + 1).to_string()}
+                </div>
+            }
+        })
+        .collect_view();
+    let now_pct = move || (now_hour_in_tz(&sim_tz.get()) / 24.0) * 100.0;
+
+    let stage_rows = stages
+        .iter()
+        .enumerate()
+        .map(|(i, st)| {
+            let name = scenario.name.clone();
+            let mut cls = String::from("stage-list-row");
+            let state = if i == cur {
+                cls.push_str(" current");
+                "▶"
+            } else if i < cur {
+                cls.push_str(" done");
+                "✓"
+            } else {
+                ""
+            };
+            let time = format!(
+                "{}–{}",
+                fmt_stage_hour(st.hour_from),
+                fmt_stage_hour(st.hour_to)
+            );
+            let bias = format!("{:.2} → {:.2}", st.bias_from, st.bias_to);
+            let weather = stage_weather(st);
+            let stage_name = st.name.clone();
+            let title = stage_name.clone();
+            let on_row_click = move |_| jump(name.clone(), i);
+            view! {
+                <div class=cls on:click=on_row_click title=title>
+                    <span class="stage-num">{(i + 1).to_string()}</span>
+                    <span class="stage-state">{state}</span>
+                    <span class="stage-name">{stage_name}</span>
+                    <span class="stage-time">{time}</span>
+                    <span class="stage-bias">{bias}</span>
+                    <span class="stage-weather">{weather}</span>
+                </div>
+            }
+        })
+        .collect_view();
+
     view! {
         <div class="scenario active">
             <div class="scenario-head">
-                <strong>{summary}</strong>
+                <strong>{header_name}</strong>
                 {scenario.manual_override.then(|| view! {
                     <span class="badge-manual">"manual"</span>
                 })}
@@ -150,6 +231,25 @@ where
                     <button on:click=on_next disabled=next_dis>"Next"</button>
                     <button on:click=on_stop>"Stop"</button>
                 </span>
+            </div>
+            <div class="timeline">
+                {stage_blocks}
+                <div class="timeline-now" style=move || format!("left:{}%", now_pct())></div>
+            </div>
+            <div class="timeline-axis">
+                <span>"00:00"</span><span>"06:00"</span><span>"12:00"</span>
+                <span>"18:00"</span><span>"24:00"</span>
+            </div>
+            <div class="stage-list">
+                <div class="stage-list-header">
+                    <span></span>
+                    <span></span>
+                    <span class="stage-name">"stage"</span>
+                    <span class="stage-time">"time"</span>
+                    <span class="stage-bias">"bias"</span>
+                    <span class="stage-weather">"weather"</span>
+                </div>
+                {stage_rows}
             </div>
             {(!others.is_empty()).then(|| view! {
                 <div class="scenario-picker">
@@ -164,4 +264,24 @@ where
             })}
         </div>
     }
+}
+
+fn fmt_stage_hour(h: f64) -> String {
+    let hh = h.floor() as i64;
+    let mm = ((h - hh as f64) * 60.0).round() as i64;
+    format!("{hh:02}:{mm:02}")
+}
+
+fn stage_weather(s: &Stage) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = s.cloud_cover {
+        parts.push(format!("☁ {v:.2}"));
+    }
+    if let Some(v) = s.mean_wind {
+        parts.push(format!("{v:.1} m/s"));
+    }
+    if let Some(v) = s.temperature_base {
+        parts.push(format!("{} °C", (v - 273.15).round() as i64));
+    }
+    parts.join(" · ")
 }

@@ -46,6 +46,18 @@ pub fn now_hms(tz: &str) -> String {
     String::from(d.to_locale_time_string_with_options(LOCALE, &opts(tz, true)))
 }
 
+/// Current hour-of-day in the given tz, as a float (e.g. 14h30m → 14.5).
+/// Used by the scenarios timeline to anchor the "now" marker against
+/// stage hour_from/hour_to (which are sim-local).
+pub fn now_hour_in_tz(tz: &str) -> f64 {
+    let hms = now_hms(tz);
+    let mut parts = hms.split(':');
+    let h: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let m: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let s: f64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    h + m / 60.0 + s / 3600.0
+}
+
 /// Short zone tag (`CEST`, `CET`, …) for the *current* instant in the
 /// given tz. Used as the suffix on the wallclock display so the user
 /// can tell at a glance whether they're looking at 14:00 CEST vs UTC.
