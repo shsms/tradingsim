@@ -3339,6 +3339,7 @@ dependencies = [
  "futures",
  "gloo-net",
  "gloo-timers",
+ "js-sys",
  "leptos",
  "serde",
  "serde_json",

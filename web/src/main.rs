@@ -10,7 +10,8 @@ mod types;
 mod util;
 
 use panels::{
-    FilterBar, Gridpools, PublicTrades, Scenarios, TRADES_BUFFER_CAP, Weather, load_filter,
+    FilterBar, Gridpools, PublicTrades, PulseBar, Scenarios, SparkState, TRADES_BUFFER_CAP,
+    Weather, load_filter,
 };
 use types::{ClockResp, InfoResp, PublicTrade};
 
@@ -52,11 +53,18 @@ fn Shell() -> impl IntoView {
         _ => String::new(),
     };
 
-    // WS-driven trade ring shared with the public-trades panel (and
-    // eventually the price chart + sparkbars) via context.
+    // WS-driven shared state. Trades + trade_count feed the public
+    // trades panel + the pulse-bar pills; spark_state feeds the
+    // sparkbars; weather_loaded comes from the Weather panel's
+    // first successful poll so the pulse-bar pill can light up.
     let (trade_count, set_trade_count) = signal(0_usize);
     let (trades, set_trades) = signal(Vec::<PublicTrade>::new());
+    let spark = RwSignal::new(SparkState::default());
+    let weather_loaded = RwSignal::new(false);
     provide_context(trades);
+    provide_context(trade_count);
+    provide_context(spark);
+    provide_context(weather_loaded);
     leptos::task::spawn_local(async move {
         let mut ws = match WebSocket::open("/ws/public-trades") {
             Ok(ws) => ws,
@@ -70,12 +78,14 @@ fn Shell() -> impl IntoView {
                 && let Ok(t) = serde_json::from_str::<PublicTrade>(&s)
             {
                 set_trade_count.update(|n| *n += 1);
+                let buy_area = t.buy_area.clone();
                 set_trades.update(|v| {
                     v.insert(0, t);
                     if v.len() > TRADES_BUFFER_CAP {
                         v.truncate(TRADES_BUFFER_CAP);
                     }
                 });
+                spark.update(|s| s.record(&buy_area));
             }
         }
     });
@@ -100,6 +110,7 @@ fn Shell() -> impl IntoView {
             <span class="page-meta muted">{tz_line}</span>
             <span class="page-meta muted">{trades_line}</span>
         </header>
+        <PulseBar/>
         <Scenarios/>
         <Gridpools/>
         <FilterBar/>

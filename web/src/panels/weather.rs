@@ -21,12 +21,14 @@ pub fn Weather() -> impl IntoView {
     let (locs, set_locs) = signal(Vec::<WeatherLoc>::new());
     let (loaded, set_loaded) = signal(false);
     let filter = expect_context::<RwSignal<FilterState>>();
+    let weather_loaded = expect_context::<RwSignal<bool>>();
 
     leptos::task::spawn_local(async move {
         loop {
             if let Some(list) = fetch_weather().await {
                 set_locs.set(list);
                 set_loaded.set(true);
+                weather_loaded.set(true);
             }
             TimeoutFuture::new(WEATHER_POLL.as_millis() as u32).await;
         }

@@ -26,4 +26,9 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 # Direct dep for `web_sys::Storage` (filter-chip persistence) — most
 # other web-sys access lands through leptos / gloo-net's transitive enables.
-web-sys = { version = "0.3", features = ["Storage", "Window"] }
+web-sys = { version = "0.3", features = [
+    "Storage", "Window",
+    # Body class manipulation for the density toggle.
+    "Document", "HtmlElement", "Element", "DomTokenList",
+] }
+js-sys = "0.3"
