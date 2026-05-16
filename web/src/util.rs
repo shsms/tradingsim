@@ -45,3 +45,42 @@ pub fn short_time_utc(iso: &str) -> String {
 pub fn short_time_sec_utc(iso: &str) -> String {
     iso.get(11..19).unwrap_or("--:--:--").to_string()
 }
+
+/// Strip the proto's SCREAMING_SNAKE prefixes for display. Unknown
+/// variants fall through unchanged so a future server addition shows
+/// up legibly rather than blank.
+pub fn short_side(s: &str) -> &str {
+    match s {
+        "MARKET_SIDE_BUY" => "buy",
+        "MARKET_SIDE_SELL" => "sell",
+        other => other,
+    }
+}
+
+pub fn short_order_state(s: &str) -> &str {
+    match s {
+        "ORDER_STATE_PENDING" => "pending",
+        "ORDER_STATE_ACTIVE" => "active",
+        "ORDER_STATE_HIBERNATE" => "hibernate",
+        "ORDER_STATE_FILLED" => "filled",
+        "ORDER_STATE_CANCELED" => "canceled",
+        "ORDER_STATE_EXPIRED" => "expired",
+        "ORDER_STATE_FAILED" => "failed",
+        other => other,
+    }
+}
+
+#[allow(dead_code)]
+pub fn short_trade_state(s: &str) -> &str {
+    match s {
+        "TRADE_STATE_ACTIVE" => "active",
+        "TRADE_STATE_CANCEL_REQUESTED" => "cancel?",
+        "TRADE_STATE_CANCEL_REJECTED" => "cancel✗",
+        "TRADE_STATE_CANCELED" => "canceled",
+        "TRADE_STATE_RECALL_REQUESTED" => "recall?",
+        "TRADE_STATE_RECALL_REJECTED" => "recall✗",
+        "TRADE_STATE_RECALLED" => "recalled",
+        "TRADE_STATE_APPROVAL_REQUESTED" => "approval?",
+        other => other,
+    }
+}
