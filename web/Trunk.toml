@@ -1,0 +1,18 @@
+# Trunk reads `index.html`, builds `src/main.rs` for
+# wasm32-unknown-unknown, runs wasm-bindgen, and emits the result
+# into `dist/`. The axum UI server (../src/ui) rust-embeds that
+# directory at compile time, so re-run `trunk build` after editing
+# the web crate before rebuilding the host binary.
+
+[build]
+target = "index.html"
+dist = "dist"
+release = true
+# Asset paths in the generated index.html are prefixed with this so
+# the WASM shell can be mounted under `/leptos/` alongside the old
+# JS UI at `/`. Drop the prefix when the cut-over moves the shell
+# to the site root.
+public_url = "/leptos/"
+
+[watch]
+ignore = ["dist"]
