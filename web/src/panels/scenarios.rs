@@ -1,14 +1,12 @@
-//! /api/scenarios polled list + Start / Prev / Next / Stop controls.
-
-use std::time::Duration;
+//! Scenarios panel — reads the shared `RwSignal<Vec<Scenario>>` from
+//! context (Shell owns the polling) and offers idle-picker / active
+//! controls. Start / Prev / Next / Stop fire the matching POST then
+//! immediately refresh the shared signal.
 
 use gloo_net::http::Request;
-use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 use crate::types::Scenario;
-
-const SCENARIOS_POLL: Duration = Duration::from_secs(2);
 
 async fn fetch_scenarios() -> Option<Vec<Scenario>> {
     Request::get("/api/scenarios").send().await.ok()?.json().await.ok()
@@ -21,34 +19,17 @@ async fn post_action(name: &str, action: &str) {
 
 #[component]
 pub fn Scenarios() -> impl IntoView {
-    let (scenarios, set_scenarios) = signal(Vec::<Scenario>::new());
-    let (loaded, set_loaded) = signal(false);
-
-    // 2s poll matching the JS UI cadence. Action handlers fire an
-    // immediate refetch so the panel updates without waiting for
-    // the next tick.
-    leptos::task::spawn_local(async move {
-        loop {
-            if let Some(list) = fetch_scenarios().await {
-                set_scenarios.set(list);
-                set_loaded.set(true);
-            }
-            TimeoutFuture::new(SCENARIOS_POLL.as_millis() as u32).await;
-        }
-    });
+    let scenarios = expect_context::<RwSignal<Vec<Scenario>>>();
 
     let act = move |name: String, action: &'static str| {
         leptos::task::spawn_local(async move {
             post_action(&name, action).await;
             if let Some(list) = fetch_scenarios().await {
-                set_scenarios.set(list);
+                scenarios.set(list);
             }
         });
     };
 
-    // Switching from one active scenario to another: stop the
-    // current then start the picked one. Errors swallowed because
-    // the next poll reflects the truth either way.
     let switch_to = move |target: String| {
         leptos::task::spawn_local(async move {
             let list = fetch_scenarios().await.unwrap_or_default();
@@ -57,7 +38,7 @@ pub fn Scenarios() -> impl IntoView {
             }
             post_action(&target, "start").await;
             if let Some(list) = fetch_scenarios().await {
-                set_scenarios.set(list);
+                scenarios.set(list);
             }
         });
     };
@@ -65,12 +46,7 @@ pub fn Scenarios() -> impl IntoView {
     let body = move || {
         let list = scenarios.get();
         if list.is_empty() {
-            return view! {
-                <i class="muted">
-                    {move || if loaded.get() { "no scenarios registered" } else { "loading…" }}
-                </i>
-            }
-            .into_any();
+            return view! { <i class="muted">"no scenarios registered"</i> }.into_any();
         }
         let active = list.iter().find(|s| s.current_stage.is_some()).cloned();
         match active {

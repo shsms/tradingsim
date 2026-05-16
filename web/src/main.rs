@@ -11,10 +11,10 @@ mod types;
 mod util;
 
 use panels::{
-    FilterBar, Gridpools, PriceChart, PublicTrades, PulseBar, Scenarios, SparkState,
-    TRADES_BUFFER_CAP, Weather, load_filter,
+    FilterBar, Gridpools, PriceChart, PublicTrades, PulseBar, Scenarios, SparkState, TzMode,
+    TRADES_BUFFER_CAP, Weather, load_filter, load_tz_mode,
 };
-use types::{ClockResp, InfoResp, PublicTrade};
+use types::{ClockResp, InfoResp, PublicTrade, Scenario};
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -27,18 +27,46 @@ fn Shell() -> impl IntoView {
     // hydrated from localStorage so chip picks survive reload.
     provide_context(RwSignal::new(load_filter()));
 
-    // Sim tz lifted to context so every panel formats prints in the
-    // simulator's home zone (Europe/Berlin in the shipped config)
-    // rather than the browser's local zone. Defaults to "UTC" until
-    // /api/clock returns, then panels re-render on the next signal
-    // read.
+    // Sim tz + display tz lifted to context. sim_tz tracks the
+    // simulator's home zone (from /api/clock); tz_mode is the user's
+    // chip preference (Local | Utc); display_tz is the effective
+    // formatter input — sim_tz when Local, "UTC" otherwise — and is
+    // what every panel reads to format prints.
     let sim_tz = RwSignal::new(String::from("UTC"));
-    provide_context(sim_tz);
+    let tz_mode = RwSignal::new(load_tz_mode());
+    let display_tz = RwSignal::new(String::from("UTC"));
+    Effect::new(move |_| {
+        let effective = match tz_mode.get() {
+            TzMode::Local => sim_tz.get(),
+            TzMode::Utc => "UTC".to_string(),
+        };
+        display_tz.set(effective);
+    });
+    // Only display_tz + tz_mode are exposed — panels format with the
+    // first, the pulse-bar chip mutates the second. sim_tz stays
+    // Shell-scoped behind the Effect that drives display_tz.
+    provide_context(tz_mode);
+    provide_context(display_tz);
     leptos::task::spawn_local(async move {
         if let Ok(r) = Request::get("/api/clock").send().await
             && let Ok(c) = r.json::<ClockResp>().await
         {
             sim_tz.set(c.tz);
+        }
+    });
+
+    // Scenarios polling lives in Shell so the pulse bar's scenario
+    // indicator and the Scenarios panel share one fetch loop.
+    let scenarios = RwSignal::new(Vec::<Scenario>::new());
+    provide_context(scenarios);
+    leptos::task::spawn_local(async move {
+        loop {
+            if let Ok(r) = Request::get("/api/scenarios").send().await
+                && let Ok(list) = r.json::<Vec<Scenario>>().await
+            {
+                scenarios.set(list);
+            }
+            gloo_timers::future::TimeoutFuture::new(2000).await;
         }
     });
 
@@ -57,11 +85,6 @@ fn Shell() -> impl IntoView {
         ),
         Some(None) => "—".to_string(),
         None => "loading…".to_string(),
-    };
-
-    let tz_line = move || {
-        let tz = sim_tz.get();
-        if tz == "UTC" { String::new() } else { format!("tz: {tz}") }
     };
 
     // WS-driven shared state. Trades + trade_count feed the public
@@ -101,25 +124,10 @@ fn Shell() -> impl IntoView {
         }
     });
 
-    let trades_line = move || {
-        let latest = trades.with(|v| v.first().cloned());
-        match latest {
-            Some(t) => format!(
-                "trades: {} (last #{} @ {})",
-                trade_count.get(),
-                t.id,
-                t.price,
-            ),
-            None => format!("trades: {}", trade_count.get()),
-        }
-    };
-
     view! {
         <header class="page-header">
             <h1>"tradingsim"</h1>
             <span class="page-meta muted">{info_line}</span>
-            <span class="page-meta muted">{tz_line}</span>
-            <span class="page-meta muted">{trades_line}</span>
         </header>
         <PulseBar/>
         <div class="grid">

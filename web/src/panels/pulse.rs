@@ -1,7 +1,6 @@
-//! Header pulse bar: status pills, per-area sparkbars over a rolling
-//! 60 s window, density toggle, and a once-per-second clock. The
-//! scenario indicator + sim-tz-aware clock land in follow-ups once
-//! the scenarios signal lifts into context and an Intl helper exists.
+//! Header pulse bar: status pills, per-home-area sparkbars over a
+//! rolling 60 s window, scenario indicator, density + tz toggles,
+//! and a once-per-second sim-tz clock.
 
 use std::collections::HashMap;
 
@@ -9,11 +8,22 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 
 use crate::intl::{now_hms, zone_label};
+use crate::types::Scenario;
 use crate::util::{ALL_AREAS, AreaGroup};
 
 const BUCKETS: usize = 12;
 const BUCKET_MS: u32 = 5_000;
 const DENSITY_KEY: &str = "tradingsim-density";
+const TZ_KEY: &str = "tradingsim-tz";
+
+/// User's tz display preference. Local means "format in the sim's
+/// home zone (Europe/Berlin in the shipped config)"; Utc means
+/// "format in UTC regardless of the sim's home zone".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TzMode {
+    Local,
+    Utc,
+}
 
 #[derive(Debug, Clone)]
 pub struct SparkState {
@@ -89,12 +99,31 @@ fn save_density(comfortable: bool) {
     }
 }
 
+pub fn load_tz_mode() -> TzMode {
+    match local_storage().and_then(|ls| ls.get_item(TZ_KEY).ok().flatten()) {
+        Some(s) if s == "utc" => TzMode::Utc,
+        _ => TzMode::Local,
+    }
+}
+
+fn save_tz_mode(mode: TzMode) {
+    if let Some(ls) = local_storage() {
+        let v = match mode {
+            TzMode::Local => "local",
+            TzMode::Utc => "utc",
+        };
+        let _ = ls.set_item(TZ_KEY, v);
+    }
+}
+
 #[component]
 pub fn PulseBar() -> impl IntoView {
     let trade_count = expect_context::<ReadSignal<usize>>();
     let weather_loaded = expect_context::<RwSignal<bool>>();
     let spark = expect_context::<RwSignal<SparkState>>();
-    let sim_tz = expect_context::<RwSignal<String>>();
+    let display_tz = expect_context::<RwSignal<String>>();
+    let tz_mode = expect_context::<RwSignal<TzMode>>();
+    let scenarios = expect_context::<RwSignal<Vec<Scenario>>>();
 
     // Sparkbar rotation tick — empties the oldest bucket every
     // BUCKET_MS so a quiet 60 s decays a previously busy area to
@@ -106,10 +135,9 @@ pub fn PulseBar() -> impl IntoView {
         }
     });
 
-    // Wallclock tick in the sim's tz, with the short zone label
-    // (CEST / CET / UTC) as suffix so a remote operator can tell at
-    // a glance whether they're looking at 21:30 CEST or 21:30 UTC.
-    // The tick signal toggles each second so the formatter re-runs.
+    // Wallclock tick. The tick signal toggles each second so the
+    // formatter re-runs; the zone label suffix (CEST / CET / UTC)
+    // changes with the tz toggle without separate plumbing.
     let (tick, set_tick) = signal(0_u64);
     leptos::task::spawn_local(async move {
         loop {
@@ -119,12 +147,11 @@ pub fn PulseBar() -> impl IntoView {
     });
     let clock_view = move || {
         let _ = tick.get();
-        let tz = sim_tz.get();
+        let tz = display_tz.get();
         format!("{} {}", now_hms(&tz), zone_label(&tz))
     };
 
-    // Density toggle: hydrate from localStorage, then mirror to
-    // the body class on every change.
+    // Density toggle.
     let (comfortable, set_comfortable) = signal(initial_density());
     apply_density(comfortable.get_untracked());
     Effect::new(move |_| {
@@ -133,6 +160,23 @@ pub fn PulseBar() -> impl IntoView {
         save_density(c);
     });
     let toggle_density = move |_| set_comfortable.update(|c| *c = !*c);
+    let density_label = move || if comfortable.get() { "comfortable" } else { "compact" };
+
+    // TZ toggle — flips between sim local and UTC; clock + every
+    // panel that formats through `display_tz` follow immediately.
+    let toggle_tz = move |_| {
+        tz_mode.update(|m| {
+            *m = match m {
+                TzMode::Local => TzMode::Utc,
+                TzMode::Utc => TzMode::Local,
+            };
+            save_tz_mode(*m);
+        });
+    };
+    let tz_label = move || match tz_mode.get() {
+        TzMode::Local => "local",
+        TzMode::Utc => "UTC",
+    };
 
     let pill_trades_cls = move || {
         if trade_count.get() > 0 { "pill ok" } else { "pill down" }
@@ -166,7 +210,28 @@ pub fn PulseBar() -> impl IntoView {
             .collect_view()
     };
 
-    let density_label = move || if comfortable.get() { "comfortable" } else { "compact" };
+    let scenario_indicator = move || {
+        let list = scenarios.get();
+        let active = list.iter().find(|s| s.current_stage.is_some());
+        match active {
+            Some(s) => {
+                let idx = s.current_stage.unwrap_or(0);
+                let stage_name = s
+                    .stages
+                    .get(idx)
+                    .map(|st| st.name.as_str())
+                    .unwrap_or("?");
+                let total = s.stages.len();
+                (
+                    "".to_string(),
+                    format!("{} · {} ({}/{})", s.name, stage_name, idx + 1, total),
+                )
+            }
+            None => ("muted".to_string(), "—".to_string()),
+        }
+    };
+    let indicator_cls = move || scenario_indicator().0;
+    let indicator_text = move || scenario_indicator().1;
 
     view! {
         <section class="pulse" aria-label="system pulse">
@@ -179,7 +244,12 @@ pub fn PulseBar() -> impl IntoView {
                 {sparkbars}
             </div>
             <div class="pulse-sep"></div>
+            <div class="pulse-group">
+                <span class="muted">"scenario"</span>
+                <span class=indicator_cls>{indicator_text}</span>
+            </div>
             <div class="pulse-group pulse-right">
+                <span class="chip" on:click=toggle_tz>{tz_label}</span>
                 <span class="chip" on:click=toggle_density>{density_label}</span>
                 <span class="pulse-clock">{clock_view}</span>
             </div>

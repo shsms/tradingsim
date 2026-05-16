@@ -13,6 +13,6 @@ pub use chart::PriceChart;
 pub use filter_bar::{FilterBar, load_filter};
 pub use gridpools::Gridpools;
 pub use public_trades::{PublicTrades, TRADES_BUFFER_CAP};
-pub use pulse::{PulseBar, SparkState};
+pub use pulse::{PulseBar, SparkState, TzMode, load_tz_mode};
 pub use scenarios::Scenarios;
 pub use weather::Weather;
