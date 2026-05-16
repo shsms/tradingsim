@@ -1,5 +1,6 @@
 //! Public-trade tape — reads the WS-fed `Vec<PublicTrade>` from
-//! context and renders the last `TRADES_DISPLAY_CAP` prints.
+//! context and renders the last `TRADES_DISPLAY_CAP` prints,
+//! filtered by the area chips and an optional delivery dropdown.
 
 use leptos::prelude::*;
 
@@ -7,22 +8,96 @@ use crate::panels::filter_bar::FilterState;
 use crate::types::PublicTrade;
 use crate::util::{area_tag, short_time_sec_utc, short_time_utc};
 
-/// Recent-trades ring cap. The chart resampler will read out of the
-/// same buffer once it ports, so size needs to cover the longest
-/// chart window (~hours) at the matcher's print rate.
+/// Recent-trades ring cap. The chart resampler reads out of the same
+/// buffer so size needs to cover the longest chart window at the
+/// matcher's print rate.
 pub const TRADES_BUFFER_CAP: usize = 500;
 const TRADES_DISPLAY_CAP: usize = 10;
+const KEY_FILTER: &str = "tradingsim-trades-filter";
+
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+fn load_period_filter() -> Option<String> {
+    let raw = local_storage()?.get_item(KEY_FILTER).ok().flatten()?;
+    if raw.is_empty() || raw == "all" { None } else { Some(raw) }
+}
+
+fn save_period_filter(p: Option<&str>) {
+    if let Some(ls) = local_storage() {
+        match p {
+            Some(v) => {
+                let _ = ls.set_item(KEY_FILTER, v);
+            }
+            None => {
+                let _ = ls.remove_item(KEY_FILTER);
+            }
+        }
+    }
+}
 
 #[component]
 pub fn PublicTrades() -> impl IntoView {
     let trades = expect_context::<ReadSignal<Vec<PublicTrade>>>();
     let filter = expect_context::<RwSignal<FilterState>>();
+    let period_filter = RwSignal::new(load_period_filter());
+
+    // Drop a stale filter when the contract leaves the buffer
+    // (closed + pruned by the host's snapshot ring).
+    Effect::new(move |_| {
+        let alive = trades.with(|v| {
+            period_filter
+                .get_untracked()
+                .map(|p| v.iter().any(|t| t.period == p))
+                .unwrap_or(true)
+        });
+        if !alive {
+            period_filter.set(None);
+            save_period_filter(None);
+        }
+    });
+
+    let on_period_change = move |ev| {
+        let v = event_target_value(&ev);
+        let next = if v == "all" || v.is_empty() { None } else { Some(v) };
+        period_filter.set(next.clone());
+        save_period_filter(next.as_deref());
+    };
+
+    let period_options = move || {
+        let cur = period_filter.get();
+        let mut periods: Vec<String> =
+            trades.with(|v| v.iter().map(|t| t.period.clone()).collect());
+        periods.sort();
+        periods.dedup();
+        let mut opts: Vec<_> = vec![
+            view! {
+                <option value="all" selected=cur.is_none()>"All delivery periods"</option>
+            }
+            .into_any(),
+        ];
+        for p in periods {
+            let selected = cur.as_deref() == Some(&p);
+            let label = short_time_utc(&p);
+            opts.push(
+                view! { <option value=p.clone() selected=selected>{label}</option> }.into_any(),
+            );
+        }
+        opts.into_iter().collect_view()
+    };
 
     let body = move || {
         let active = filter.with(|f| f.active_areas.clone());
+        let pinned = period_filter.get();
         let rows: Vec<_> = trades.with(|v| {
             v.iter()
                 .filter(|t| {
+                    if let Some(p) = pinned.as_deref()
+                        && t.period != p
+                    {
+                        return false;
+                    }
                     active.contains(t.buy_area.as_str())
                         || active.contains(t.sell_area.as_str())
                 })
@@ -31,12 +106,13 @@ pub fn PublicTrades() -> impl IntoView {
                 .collect()
         });
         if rows.is_empty() {
+            let msg = if pinned.is_some() {
+                "no prints for this delivery"
+            } else {
+                "no prints for the active areas"
+            };
             return view! {
-                <tr>
-                    <td colspan="6" class="muted">
-                        <i>"no prints for the active areas"</i>
-                    </td>
-                </tr>
+                <tr><td colspan="6" class="muted"><i>{msg}</i></td></tr>
             }
             .into_any();
         }
@@ -77,6 +153,9 @@ pub fn PublicTrades() -> impl IntoView {
         <section class="panel panel-trades">
             <div class="book-head">
                 <h2>"Public trades"</h2>
+                <span class="muted">"delivery "
+                    <select on:change=on_period_change>{period_options}</select>
+                </span>
             </div>
             <div class="scroll">
                 <table class="trades-table">
