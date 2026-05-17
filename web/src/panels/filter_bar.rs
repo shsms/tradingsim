@@ -157,7 +157,7 @@ pub fn FilterBar() -> impl IntoView {
     };
 
     view! {
-        <section class="filter-bar" aria-label="area filter">
+        <section class="filter-bar" id="area-filter-bar" aria-label="area filter">
             <span>"areas"</span>
             <span id="filter-chips">
                 {chips}

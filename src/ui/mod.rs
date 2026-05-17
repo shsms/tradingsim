@@ -14,7 +14,7 @@ use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use parking_lot::RwLock;
@@ -47,9 +47,6 @@ pub fn build_router(
     Router::new()
         .route("/", get(spa_root))
         .route("/{*path}", get(spa_asset))
-        .route("/old-js-frontend", get(old_index))
-        .route("/old-js-frontend/style.css", get(old_style_css))
-        .route("/old-js-frontend/app.js", get(old_app_js))
         .route("/api/info", get(api_info))
         .route("/api/clock", get(api_clock))
         .route("/api/gridpools", get(api_gridpools))
@@ -81,27 +78,6 @@ pub async fn serve(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     log::info!("UI server listening on http://{addr}/");
     axum::serve(listener, app).await
-}
-
-async fn old_index() -> impl IntoResponse {
-    Html(include_str!("../../ui-assets/index.html"))
-}
-
-async fn old_style_css() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../../ui-assets/style.css"),
-    )
-}
-
-async fn old_app_js() -> impl IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        include_str!("../../ui-assets/app.js"),
-    )
 }
 
 /// Trunk's `web/dist/` output: `index.html` + hashed `*.js` / `*.wasm`

@@ -100,7 +100,7 @@ def main() -> int:
         driver = make_driver()
         try:
             driver.set_page_load_timeout(20)
-            driver.get(f"http://127.0.0.1:{ui_port}/old-js-frontend")
+            driver.get(f"http://127.0.0.1:{ui_port}/")
             wait = WebDriverWait(driver, 10)
 
             assert "tradingsim" in driver.title

@@ -310,14 +310,16 @@ pub fn Gridpools() -> impl IntoView {
                     <div class="book-head">
                         <h2>"Orders"</h2>
                         <span class="muted">"delivery "
-                            <select on:change=on_period_change>{period_options}</select>
+                            <select id="gridpool-period-select" on:change=on_period_change>
+                                {period_options}
+                            </select>
                         </span>
                     </div>
-                    {orders_body}
+                    <div id="gridpool-orders">{orders_body}</div>
                 </div>
                 <div class="gridpool-trades">
                     <h2>"Trades"</h2>
-                    {trades_body}
+                    <div id="gridpool-trades">{trades_body}</div>
                 </div>
             </div>
         </section>

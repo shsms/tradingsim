@@ -223,31 +223,6 @@ async fn root_serves_trunk_bundle() {
     }
 }
 
-#[tokio::test]
-async fn old_js_frontend_serves_embedded_html() {
-    let (app, _) = build_app();
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/old-js-frontend")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let html = std::str::from_utf8(&bytes).unwrap();
-    assert!(html.contains("<title>tradingsim</title>"));
-    assert!(
-        html.contains("/old-js-frontend/style.css"),
-        "JS index must reference its CSS under the new prefix",
-    );
-    assert!(
-        html.contains("/old-js-frontend/app.js"),
-        "JS index must reference its app.js under the new prefix",
-    );
-}
 
 #[tokio::test]
 async fn api_info_returns_version_and_counts() {
