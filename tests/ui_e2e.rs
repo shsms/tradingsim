@@ -196,42 +196,57 @@ async fn post_json(app: &Router, path: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn index_serves_embedded_html() {
+async fn root_serves_trunk_bundle() {
+    // / mounts the trunk-generated index.html. Fresh clones haven't
+    // run `trunk build`, so web/dist/ is empty and the route returns
+    // 404 — accept either, so the test stays green either way.
     let (app, _) = build_app();
     let res = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
+        "unexpected / status: {status}",
+    );
+    if status == StatusCode::OK {
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&bytes).unwrap();
+        assert!(html.contains("<title>tradingsim</title>"));
+        // Trunk's public_url is `/`, so generated asset paths sit on
+        // the site root rather than under a /leptos/ prefix.
+        assert!(
+            html.contains("/tradingsim-web-"),
+            "expected hashed WASM asset reference in index.html",
+        );
+    }
+}
+
+#[tokio::test]
+async fn old_js_frontend_serves_embedded_html() {
+    let (app, _) = build_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/old-js-frontend")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&bytes).unwrap();
     assert!(html.contains("<title>tradingsim</title>"));
-}
-
-#[tokio::test]
-async fn leptos_root_serves_trunk_bundle() {
-    // The /leptos route mounts the trunk-generated index.html. If
-    // `trunk build` hasn't run, web/dist/ is empty and the route
-    // returns 404 — accept either, so this test stays green on a
-    // fresh clone where only `cargo build` has run.
-    let (app, _) = build_app();
-    let res = app
-        .oneshot(Request::builder().uri("/leptos").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let status = res.status();
     assert!(
-        status == StatusCode::OK || status == StatusCode::NOT_FOUND,
-        "unexpected /leptos status: {status}",
+        html.contains("/old-js-frontend/style.css"),
+        "JS index must reference its CSS under the new prefix",
     );
-    if status == StatusCode::OK {
-        let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        let html = std::str::from_utf8(&bytes).unwrap();
-        assert!(html.contains("<title>tradingsim</title>"));
-        // Trunk injects an absolute asset path; confirm public_url
-        // is wired so the shell coexists with the JS UI at `/`.
-        assert!(html.contains("/leptos/"), "expected /leptos/-prefixed asset paths");
-    }
+    assert!(
+        html.contains("/old-js-frontend/app.js"),
+        "JS index must reference its app.js under the new prefix",
+    );
 }
 
 #[tokio::test]

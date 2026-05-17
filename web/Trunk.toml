@@ -8,11 +8,6 @@
 target = "index.html"
 dist = "dist"
 release = true
-# Asset paths in the generated index.html are prefixed with this so
-# the WASM shell can be mounted under `/leptos/` alongside the old
-# JS UI at `/`. Drop the prefix when the cut-over moves the shell
-# to the site root.
-public_url = "/leptos/"
 
 [watch]
 ignore = ["dist"]

@@ -45,12 +45,11 @@ pub fn build_router(
         clock,
     };
     Router::new()
-        .route("/", get(index))
-        .route("/style.css", get(style_css))
-        .route("/app.js", get(app_js))
-        .route("/leptos", get(leptos_root))
-        .route("/leptos/", get(leptos_root))
-        .route("/leptos/{*path}", get(leptos_asset))
+        .route("/", get(spa_root))
+        .route("/{*path}", get(spa_asset))
+        .route("/old-js-frontend", get(old_index))
+        .route("/old-js-frontend/style.css", get(old_style_css))
+        .route("/old-js-frontend/app.js", get(old_app_js))
         .route("/api/info", get(api_info))
         .route("/api/clock", get(api_clock))
         .route("/api/gridpools", get(api_gridpools))
@@ -84,18 +83,18 @@ pub async fn serve(
     axum::serve(listener, app).await
 }
 
-async fn index() -> impl IntoResponse {
+async fn old_index() -> impl IntoResponse {
     Html(include_str!("../../ui-assets/index.html"))
 }
 
-async fn style_css() -> impl IntoResponse {
+async fn old_style_css() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../../ui-assets/style.css"),
     )
 }
 
-async fn app_js() -> impl IntoResponse {
+async fn old_app_js() -> impl IntoResponse {
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -107,26 +106,26 @@ async fn app_js() -> impl IntoResponse {
 
 /// Trunk's `web/dist/` output: `index.html` + hashed `*.js` / `*.wasm`
 /// / `*.css` siblings. `build.rs` ensures the folder exists so
-/// `cargo build` works before `trunk build` has run — the /leptos
-/// routes just 404 until the bundle is built.
+/// `cargo build` works before `trunk build` has run — / + /{*path}
+/// just 404 until the bundle is built.
 #[derive(rust_embed::Embed)]
 #[folder = "web/dist/"]
-struct LeptosDist;
+struct WebDist;
 
-async fn leptos_root() -> axum::response::Response {
-    leptos_asset_inner("index.html")
+async fn spa_root() -> axum::response::Response {
+    spa_asset_inner("index.html")
 }
 
-async fn leptos_asset(Path(path): Path<String>) -> axum::response::Response {
-    leptos_asset_inner(&path)
+async fn spa_asset(Path(path): Path<String>) -> axum::response::Response {
+    spa_asset_inner(&path)
 }
 
-fn leptos_asset_inner(path: &str) -> axum::response::Response {
+fn spa_asset_inner(path: &str) -> axum::response::Response {
     let path = if path.is_empty() { "index.html" } else { path };
-    let Some(file) = LeptosDist::get(path) else {
+    let Some(file) = WebDist::get(path) else {
         return (
             StatusCode::NOT_FOUND,
-            "leptos shell asset not found — run `trunk build` in web/",
+            "web bundle asset not found — run `trunk build` in web/",
         )
             .into_response();
     };
