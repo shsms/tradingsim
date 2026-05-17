@@ -131,8 +131,8 @@ fn area_passes(want: Option<&crate::proto::common::grid::DeliveryArea>, candidat
     want.is_none_or(|a| a.code == candidate)
 }
 
-/// True iff an optional exact-period filter passes (start timestamp
-/// + duration both match). Used by the public-tape filters that
+/// True iff an optional exact-period filter passes — start timestamp
+/// and duration both match. Used by the public-tape filters that
 /// pin to a single contract instead of an interval.
 fn exact_period_passes(
     want: Option<&crate::proto::common::grid::DeliveryPeriod>,

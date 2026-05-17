@@ -485,14 +485,14 @@ async fn api_gridpool_orders_filters_by_period_and_sorts_newest_first() {
     seed_pool(&world, |p| {
         p.record_order(order_detail(
             1,
-            p_noon.clone(),
+            p_noon,
             Side::Buy,
             OrderState::Active,
             early,
         ));
         p.record_order(order_detail(
             2,
-            p_one.clone(),
+            p_one,
             Side::Sell,
             OrderState::Active,
             later,

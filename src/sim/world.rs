@@ -430,6 +430,7 @@ impl World {
     /// just changed. `now` becomes the record's update_time;
     /// create_time is tracked across calls via `book_first_seen`,
     /// inserted on first emission and cleared when qty drops to 0.
+    #[allow(clippy::too_many_arguments)]
     fn emit_book_event(
         &mut self,
         order_id: OrderId,
@@ -744,10 +745,10 @@ impl World {
                 ExecutionOption::Aon,
             ));
         }
-        if order.execution_option.is_some() && order.valid_until.is_some() {
-            return Err(SubmitError::UnsupportedExecutionOption(
-                order.execution_option.unwrap(),
-            ));
+        if let Some(opt) = order.execution_option
+            && order.valid_until.is_some()
+        {
+            return Err(SubmitError::UnsupportedExecutionOption(opt));
         }
 
         // 4b. Self-trade prevention. Only if the pool opted in;
@@ -1208,7 +1209,8 @@ impl World {
         // gated out and cancel each resting order on it; emit
         // qty=0 events so the public book stream tells subscribers
         // those entries are gone.
-        let cp_targets: Vec<(ContractKey, Vec<(OrderId, Side, Decimal)>)> = self
+        type CpEntries = Vec<(ContractKey, Vec<(OrderId, Side, Decimal)>)>;
+        let cp_targets: CpEntries = self
             .books
             .iter()
             .filter(|(k, _)| k.period.start <= now)

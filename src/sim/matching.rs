@@ -94,10 +94,7 @@ pub fn match_limit(
     }
 
     let mut fills = Vec::new();
-    loop {
-        let Some(level_price) = book.peek_opposite(taker.side) else {
-            break;
-        };
+    while let Some(level_price) = book.peek_opposite(taker.side) {
         if !crosses(taker.side, taker.price, level_price) {
             break;
         }

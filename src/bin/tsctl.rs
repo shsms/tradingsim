@@ -487,6 +487,7 @@ async fn cmd_scenarios(ui_addr: &str, action: ScenariosAction) -> Result<(), Str
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_place(
     client: &mut ElectricityTradingServiceClient<Channel>,
     pool: u64,

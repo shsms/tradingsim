@@ -196,6 +196,7 @@ pub fn new_curve() -> SharedCurve {
 /// `manual_override`), and its stage bias is blended into the
 /// per-contract natural-curve bias by the quarter-offset decay
 /// weight.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_bias_tick(
     aggressors: Arc<Mutex<Vec<AggressorView>>>,
     mms: Arc<Mutex<Vec<MmView>>>,
@@ -317,6 +318,7 @@ fn pick_active_stage(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_biases(
     aggressors: &[AggressorView],
     mms: &[MmView],
@@ -674,7 +676,7 @@ mod tests {
         };
         apply_biases(
             &[],
-            &[view.clone()],
+            std::slice::from_ref(&view),
             Some(0.90), // strong buy bias
             25.0,
             &ForwardCurve::default(),
@@ -704,7 +706,7 @@ mod tests {
             shared_config: Arc::new(RwLock::new(ag_cfg)),
         };
         apply_biases(
-            &[view.clone()],
+            std::slice::from_ref(&view),
             &[],
             Some(0.80),
             25.0,

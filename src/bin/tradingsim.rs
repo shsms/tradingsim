@@ -107,7 +107,7 @@ async fn main() {
     let gridpool_specs = lisp_config.gridpools();
     if !gridpool_specs.is_empty() {
         for gp in gridpool_specs {
-            let areas = gp.area_codes.iter().map(|c| Area::eic(c)).collect();
+            let areas = gp.area_codes.iter().map(Area::eic).collect();
             log::info!(
                 "Registered gridpool {} \"{}\" ({} area(s))",
                 gp.id,

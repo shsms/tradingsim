@@ -87,7 +87,7 @@ impl WeatherForecastService for WeatherForecastServer {
         let requested: Vec<(f64, f64)> = req
             .locations
             .iter()
-            .filter_map(|loc| Some((loc.latitude as f64, loc.longitude as f64)))
+            .map(|loc| (loc.latitude as f64, loc.longitude as f64))
             .collect();
         let (tx, rx) = mpsc::channel(8);
         let weather = self.weather.clone();

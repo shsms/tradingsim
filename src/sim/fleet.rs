@@ -278,6 +278,7 @@ fn fundamentals_at(
 /// Build a per-contract MM, register its view, and spawn the refresh
 /// task. Returns a [`ContractHandle`] whose `retire_tx` causes the
 /// task to cancel its resting quotes and exit.
+#[allow(clippy::too_many_arguments)]
 fn spawn_mm_contract(
     world: Arc<RwLock<World>>,
     spec: &MmFleetSpec,
@@ -292,7 +293,7 @@ fn spawn_mm_contract(
         start: period_start,
         duration: DeliveryDuration::DeliveryDuration15,
     };
-    let areas: Vec<Area> = spec.areas.iter().map(|c| Area::eic(c)).collect();
+    let areas: Vec<Area> = spec.areas.iter().map(Area::eic).collect();
     let seeded = fundamentals_at(&curve, &weather, &clock, &spec.areas, period_start);
     let params = spec.shared_params.read().clone();
     let cfg = MarketMakerConfig {
@@ -379,6 +380,7 @@ async fn run_mm_contract(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_aggressor_contract(
     world: Arc<RwLock<World>>,
     spec: &AggressorFleetSpec,

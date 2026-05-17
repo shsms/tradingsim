@@ -501,6 +501,7 @@ impl Config {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_runtime(
     ctx: &mut TulispContext,
     metadata: Arc<RwLock<Metadata>>,

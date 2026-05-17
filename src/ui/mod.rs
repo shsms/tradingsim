@@ -1,7 +1,8 @@
-//! Minimal axum-driven UI. One HTML page (embedded via `include_str!`)
-//! + a couple of /api/* JSON endpoints + two WebSockets for the live
-//! public-trade and public-book streams. Spawned by the binary in
-//! its own task; talks to the shared World handle.
+//! Minimal axum-driven UI. The Leptos SPA bundle (built by trunk
+//! into `web/dist/`, rust-embedded), plus a handful of `/api/*` JSON
+//! endpoints and two WebSockets for the live public-trade and
+//! public-book streams. Spawned by the binary in its own task;
+//! talks to the shared World handle.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
