@@ -1,0 +1,143 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Format + clippy + cargo test on the host crate (the workspace
+  # root). The `web` member is wasm-only and lives behind a separate
+  # job below. tulisp / tulisp-async / tulisp-fmt come from their
+  # git remotes per Cargo.toml; the trading + weather protos are
+  # vendored as submodules.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy -p tradingsim --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test -p tradingsim
+
+  # Build the Leptos web shell. Verifies the web crate compiles to
+  # wasm32-unknown-unknown and that trunk produces a bundle the host
+  # crate can rust-embed. Runs in parallel with `rust` because the
+  # host crate's build.rs creates an empty `web/dist/` if missing,
+  # so `cargo build` doesn't depend on this job.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache cargo + web target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-web-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-web-
+
+      - name: Install trunk + wasm-bindgen-cli
+        run: |
+          # `cargo install` is a no-op if the version-matching binary
+          # is already on PATH from the restored cache.
+          cargo install --locked trunk wasm-bindgen-cli
+
+      - name: clippy (web, wasm target)
+        run: cargo clippy -p tradingsim-web --target wasm32-unknown-unknown -- -D warnings
+
+      - name: trunk build
+        working-directory: web
+        run: trunk build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  # Smoke test: boot the binary against the sample config.lisp and
+  # curl /api/info to confirm the server stood up. Catches
+  # regressions in the boot path that pure-Rust tests miss.
+  smoke:
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build tradingsim binary
+        run: cargo build --bin tradingsim
+
+      - name: Boot + curl /api/info
+        run: |
+          ./target/debug/tradingsim > /tmp/ts.log 2>&1 &
+          PID=$!
+          for _ in {1..30}; do
+            if grep -q "UI server listening" /tmp/ts.log 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if ! grep -q "UI server listening" /tmp/ts.log; then
+            echo "server failed to start"
+            cat /tmp/ts.log
+            kill $PID 2>/dev/null || true
+            exit 1
+          fi
+          # Default UI port is 4401 (set in config.lisp). /api/info
+          # returns gridpool / market / coupling counts.
+          gridpools=$(curl -fs http://127.0.0.1:4401/api/info | python3 -c "import sys,json; print(json.load(sys.stdin)['gridpools'])")
+          kill $PID 2>/dev/null || true
+          if [ "$gridpools" -lt 1 ]; then
+            echo "expected non-empty gridpools, got $gridpools"
+            exit 1
+          fi
+          echo "smoke ok — $gridpools gridpools"
