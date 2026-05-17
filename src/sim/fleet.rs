@@ -152,7 +152,8 @@ impl FleetManager {
                 active.insert((period_start, p), handle);
             }
         }
-        self.aggressor_fleets.push(AggressorFleetState { spec, active });
+        self.aggressor_fleets
+            .push(AggressorFleetState { spec, active });
     }
 
     /// Retire any per-contract task whose contract has gated and
@@ -258,7 +259,10 @@ fn fundamentals_at(
     area_codes: &[String],
     period_start: DateTime<Utc>,
 ) -> Decimal {
-    debug_assert!(!area_codes.is_empty(), "fundamentals_at needs at least one area");
+    debug_assert!(
+        !area_codes.is_empty(),
+        "fundamentals_at needs at least one area"
+    );
     let curve = curve.read();
     let weather = weather.read();
     let clock = clock.read().clone();
@@ -488,12 +492,7 @@ mod tests {
     async fn add_mm_fleet_publishes_window_views() {
         let cfg = LispConfig::with_defaults();
         let world = empty_world();
-        let mut mgr = FleetManager::new(
-            world,
-            cfg.curve(),
-            cfg.weather(),
-            cfg.clock(),
-        );
+        let mut mgr = FleetManager::new(world, cfg.curve(), cfg.weather(), cfg.clock());
         let spec = MmFleetSpec {
             name: "test".into(),
             areas: vec!["10YDE-EON------1".into()],
@@ -521,12 +520,7 @@ mod tests {
     async fn roll_forward_retires_gated_and_tops_up() {
         let cfg = LispConfig::with_defaults();
         let world = empty_world();
-        let mut mgr = FleetManager::new(
-            world,
-            cfg.curve(),
-            cfg.weather(),
-            cfg.clock(),
-        );
+        let mut mgr = FleetManager::new(world, cfg.curve(), cfg.weather(), cfg.clock());
         let spec = MmFleetSpec {
             name: "test".into(),
             areas: vec!["10YDE-EON------1".into()],

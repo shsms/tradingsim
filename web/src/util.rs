@@ -19,19 +19,55 @@ pub struct AreaSpec {
 /// All areas the UI knows about. Order matches the JS UI: home
 /// zones first, then neighbours.
 pub const ALL_AREAS: &[AreaSpec] = &[
-    AreaSpec { code: "10YDE-EON------1", tag: "TN", group: AreaGroup::Home },
-    AreaSpec { code: "10YDE-RWENET---I", tag: "AM", group: AreaGroup::Home },
-    AreaSpec { code: "10YDE-VE-------2", tag: "HZ", group: AreaGroup::Home },
-    AreaSpec { code: "10YDE-ENBW-----N", tag: "BW", group: AreaGroup::Home },
-    AreaSpec { code: "10YFR-RTE------C", tag: "FR", group: AreaGroup::Neighbour },
-    AreaSpec { code: "10YNL----------L", tag: "NL", group: AreaGroup::Neighbour },
-    AreaSpec { code: "10YBE----------2", tag: "BE", group: AreaGroup::Neighbour },
-    AreaSpec { code: "10YAT-APG------L", tag: "AT", group: AreaGroup::Neighbour },
+    AreaSpec {
+        code: "10YDE-EON------1",
+        tag: "TN",
+        group: AreaGroup::Home,
+    },
+    AreaSpec {
+        code: "10YDE-RWENET---I",
+        tag: "AM",
+        group: AreaGroup::Home,
+    },
+    AreaSpec {
+        code: "10YDE-VE-------2",
+        tag: "HZ",
+        group: AreaGroup::Home,
+    },
+    AreaSpec {
+        code: "10YDE-ENBW-----N",
+        tag: "BW",
+        group: AreaGroup::Home,
+    },
+    AreaSpec {
+        code: "10YFR-RTE------C",
+        tag: "FR",
+        group: AreaGroup::Neighbour,
+    },
+    AreaSpec {
+        code: "10YNL----------L",
+        tag: "NL",
+        group: AreaGroup::Neighbour,
+    },
+    AreaSpec {
+        code: "10YBE----------2",
+        tag: "BE",
+        group: AreaGroup::Neighbour,
+    },
+    AreaSpec {
+        code: "10YAT-APG------L",
+        tag: "AT",
+        group: AreaGroup::Neighbour,
+    },
 ];
 
 /// Short tag for an EIC area code — `10YDE-EON------1` → `TN`, etc.
 pub fn area_tag(code: &str) -> &'static str {
-    ALL_AREAS.iter().find(|a| a.code == code).map(|a| a.tag).unwrap_or("?")
+    ALL_AREAS
+        .iter()
+        .find(|a| a.code == code)
+        .map(|a| a.tag)
+        .unwrap_or("?")
 }
 
 /// Strip the proto's SCREAMING_SNAKE prefixes for display. Unknown

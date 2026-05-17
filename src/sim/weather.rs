@@ -326,8 +326,7 @@ pub fn new_state() -> SharedWeather {
 /// one frame per hour. Real Frequenz weather forecasts publish at
 /// hourly cadence too, so trading apps testing against this sim
 /// see a stream shaped like production.
-pub const DEFAULT_WEATHER_CADENCE: std::time::Duration =
-    std::time::Duration::from_secs(3600);
+pub const DEFAULT_WEATHER_CADENCE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 pub type SharedWeatherCadence = Arc<RwLock<std::time::Duration>>;
 

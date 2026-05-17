@@ -16,8 +16,8 @@ use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
-use serde::{Deserialize, Serialize};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -112,7 +112,11 @@ fn spa_asset_inner(path: &str) -> axum::response::Response {
         Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     };
-    ([(axum::http::header::CONTENT_TYPE, mime)], file.data.into_owned()).into_response()
+    (
+        [(axum::http::header::CONTENT_TYPE, mime)],
+        file.data.into_owned(),
+    )
+        .into_response()
 }
 
 #[derive(Serialize)]

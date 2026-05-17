@@ -40,7 +40,9 @@ const DE_TN: &str = "10YDE-EON------1";
 
 fn period_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DeliveryPeriod {
     DeliveryPeriod {
-        start: Utc.with_ymd_and_hms(year, month, day, hour, minute, 0).unwrap(),
+        start: Utc
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .unwrap(),
         duration: DeliveryDuration::DeliveryDuration15,
     }
 }
@@ -54,8 +56,19 @@ fn order_detail(
 ) -> OrderDetail {
     OrderDetail {
         id: OrderId(id),
-        order: Order::limit(Area::eic(DE_TN), period, side, dec!(85.0), dec!(2.0), Currency::Eur),
-        state: StateDetail { state, reason: StateReason::Add, actor: MarketActor::User },
+        order: Order::limit(
+            Area::eic(DE_TN),
+            period,
+            side,
+            dec!(85.0),
+            dec!(2.0),
+            Currency::Eur,
+        ),
+        state: StateDetail {
+            state,
+            reason: StateReason::Add,
+            actor: MarketActor::User,
+        },
         open_quantity: dec!(2.0),
         filled_quantity: dec!(0),
         create_time,
@@ -80,13 +93,19 @@ fn trade_for(order_id: u64, trade_id: u64, exec: DateTime<Utc>) -> Trade {
 
 fn seed_pool<F: FnOnce(&mut Gridpool)>(world: &Arc<RwLock<World>>, f: F) {
     let mut w = world.write();
-    let pool = w.gridpools_mut().get_mut(GridpoolId(1)).expect("seeded pool");
+    let pool = w
+        .gridpools_mut()
+        .get_mut(GridpoolId(1))
+        .expect("seeded pool");
     f(pool);
 }
 
 fn empty_world() -> Arc<RwLock<World>> {
     let mut markets = MarketRegistry::new();
-    markets.insert(MarketRules::for_area(Area::eic(DE_TN), tradingsim::sim::market::Currency::Eur));
+    markets.insert(MarketRules::for_area(
+        Area::eic(DE_TN),
+        tradingsim::sim::market::Currency::Eur,
+    ));
     let mut world = World::new(markets);
     world.register_gridpool(Gridpool::new(GridpoolId(1), "test", vec![Area::eic(DE_TN)]));
     Arc::new(RwLock::new(world))
@@ -222,7 +241,6 @@ async fn root_serves_trunk_bundle() {
         );
     }
 }
-
 
 #[tokio::test]
 async fn api_info_returns_version_and_counts() {
@@ -465,8 +483,20 @@ async fn api_gridpool_orders_filters_by_period_and_sorts_newest_first() {
     let p_noon = period_at(2026, 5, 13, 12, 0);
     let p_one = period_at(2026, 5, 13, 13, 0);
     seed_pool(&world, |p| {
-        p.record_order(order_detail(1, p_noon.clone(), Side::Buy, OrderState::Active, early));
-        p.record_order(order_detail(2, p_one.clone(), Side::Sell, OrderState::Active, later));
+        p.record_order(order_detail(
+            1,
+            p_noon.clone(),
+            Side::Buy,
+            OrderState::Active,
+            early,
+        ));
+        p.record_order(order_detail(
+            2,
+            p_one.clone(),
+            Side::Sell,
+            OrderState::Active,
+            later,
+        ));
     });
     // Newest first, no filter.
     let (_, j) = get_json(&app, "/api/gridpools/1/orders").await;

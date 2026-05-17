@@ -44,11 +44,17 @@ pub fn record_trade(buf: &mut Vec<PricePoint>, t: &PublicTrade) {
     }
     let exec = Date::parse(&t.execution_time);
     let pms = Date::parse(&t.period);
-    let Ok(price) = t.price.parse::<f64>() else { return };
+    let Ok(price) = t.price.parse::<f64>() else {
+        return;
+    };
     if !exec.is_finite() || !pms.is_finite() {
         return;
     }
-    buf.push(PricePoint { t: exec, price, period_ms: pms });
+    buf.push(PricePoint {
+        t: exec,
+        price,
+        period_ms: pms,
+    });
     let cutoff = Date::now() - PRICE_BUFFER_MS;
     while let Some(front) = buf.first() {
         if front.t < cutoff {
@@ -181,7 +187,11 @@ pub fn PriceChart() -> impl IntoView {
 
     let on_period_change = move |ev| {
         let v = event_target_value(&ev);
-        let next = if v == "auto" || v.is_empty() { None } else { Some(v) };
+        let next = if v == "auto" || v.is_empty() {
+            None
+        } else {
+            Some(v)
+        };
         chart_period.set(next.clone());
         save_chart_period(next.as_deref());
     };
@@ -217,8 +227,7 @@ pub fn PriceChart() -> impl IntoView {
     // changes — not on every WS message that adds a print to a
     // period already in the list.
     let distinct_periods: Memo<Vec<String>> = Memo::new(move |_| {
-        let mut ms: Vec<i64> =
-            prices.with(|v| v.iter().map(|p| p.period_ms as i64).collect());
+        let mut ms: Vec<i64> = prices.with(|v| v.iter().map(|p| p.period_ms as i64).collect());
         ms.sort_unstable();
         ms.dedup();
         ms.into_iter()
@@ -340,16 +349,26 @@ fn draw(
     window_ms: f64,
     pinned: Option<&str>,
 ) {
-    let Some(parent) = canvas.parent_element() else { return };
-    let dpr = web_sys::window().map(|w| w.device_pixel_ratio()).unwrap_or(1.0);
+    let Some(parent) = canvas.parent_element() else {
+        return;
+    };
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0);
     let css_w = (parent.client_width() - 20).max(1) as f64;
     let css_h = 280.0;
-    canvas.set_attribute("style", &format!("width:{css_w}px;height:{css_h}px;")).ok();
+    canvas
+        .set_attribute("style", &format!("width:{css_w}px;height:{css_h}px;"))
+        .ok();
     canvas.set_width((css_w * dpr).floor().max(1.0) as u32);
     canvas.set_height((css_h * dpr).floor().max(1.0) as u32);
 
-    let Ok(Some(ctx_obj)) = canvas.get_context("2d") else { return };
-    let Ok(ctx) = ctx_obj.dyn_into::<CanvasRenderingContext2d>() else { return };
+    let Ok(Some(ctx_obj)) = canvas.get_context("2d") else {
+        return;
+    };
+    let Ok(ctx) = ctx_obj.dyn_into::<CanvasRenderingContext2d>() else {
+        return;
+    };
     ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0).ok();
     ctx.clear_rect(0.0, 0.0, css_w, css_h);
 
@@ -394,7 +413,13 @@ fn draw(
     ctx.set_font("10px ui-monospace, monospace");
     ctx.set_line_width(1.0);
     let y_range = ymax - ymin;
-    let y_decimals: usize = if y_range >= 10.0 { 0 } else if y_range >= 2.0 { 1 } else { 2 };
+    let y_decimals: usize = if y_range >= 10.0 {
+        0
+    } else if y_range >= 2.0 {
+        1
+    } else {
+        2
+    };
     for i in 0..=Y_STEPS {
         let y = pad_t + (i as f64 / Y_STEPS as f64) * inner_h;
         ctx.begin_path();
@@ -403,7 +428,8 @@ fn draw(
         ctx.stroke();
         let v = ymax - (i as f64 / Y_STEPS as f64) * (ymax - ymin);
         ctx.set_text_align("right");
-        ctx.fill_text(&format!("{v:.*}", y_decimals), pad_l - 4.0, y + 3.0).ok();
+        ctx.fill_text(&format!("{v:.*}", y_decimals), pad_l - 4.0, y + 3.0)
+            .ok();
     }
     ctx.set_text_align("center");
     let x_step = pick_x_step(window_ms);

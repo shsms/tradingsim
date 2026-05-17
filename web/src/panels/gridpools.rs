@@ -16,7 +16,13 @@ use crate::util::{area_tag, short_order_state, short_side, short_trade_state};
 const GRIDPOOL_POLL: Duration = Duration::from_secs(3);
 
 async fn fetch_pools() -> Option<Vec<GridpoolResp>> {
-    Request::get("/api/gridpools").send().await.ok()?.json().await.ok()
+    Request::get("/api/gridpools")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
 }
 
 async fn fetch_orders(pool_id: u64) -> Option<Vec<GridpoolOrder>> {
@@ -53,8 +59,7 @@ pub fn Gridpools() -> impl IntoView {
     };
 
     let refresh_trades = move || {
-        let (Some(pool), Some(order)) =
-            (selected.get_untracked(), selected_order.get_untracked())
+        let (Some(pool), Some(order)) = (selected.get_untracked(), selected_order.get_untracked())
         else {
             set_trades.set(Vec::new());
             return;
@@ -142,7 +147,11 @@ pub fn Gridpools() -> impl IntoView {
             .map(|g| {
                 let id = g.id;
                 let is_sel = sel == Some(id);
-                let cls = if is_sel { "row-item selected" } else { "row-item" };
+                let cls = if is_sel {
+                    "row-item selected"
+                } else {
+                    "row-item"
+                };
                 let badges = g
                     .areas
                     .iter()
@@ -220,29 +229,36 @@ pub fn Gridpools() -> impl IntoView {
             return view! { <i class="muted">{msg}</i> }.into_any();
         }
         let cur_order = selected_order.get();
-        let rows = visible.into_iter().map(|o| {
-            let side_cls = if o.side == "MARKET_SIDE_BUY" { "buy" } else { "sell" };
-            let oid = o.id;
-            let cls = if cur_order == Some(oid) {
-                "gp-order-row selected"
-            } else {
-                "gp-order-row"
-            };
-            let on_click = move |_| set_selected_order.set(Some(oid));
-            view! {
-                <tr class=cls on:click=on_click>
-                    <td>{o.id.to_string()}</td>
-                    <td class=side_cls>{short_side(&o.side).to_string()}</td>
-                    <td><span class="area-badge">{area_tag(&o.area)}</span></td>
-                    <td>{short_time(&o.period, &tz)}</td>
-                    <td>{o.price}</td>
-                    <td>{format!("{}/{}", o.filled_quantity, o.quantity)}</td>
-                    <td>{short_order_state(&o.state).to_string()}</td>
-                    <td>{short_time_sec(&o.create_time, &tz)}</td>
-                    <td>{short_time_sec(&o.modification_time, &tz)}</td>
-                </tr>
-            }
-        }).collect_view();
+        let rows = visible
+            .into_iter()
+            .map(|o| {
+                let side_cls = if o.side == "MARKET_SIDE_BUY" {
+                    "buy"
+                } else {
+                    "sell"
+                };
+                let oid = o.id;
+                let cls = if cur_order == Some(oid) {
+                    "gp-order-row selected"
+                } else {
+                    "gp-order-row"
+                };
+                let on_click = move |_| set_selected_order.set(Some(oid));
+                view! {
+                    <tr class=cls on:click=on_click>
+                        <td>{o.id.to_string()}</td>
+                        <td class=side_cls>{short_side(&o.side).to_string()}</td>
+                        <td><span class="area-badge">{area_tag(&o.area)}</span></td>
+                        <td>{short_time(&o.period, &tz)}</td>
+                        <td>{o.price}</td>
+                        <td>{format!("{}/{}", o.filled_quantity, o.quantity)}</td>
+                        <td>{short_order_state(&o.state).to_string()}</td>
+                        <td>{short_time_sec(&o.create_time, &tz)}</td>
+                        <td>{short_time_sec(&o.modification_time, &tz)}</td>
+                    </tr>
+                }
+            })
+            .collect_view();
         view! {
             <div class="scroll">
                 <table>

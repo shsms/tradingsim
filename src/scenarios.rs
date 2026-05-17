@@ -305,11 +305,8 @@ fn pick_active_stage(
             && entry.runtime.current_stage != Some(idx)
         {
             entry.runtime.current_stage = Some(idx);
-            entry.runtime.stage_entered_at = Some(today_at(
-                clock.tz,
-                entry.def.stages[idx].hour_from,
-                now,
-            ));
+            entry.runtime.stage_entered_at =
+                Some(today_at(clock.tz, entry.def.stages[idx].hour_from, now));
         }
         if let Some(idx) = entry.runtime.current_stage
             && let Some(stage) = entry.def.stages.get(idx)
@@ -341,9 +338,7 @@ fn apply_biases(
     let offset_for = |period_start: DateTime<Utc>| -> i64 {
         ((period_start - base_boundary).num_minutes() / 15).max(0)
     };
-    let period_hour_for = |period_start: DateTime<Utc>| -> f64 {
-        clock.local_hour(period_start)
-    };
+    let period_hour_for = |period_start: DateTime<Utc>| -> f64 { clock.local_hour(period_start) };
     let effective_for = |period_start: DateTime<Utc>| -> f64 {
         let natural = natural_duck_bias(period_hour_for(period_start));
         let offset = offset_for(period_start);

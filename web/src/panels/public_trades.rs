@@ -22,7 +22,11 @@ fn local_storage() -> Option<web_sys::Storage> {
 
 fn load_period_filter() -> Option<String> {
     let raw = local_storage()?.get_item(KEY_FILTER).ok().flatten()?;
-    if raw.is_empty() || raw == "all" { None } else { Some(raw) }
+    if raw.is_empty() || raw == "all" {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
 fn save_period_filter(p: Option<&str>) {
@@ -63,7 +67,11 @@ pub fn PublicTrades() -> impl IntoView {
 
     let on_period_change = move |ev| {
         let v = event_target_value(&ev);
-        let next = if v == "all" || v.is_empty() { None } else { Some(v) };
+        let next = if v == "all" || v.is_empty() {
+            None
+        } else {
+            Some(v)
+        };
         period_filter.set(next.clone());
         save_period_filter(next.as_deref());
     };
@@ -109,8 +117,7 @@ pub fn PublicTrades() -> impl IntoView {
                     {
                         return false;
                     }
-                    active.contains(t.buy_area.as_str())
-                        || active.contains(t.sell_area.as_str())
+                    active.contains(t.buy_area.as_str()) || active.contains(t.sell_area.as_str())
                 })
                 .take(TRADES_DISPLAY_CAP)
                 .cloned()

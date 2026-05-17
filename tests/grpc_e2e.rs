@@ -39,12 +39,8 @@ async fn spawn_server() -> String {
     // is now Reject; opt back into Allow here so those tests
     // keep their self-cross setup.
     world.register_gridpool(
-        Gridpool::new(
-            GridpoolId(1),
-            "test",
-            vec![Area::eic("10YDE-EON------1")],
-        )
-        .with_self_trade_policy(tradingsim::sim::gridpool::SelfTradePolicy::Allow),
+        Gridpool::new(GridpoolId(1), "test", vec![Area::eic("10YDE-EON------1")])
+            .with_self_trade_policy(tradingsim::sim::gridpool::SelfTradePolicy::Allow),
     );
     let world = Arc::new(RwLock::new(world));
 
@@ -525,7 +521,10 @@ async fn receive_public_trades_stream_emits_each_fill() {
     let t = msg.public_trade.expect("public trade present");
     // The price round-trips through rust_decimal which normalises
     // trailing zeroes off — "85.00" comes back as "85".
-    assert_eq!(t.price.as_ref().unwrap().amount.as_ref().unwrap().value, "85");
+    assert_eq!(
+        t.price.as_ref().unwrap().amount.as_ref().unwrap().value,
+        "85"
+    );
 }
 
 #[tokio::test]

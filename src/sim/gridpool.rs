@@ -155,9 +155,7 @@ impl GridpoolRegistry {
 mod tests {
     use super::*;
     use crate::sim::market::{Currency, DeliveryDuration, DeliveryPeriod};
-    use crate::sim::order::{
-        MarketActor, Order, OrderState, Side, StateDetail, StateReason,
-    };
+    use crate::sim::order::{MarketActor, Order, OrderState, Side, StateDetail, StateReason};
     use chrono::{TimeZone, Utc};
     use rust_decimal::dec;
 

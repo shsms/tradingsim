@@ -65,7 +65,11 @@ fn save_filter(state: &FilterState) {
     let _ = ls.set_item(KEY_ACTIVE, &codes.join(","));
     let _ = ls.set_item(
         KEY_NEIGHBOURS,
-        if state.show_neighbours { "true" } else { "false" },
+        if state.show_neighbours {
+            "true"
+        } else {
+            "false"
+        },
     );
 }
 
@@ -133,17 +137,22 @@ pub fn FilterBar() -> impl IntoView {
 
     let neighbours_chip = move || {
         let s = state.get();
-        let label = if s.show_neighbours { "− neighbours" } else { "+ neighbours" };
-        let cls = if s.show_neighbours { "chip active" } else { "chip" };
+        let label = if s.show_neighbours {
+            "− neighbours"
+        } else {
+            "+ neighbours"
+        };
+        let cls = if s.show_neighbours {
+            "chip active"
+        } else {
+            "chip"
+        };
         let toggle = move |_| {
             state.update(|s| {
                 s.show_neighbours = !s.show_neighbours;
                 // Sync chip set to the toggle: neighbours on = all
                 // four added, neighbours off = all four removed.
-                for a in ALL_AREAS
-                    .iter()
-                    .filter(|a| a.group == AreaGroup::Neighbour)
-                {
+                for a in ALL_AREAS.iter().filter(|a| a.group == AreaGroup::Neighbour) {
                     if s.show_neighbours {
                         s.active_areas.insert(a.code);
                     } else {

@@ -151,7 +151,10 @@ impl MmFleetParams {
     }
 
     fn band_for(bands: &[Decimal], offset: i64, window_quarters: i64) -> Decimal {
-        debug_assert!(!bands.is_empty(), "MmFleetParams band table must not be empty");
+        debug_assert!(
+            !bands.is_empty(),
+            "MmFleetParams band table must not be empty"
+        );
         let n = bands.len() as i64;
         let w = window_quarters.max(1);
         let idx = (offset.max(0) * n / w).clamp(0, n - 1);
@@ -254,16 +257,14 @@ impl MarketMaker {
         }
 
         for area in &cfg.areas {
-            if let Ok(id) = world.submit_counterparty_order(
-                build(&cfg, area, Side::Buy, bid_price),
-                now,
-            ) {
+            if let Ok(id) =
+                world.submit_counterparty_order(build(&cfg, area, Side::Buy, bid_price), now)
+            {
                 self.bid_ids.push((area.clone(), id));
             }
-            if let Ok(id) = world.submit_counterparty_order(
-                build(&cfg, area, Side::Sell, ask_price),
-                now,
-            ) {
+            if let Ok(id) =
+                world.submit_counterparty_order(build(&cfg, area, Side::Sell, ask_price), now)
+            {
                 self.ask_ids.push((area.clone(), id));
             }
         }
@@ -308,8 +309,7 @@ impl MarketMaker {
             // a single area; the four-area DE fleet sees a cross-area
             // print on TN↔AM as relevant signal the same way TN↔TN is.
             let last = hist.iter().rev().find(|t| {
-                t.period == period
-                    && (areas.contains(&t.buy_area) || areas.contains(&t.sell_area))
+                t.period == period && (areas.contains(&t.buy_area) || areas.contains(&t.sell_area))
             });
             if let Some(t) = last {
                 new_ref += (t.price - current) * follow_rate;
@@ -793,7 +793,14 @@ mod tests {
         // crossing counterparty orders on an empty book (no MM
         // resting yet to interfere with the match).
         let mk = |side, price| {
-            Order::limit(cfg.areas[0].clone(), cfg.period, side, price, dec!(0.1), Currency::Eur)
+            Order::limit(
+                cfg.areas[0].clone(),
+                cfg.period,
+                side,
+                price,
+                dec!(0.1),
+                Currency::Eur,
+            )
         };
         world
             .submit_counterparty_order(mk(Side::Sell, dec!(90.0)), t0())

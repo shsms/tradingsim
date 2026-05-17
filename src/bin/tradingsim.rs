@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use simplelog::{ColorChoice, Config as LogConfig, LevelFilter, TermLogger, TerminalMode};
 use parking_lot::{Mutex, RwLock};
+use simplelog::{ColorChoice, Config as LogConfig, LevelFilter, TermLogger, TerminalMode};
 use tonic::transport::Server;
 use tradingsim::{
     lisp::{Config as LispConfig, MmFleetSpec},
@@ -120,7 +120,9 @@ async fn main() {
             );
         }
     } else {
-        log::info!("No gridpools in lisp config — registering hardcoded gridpool 1 (single test area)");
+        log::info!(
+            "No gridpools in lisp config — registering hardcoded gridpool 1 (single test area)"
+        );
         world.register_gridpool(Gridpool::new(GridpoolId(1), "default", vec![area.clone()]));
     }
 
@@ -203,9 +205,7 @@ async fn main() {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tick.tick().await;
-                let n = world_for_expiry
-                    .write()
-                    .expire_lapsed_orders(Utc::now());
+                let n = world_for_expiry.write().expire_lapsed_orders(Utc::now());
                 if n > 0 {
                     log::info!("Expired {n} order(s) on the valid_until deadline");
                 }
@@ -256,8 +256,7 @@ async fn main() {
             "127.0.0.1:8811".parse().unwrap()
         });
         tokio::spawn(async move {
-            if let Err(e) =
-                ui_server::serve(ui_addr, world_for_ui, scenarios, weather, clock).await
+            if let Err(e) = ui_server::serve(ui_addr, world_for_ui, scenarios, weather, clock).await
             {
                 log::error!("UI server exited: {e}");
             }
@@ -268,9 +267,8 @@ async fn main() {
     // service path, so a client connecting once to the configured
     // grpc-addr reaches ElectricityTrading and WeatherForecast.
     // Configurable via `(set-grpc-socket-addr "…")`.
-    let trading_service = ElectricityTradingServiceServer::new(
-        ElectricityTradingServer::new(Arc::clone(&world)),
-    );
+    let trading_service =
+        ElectricityTradingServiceServer::new(ElectricityTradingServer::new(Arc::clone(&world)));
     let weather_service = {
         use tradingsim::proto::weather::weather_forecast_service_server::WeatherForecastServiceServer;
         use tradingsim::weather_server::WeatherForecastServer;

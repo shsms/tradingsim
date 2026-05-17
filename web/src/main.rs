@@ -13,7 +13,7 @@ mod util;
 use panels::chart::{PricePoint, record_trade};
 use panels::{
     ContractPill, FilterBar, Gridpools, PriceChart, PublicTrades, PulseBar, Scenarios, SparkState,
-    TzMode, TRADES_BUFFER_CAP, Weather, load_filter, load_tz_mode,
+    TRADES_BUFFER_CAP, TzMode, Weather, load_filter, load_tz_mode,
 };
 use types::{ClockResp, InfoResp, PublicTrade, Scenario};
 
@@ -72,7 +72,13 @@ fn Shell() -> impl IntoView {
     });
 
     let info = LocalResource::new(|| async {
-        Request::get("/api/info").send().await.ok()?.json::<InfoResp>().await.ok()
+        Request::get("/api/info")
+            .send()
+            .await
+            .ok()?
+            .json::<InfoResp>()
+            .await
+            .ok()
     });
 
     let info_line = move || match info.get().as_deref() {

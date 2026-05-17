@@ -71,7 +71,9 @@ fn document_body() -> Option<web_sys::HtmlElement> {
 
 fn apply_density(comfortable: bool) {
     if let Some(body) = document_body() {
-        let _ = body.class_list().toggle_with_force("comfortable", comfortable);
+        let _ = body
+            .class_list()
+            .toggle_with_force("comfortable", comfortable);
     }
 }
 
@@ -94,7 +96,11 @@ fn save_density(comfortable: bool) {
     if let Some(ls) = local_storage() {
         let _ = ls.set_item(
             DENSITY_KEY,
-            if comfortable { "comfortable" } else { "compact" },
+            if comfortable {
+                "comfortable"
+            } else {
+                "compact"
+            },
         );
     }
 }
@@ -160,7 +166,13 @@ pub fn PulseBar() -> impl IntoView {
         save_density(c);
     });
     let toggle_density = move |_| set_comfortable.update(|c| *c = !*c);
-    let density_label = move || if comfortable.get() { "comfortable" } else { "compact" };
+    let density_label = move || {
+        if comfortable.get() {
+            "comfortable"
+        } else {
+            "compact"
+        }
+    };
 
     // TZ toggle — flips between sim local and UTC; clock + every
     // panel that formats through `display_tz` follow immediately.
@@ -179,10 +191,18 @@ pub fn PulseBar() -> impl IntoView {
     };
 
     let pill_trades_cls = move || {
-        if trade_count.get() > 0 { "pill ok" } else { "pill down" }
+        if trade_count.get() > 0 {
+            "pill ok"
+        } else {
+            "pill down"
+        }
     };
     let pill_weather_cls = move || {
-        if weather_loaded.get() { "pill ok" } else { "pill down" }
+        if weather_loaded.get() {
+            "pill ok"
+        } else {
+            "pill down"
+        }
     };
 
     let sparkbars = move || {
@@ -216,11 +236,7 @@ pub fn PulseBar() -> impl IntoView {
         match active {
             Some(s) => {
                 let idx = s.current_stage.unwrap_or(0);
-                let stage_name = s
-                    .stages
-                    .get(idx)
-                    .map(|st| st.name.as_str())
-                    .unwrap_or("?");
+                let stage_name = s.stages.get(idx).map(|st| st.name.as_str()).unwrap_or("?");
                 let total = s.stages.len();
                 (
                     "".to_string(),

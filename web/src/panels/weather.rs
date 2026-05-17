@@ -13,7 +13,13 @@ use crate::util::area_tag;
 const WEATHER_POLL: Duration = Duration::from_secs(10);
 
 async fn fetch_weather() -> Option<Vec<WeatherLoc>> {
-    Request::get("/api/weather").send().await.ok()?.json().await.ok()
+    Request::get("/api/weather")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
 }
 
 #[component]

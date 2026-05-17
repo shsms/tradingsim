@@ -773,9 +773,7 @@ fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::Shar
     use crate::scenarios::{ScenarioDef, ScenarioEntry, ScenarioRuntime, Stage};
     ctx.defun(
         "define-scenario",
-        move |ctx: &mut TulispContext,
-              args: Plist<DefineScenarioArgs>|
-              -> Result<String, Error> {
+        move |ctx: &mut TulispContext, args: Plist<DefineScenarioArgs>| -> Result<String, Error> {
             let a = args.into_inner();
             let mut stages = Vec::new();
             for raw in a.stages {
@@ -793,13 +791,13 @@ fn register_scenarios(ctx: &mut TulispContext, scenarios: crate::scenarios::Shar
             }
             let date = match a.date.as_deref() {
                 None => None,
-                Some(s) => Some(chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(
-                    |e| {
+                Some(s) => Some(
+                    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| {
                         Error::os_error(format!(
                             "define-scenario: :date must be YYYY-MM-DD; got {s:?} ({e})"
                         ))
-                    },
-                )?),
+                    })?,
+                ),
             };
             let def = ScenarioDef {
                 name: a.name.clone(),
@@ -1092,13 +1090,19 @@ fn register_mm_fleets(
             let params = MmFleetParams {
                 size_bands,
                 spread_bands,
-                price_noise: a.noise.map(f64_to_dec).unwrap_or(default_params.price_noise),
+                price_noise: a
+                    .noise
+                    .map(f64_to_dec)
+                    .unwrap_or(default_params.price_noise),
                 follow_last_trade: a
                     .follow
                     .map(f64_to_dec)
                     .map(|d| d.clamp(Decimal::ZERO, Decimal::ONE))
                     .unwrap_or(default_params.follow_last_trade),
-                refresh_ms: a.refresh_ms.unwrap_or(default_params.refresh_ms as i64).max(100) as u64,
+                refresh_ms: a
+                    .refresh_ms
+                    .unwrap_or(default_params.refresh_ms as i64)
+                    .max(100) as u64,
                 tick: default_params.tick,
             };
             if a.areas.is_empty() {
@@ -1236,7 +1240,14 @@ mod tests {
         assert_eq!(f.window_quarters, 24);
         assert_eq!(f.seed_base, 5000);
         let p = f.shared_params.read();
-        assert_eq!(p.size_bands, vec![rust_decimal::dec!(2.0), rust_decimal::dec!(1.5), rust_decimal::dec!(1.0)]);
+        assert_eq!(
+            p.size_bands,
+            vec![
+                rust_decimal::dec!(2.0),
+                rust_decimal::dec!(1.5),
+                rust_decimal::dec!(1.0)
+            ]
+        );
         assert_eq!(p.refresh_ms, 1500);
         assert_eq!(p.price_noise, rust_decimal::dec!(0.15));
         assert_eq!(p.follow_last_trade, rust_decimal::dec!(0.20));
@@ -1246,9 +1257,7 @@ mod tests {
     async fn make_mm_fleet_uses_defaults_for_missing_bands() {
         // Omitting :size-bands / :spread-bands falls back to the
         // 4-band MmFleetParams::default tables.
-        let f = write_tmp(
-            r#"(%make-mm-fleet :name "x" :areas '("10YDE-EON------1"))"#,
-        );
+        let f = write_tmp(r#"(%make-mm-fleet :name "x" :areas '("10YDE-EON------1"))"#);
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
         let fleets = cfg.mm_fleets();
         let p = fleets[0].shared_params.read();
@@ -1380,10 +1389,8 @@ mod tests {
 
         f.as_file().set_len(0).unwrap();
         f.as_file().seek(SeekFrom::Start(0)).unwrap();
-        f.write_all(
-            br#"(%make-mm-fleet :name "tn" :areas '("10YDE-EON------1") :refresh-ms 500)"#,
-        )
-        .unwrap();
+        f.write_all(br#"(%make-mm-fleet :name "tn" :areas '("10YDE-EON------1") :refresh-ms 500)"#)
+            .unwrap();
         f.flush().unwrap();
         cfg.reload().unwrap();
 
@@ -1606,7 +1613,10 @@ mod tests {
         let bias = *cfg.bias_scale().read();
         // counter starts at 0, increments 1 per fire — after ~60ms
         // at 1ms cadence many fires have landed.
-        assert!(bias > 0.0, "bias_scale was not mutated by the timer: {bias}");
+        assert!(
+            bias > 0.0,
+            "bias_scale was not mutated by the timer: {bias}"
+        );
         assert!(
             (bias - 25.0).abs() > 0.5,
             "bias_scale still at the default 25.0 — timer didn't fire"

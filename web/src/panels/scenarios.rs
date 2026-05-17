@@ -10,7 +10,13 @@ use crate::intl::now_hour_in_tz;
 use crate::types::{Scenario, Stage};
 
 async fn fetch_scenarios() -> Option<Vec<Scenario>> {
-    Request::get("/api/scenarios").send().await.ok()?.json().await.ok()
+    Request::get("/api/scenarios")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
 }
 
 async fn post_action(name: &str, action: &str) {
@@ -141,7 +147,9 @@ where
     let scenarios_sig = expect_context::<RwSignal<Vec<Scenario>>>();
     let jump = move |name: String, idx: usize| {
         leptos::task::spawn_local(async move {
-            let _ = Request::post(&format!("/api/scenarios/{name}/jump/{idx}")).send().await;
+            let _ = Request::post(&format!("/api/scenarios/{name}/jump/{idx}"))
+                .send()
+                .await;
             if let Some(list) = fetch_scenarios().await {
                 scenarios_sig.set(list);
             }
@@ -162,10 +170,7 @@ where
             } else if i < cur {
                 cls.push_str(" done");
             }
-            let title = format!(
-                "{} — bias {:.2} → {:.2}",
-                st.name, st.bias_from, st.bias_to
-            );
+            let title = format!("{} — bias {:.2} → {:.2}", st.name, st.bias_from, st.bias_to);
             let on_block_click = move |_| jump(name.clone(), i);
             view! {
                 <div
