@@ -79,9 +79,9 @@ LIMIT orders only, 15-min delivery duration only.
   cancel-all / orders [--live] / trades [--live] / public-trades /
   public-book / scenarios (list / start / next / prev / jump / stop).
   --start accepts "next", "+N", or RFC-3339. The scenarios
-  subcommands hit the HTTP UI server on --ui-addr (default 8811);
+  subcommands hit the HTTP UI server on --ui-addr (default 4401);
   everything else (trading + weather) uses the gRPC --addr (default
-  [::1]:8810).
+  [::1]:4400).
 - `tests/grpc_e2e.rs` — out-of-process round-trips against the live
   service
 
@@ -107,8 +107,8 @@ serving `/`. `web/dist/` is rust-embedded by `src/ui/mod.rs`; the
 host crate's `build.rs` creates the folder if missing so the
 embed compiles on a fresh clone.
 
-The server defaults to `[::1]:8810` for all gRPC (ElectricityTrading
-+ WeatherForecast multiplexed on one socket) and `127.0.0.1:8811`
+The server defaults to `[::1]:4400` for all gRPC (ElectricityTrading
++ WeatherForecast multiplexed on one socket) and `127.0.0.1:4401`
 for the UI. Both are configurable via the lisp defuns
 `(set-grpc-socket-addr)` and `(set-ui-addr)`.
 
@@ -131,7 +131,7 @@ git submodule update --init --recursive
 [`frequenz-client-electricity-trading-python`](https://github.com/frequenz-floss/frequenz-client-electricity-trading-python)
 is the official client for this API. Use it as the end-to-end
 smoke-test driver once Phase 4 lands the gRPC server: point it at
-`[::1]:8810` and exercise place / list / cancel + the four stream
+`[::1]:4400` and exercise place / list / cancel + the four stream
 RPCs.
 
 ## Browser tests (Selenium + headless Firefox)

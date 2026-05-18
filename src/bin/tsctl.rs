@@ -1,6 +1,6 @@
 //! Client CLI for tradingsim. Phase 4: info / place / get / cancel /
 //! cancel-all / orders (with optional --live stream). Talks to the
-//! gRPC server defaults on [::1]:8810.
+//! gRPC server defaults on [::1]:4400.
 
 use std::str::FromStr;
 
@@ -29,12 +29,12 @@ struct Cli {
     /// gRPC endpoint for the tradingsim server. Both
     /// ElectricityTrading and WeatherForecast are multiplexed on
     /// this one socket (matching what tradingsim binds).
-    #[arg(long, default_value = "http://[::1]:8810")]
+    #[arg(long, default_value = "http://[::1]:4400")]
     addr: String,
 
     /// HTTP endpoint for the UI server (scenarios live here, not on
     /// the gRPC channel).
-    #[arg(long, default_value = "http://127.0.0.1:8811")]
+    #[arg(long, default_value = "http://127.0.0.1:4401")]
     ui_addr: String,
 
     #[command(subcommand)]

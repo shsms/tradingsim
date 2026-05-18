@@ -244,7 +244,7 @@ async fn main() {
 
     // UI server: spawns alongside the gRPC server, sharing the same
     // World handle. Address pulled from config.lisp via
-    // (set-ui-addr "…"); defaults to 127.0.0.1:8811.
+    // (set-ui-addr "…"); defaults to 127.0.0.1:4401.
     {
         let world_for_ui = Arc::clone(&world);
         let scenarios = Some(lisp_config.scenarios());
@@ -252,8 +252,8 @@ async fn main() {
         let clock = lisp_config.clock();
         let ui_addr_str = lisp_config.ui_addr();
         let ui_addr: std::net::SocketAddr = ui_addr_str.parse().unwrap_or_else(|e| {
-            log::error!("Invalid ui-addr {ui_addr_str:?} ({e}); falling back to 127.0.0.1:8811");
-            "127.0.0.1:8811".parse().unwrap()
+            log::error!("Invalid ui-addr {ui_addr_str:?} ({e}); falling back to 127.0.0.1:4401");
+            "127.0.0.1:4401".parse().unwrap()
         });
         tokio::spawn(async move {
             if let Err(e) = ui_server::serve(ui_addr, world_for_ui, scenarios, weather, clock).await

@@ -43,8 +43,8 @@ pub struct Metadata {
 impl Default for Metadata {
     fn default() -> Self {
         Self {
-            grpc_addr: "[::1]:8810".to_string(),
-            ui_addr: "127.0.0.1:8811".to_string(),
+            grpc_addr: "[::1]:4400".to_string(),
+            ui_addr: "127.0.0.1:4401".to_string(),
             physics_tick: Duration::from_millis(100),
         }
     }
@@ -1184,7 +1184,7 @@ mod tests {
     async fn empty_config_yields_defaults() {
         let f = write_tmp(";; empty\n");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.grpc_addr(), "[::1]:8810");
+        assert_eq!(cfg.grpc_addr(), "[::1]:4400");
         assert_eq!(cfg.metadata().physics_tick, Duration::from_millis(100));
     }
 
@@ -1206,7 +1206,7 @@ mod tests {
     async fn ui_addr_default_is_sensible() {
         let f = write_tmp(";; empty\n");
         let cfg = Config::new(f.path().to_str().unwrap()).unwrap();
-        assert_eq!(cfg.ui_addr(), "127.0.0.1:8811");
+        assert_eq!(cfg.ui_addr(), "127.0.0.1:4401");
     }
 
     #[tokio::test]
