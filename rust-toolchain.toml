@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+# trunk drives a wasm32 cargo build for the web/ subcrate from
+# build.rs (see the host build.rs). Listing the target here lets
+# rustup auto-install it on the first `cargo build` instead of
+# leaving a fresh clone with a cryptic `can't find crate for
+# `core`` failure deep inside the trunk subprocess output.
+targets = ["wasm32-unknown-unknown"]

@@ -38,10 +38,13 @@ What you get out of the box:
 
 ## Quick start
 
-Prerequisites: Rust stable (edition 2024), `git`, and
+Prerequisites: Rust stable (edition 2024) with the
+`wasm32-unknown-unknown` target, `git`, and
 [`trunk`](https://trunkrs.dev/) — the host crate's `build.rs`
-invokes it to compile the Leptos browser bundle alongside the
-binary.
+invokes trunk to compile the Leptos browser bundle alongside the
+binary. `rust-toolchain.toml` auto-installs the wasm target under
+rustup; non-rustup setups need `rustup target add
+wasm32-unknown-unknown` (or the distro equivalent).
 
 ```sh
 cargo install --locked trunk

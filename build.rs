@@ -56,7 +56,7 @@ fn build_web_bundle() -> Result<(), std::io::Error> {
     })?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
-            "`trunk build` in web/ exited with {status}"
+            "`trunk build` in web/ exited with {status}. If the failure mentions `wasm32-unknown-unknown`, install the target with `rustup target add wasm32-unknown-unknown` (rust-toolchain.toml should auto-install it under rustup; non-rustup setups need this manually)."
         )));
     }
     Ok(())
