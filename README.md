@@ -38,20 +38,17 @@ What you get out of the box:
 
 ## Quick start
 
-Prerequisites: Rust stable (edition 2024), `git`, and a checkout
-with the submodules initialised — the proto definitions live in
-`submodules/frequenz-api-electricity-trading`.
+Prerequisites: Rust stable (edition 2024), `git`, and
+[`trunk`](https://trunkrs.dev/) — the host crate's `build.rs`
+invokes it to compile the Leptos browser bundle alongside the
+binary.
 
 ```sh
+cargo install --locked trunk
+
 git clone <repo> tradingsim
 cd tradingsim
 git submodule update --init --recursive
-
-# Browser UI bundle. Skip if you only need the gRPC services — the
-# host binary still builds, the SPA routes just 404. `trunk` is a
-# separate cargo binary: `cargo install --locked trunk`.
-(cd web && trunk build --release)
-
 cargo build --release
 ./target/release/tradingsim
 ```
@@ -393,11 +390,10 @@ the next 15-min boundary), or an RFC-3339 timestamp.
 
 Useful for eyeballing what your app is reacting to. The UI is a
 [Leptos](https://leptos.dev/) SPA compiled to WebAssembly by
-[`trunk`](https://trunkrs.dev/) (`cd web && trunk build`); the
-resulting `web/dist/` is rust-embedded into the host binary so
-once built it ships with the server. `cargo build` works before
-`trunk build` has run — the SPA routes just 404 until the bundle
-is populated. The UI shows:
+[`trunk`](https://trunkrs.dev/); the host crate's `build.rs`
+shells out to `trunk build` automatically, then `rust-embed`s the
+resulting `web/dist/` so the server ships self-contained. The UI
+shows:
 
 - **Order book** ladders per area for one selected delivery period
 - **Public trade tape** with a delivery-period filter
@@ -426,10 +422,14 @@ without polling.
 ### Building
 
 ```sh
-cargo build              # host binary (debug)
-cargo build --release    # host binary (optimised)
-(cd web && trunk build)  # browser UI bundle into web/dist/
+cargo build              # debug — also runs `trunk build` on web/
+cargo build --release    # release — also runs `trunk build --release`
 ```
+
+`build.rs` shells out to `trunk build` (matching the host crate's
+profile) before invoking `tonic-prost-build`, so the embedded UI
+bundle and the gRPC stubs land in one `cargo build`. `trunk` is
+a build-time prerequisite: `cargo install --locked trunk`.
 
 The proto submodule is pinned (`submodules/frequenz-api-electricity-trading`
 at `3a41f88`, its nested `frequenz-api-common` at `fc70cb9`).

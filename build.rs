@@ -1,18 +1,68 @@
-//! tonic-prost-build wiring. The electricity_trading and weather
-//! protos both pull in frequenz-api-common; we use the
-//! electricity_trading's pinned common (location.proto matches
-//! byte-for-byte across both submodule revisions).
+//! Host crate build script: drives both the protobuf codegen and
+//! the Leptos/WASM browser bundle.
+//!
+//! Proto: the electricity_trading and weather protos both pull in
+//! frequenz-api-common; we use the electricity_trading submodule's
+//! pinned common (location.proto matches byte-for-byte across both
+//! submodule revisions).
+//!
+//! Web bundle: src/ui/mod.rs rust-embeds web/dist/, the output of
+//! `trunk build` on the web/ subcrate (a Leptos SPA compiled to
+//! WebAssembly). We invoke trunk here so the bundle is always in
+//! sync with the host binary — no separate `trunk build` step in
+//! the developer's workflow. `trunk` must be on PATH; install with
+//! `cargo install --locked trunk`.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() -> Result<(), std::io::Error> {
-    // `src/ui/mod.rs` rust-embeds `web/dist/` (the trunk build of the
-    // Leptos shell). Keep the folder present even on fresh clones so
-    // the host crate compiles before `trunk build` has run — the
-    // /leptos routes just 404 until then.
-    std::fs::create_dir_all("web/dist")?;
-    println!("cargo:rerun-if-changed=web/dist");
+    build_web_bundle()?;
+    compile_protos()
+}
 
+fn build_web_bundle() -> Result<(), std::io::Error> {
+    // Re-run trunk whenever the web crate's inputs change. The
+    // host crate's src/ already triggers a host-only rerun via
+    // cargo's default behaviour; we only need to add web/ here.
+    for path in [
+        "web/src",
+        "web/index.html",
+        "web/style.css",
+        "web/Cargo.toml",
+        "web/Trunk.toml",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+
+    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    let mut cmd = Command::new("trunk");
+    cmd.arg("build").current_dir("web");
+    // Trunk shells out to `cargo build --target=wasm32-unknown-unknown`.
+    // Without a distinct CARGO_TARGET_DIR that subprocess would
+    // contend with the outer cargo (which is currently holding the
+    // workspace target-dir lock to run *this* build script) and
+    // deadlock. web/target/ keeps trunk's wasm artefacts off the
+    // host's tree.
+    cmd.env("CARGO_TARGET_DIR", "target");
+    if release {
+        cmd.arg("--release");
+    }
+
+    let status = cmd.status().map_err(|e| {
+        std::io::Error::other(format!(
+            "could not invoke `trunk` ({e}). Install with `cargo install --locked trunk`."
+        ))
+    })?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "`trunk build` in web/ exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+fn compile_protos() -> Result<(), std::io::Error> {
     let trading_root = std::env::var("TRADINGSIM_PROTO_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("submodules/frequenz-api-electricity-trading"));
