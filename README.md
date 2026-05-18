@@ -46,6 +46,12 @@ with the submodules initialised — the proto definitions live in
 git clone <repo> tradingsim
 cd tradingsim
 git submodule update --init --recursive
+
+# Browser UI bundle. Skip if you only need the gRPC services — the
+# host binary still builds, the SPA routes just 404. `trunk` is a
+# separate cargo binary: `cargo install --locked trunk`.
+(cd web && trunk build --release)
+
 cargo build --release
 ./target/release/tradingsim
 ```
@@ -98,6 +104,13 @@ All 11 RPCs of the Electricity Trading service are implemented:
 - `ListGridpoolOrders` / `ListGridpoolTrades`
 - `ReceiveGridpoolOrdersStream` / `ReceiveGridpoolTradesStream`
 - `ReceivePublicTradesStream` / `ReceivePublicOrderBookStream`
+
+A `ReceivePublicTradesStream` subscription whose filter pins a
+specific `delivery_period` is closed server-side 15 minutes past
+that period's start — the proto's "Replay Window Semantics" let
+the service close a stream once its filter selects a gated
+contract. Subscriptions with no `delivery_period` filter are the
+unbounded market-wide tape.
 
 The Weather Forecast service implements
 `ReceiveLiveWeatherForecast` + `ReceiveHistoricalWeatherForecast`,
@@ -378,9 +391,13 @@ the next 15-min boundary), or an RFC-3339 timestamp.
 
 ## The browser UI
 
-Useful for eyeballing what your app is reacting to. The UI is an
-axum SPA embedded in the binary (no separate build step). It
-shows:
+Useful for eyeballing what your app is reacting to. The UI is a
+[Leptos](https://leptos.dev/) SPA compiled to WebAssembly by
+[`trunk`](https://trunkrs.dev/) (`cd web && trunk build`); the
+resulting `web/dist/` is rust-embedded into the host binary so
+once built it ships with the server. `cargo build` works before
+`trunk build` has run — the SPA routes just 404 until the bundle
+is populated. The UI shows:
 
 - **Order book** ladders per area for one selected delivery period
 - **Public trade tape** with a delivery-period filter
@@ -409,8 +426,9 @@ without polling.
 ### Building
 
 ```sh
-cargo build              # debug
-cargo build --release    # optimised
+cargo build              # host binary (debug)
+cargo build --release    # host binary (optimised)
+(cd web && trunk build)  # browser UI bundle into web/dist/
 ```
 
 The proto submodule is pinned (`submodules/frequenz-api-electricity-trading`
