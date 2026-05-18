@@ -18,7 +18,7 @@ use tradingsim::proto::trading::{
     CancelAllGridpoolOrdersRequest, CancelGridpoolOrderRequest, CreateGridpoolOrderRequest,
     GetGridpoolOrderRequest, GridpoolOrderFilter, ListGridpoolOrdersRequest,
     ListGridpoolTradesRequest, MarketSide, Order, OrderExecutionOption, OrderState, OrderType,
-    ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolTradesStreamRequest,
+    PublicTradeFilter, ReceiveGridpoolOrdersStreamRequest, ReceiveGridpoolTradesStreamRequest,
     ReceivePublicTradesStreamRequest, UpdateGridpoolOrderRequest,
     electricity_trading_service_client::ElectricityTradingServiceClient,
     electricity_trading_service_server::ElectricityTradingServiceServer,
@@ -525,6 +525,44 @@ async fn receive_public_trades_stream_emits_each_fill() {
         t.price.as_ref().unwrap().amount.as_ref().unwrap().value,
         "85"
     );
+}
+
+#[tokio::test]
+async fn public_trades_stream_closes_fifteen_minutes_past_delivery_start() {
+    let addr = spawn_server().await;
+    let mut client = ElectricityTradingServiceClient::connect(addr)
+        .await
+        .unwrap();
+
+    // A delivery period whose start + 15 min is firmly in the past
+    // (2001-09-09T01:46:40Z). The service should close the stream on
+    // the first poll instead of leaving the client hanging.
+    let gated = DeliveryPeriod {
+        start: Some(prost_types::Timestamp {
+            seconds: 1_000_000_000,
+            nanos: 0,
+        }),
+        duration: DeliveryDuration::DeliveryDuration15 as i32,
+    };
+    let mut stream = client
+        .receive_public_trades_stream(ReceivePublicTradesStreamRequest {
+            filter: Some(PublicTradeFilter {
+                states: vec![],
+                delivery_period: Some(gated),
+                buy_delivery_area: None,
+                sell_delivery_area: None,
+            }),
+            start_time: None,
+            end_time: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let item = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("public trades stream did not close before timeout");
+    assert!(item.is_none(), "expected closed stream, got: {item:?}");
 }
 
 #[tokio::test]

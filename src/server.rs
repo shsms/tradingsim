@@ -506,11 +506,23 @@ impl ElectricityTradingService for ElectricityTradingServer {
     ) -> Result<Response<Self::ReceivePublicTradesStreamStream>, Status> {
         let req = request.into_inner();
         let filter = req.filter.unwrap_or_default();
-        // start_time / end_time replay is deferred — we serve live
-        // from the subscription point on. The proto's stream lifetime
-        // contract allows that ("best-effort").
+        // Trading on a contract ends at its delivery start; the proto
+        // permits closing streams whose filter pins a gated period
+        // (see ReceivePublicTradesStreamRequest's "Replay Window
+        // Semantics" note). We hold the stream open for 15 minutes
+        // past delivery start so any late-printed straggler trades
+        // still reach the client. A request without a delivery_period
+        // filter is a market-wide tape and stays open. start_time /
+        // end_time replay is deferred — we serve live from the
+        // subscription point on.
+        let close_at = filter
+            .delivery_period
+            .as_ref()
+            .and_then(|p| p.start.as_ref())
+            .and_then(|ts| timestamp_from_proto(ts).ok())
+            .map(|t| t + chrono::Duration::minutes(15));
         let rx = self.world.read().subscribe_public_trades();
-        let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+        let live = BroadcastStream::new(rx).filter_map(move |item| match item {
             Ok(t) if matches_public_trade_filter(&t, &filter) => {
                 Some(Ok(ReceivePublicTradesStreamResponse {
                     public_trade: Some((&t).into()),
@@ -518,7 +530,19 @@ impl ElectricityTradingService for ElectricityTradingServer {
             }
             _ => None,
         });
-        Ok(Response::new(Box::pin(stream)))
+        let stream: Self::ReceivePublicTradesStreamStream = match close_at {
+            Some(deadline) => {
+                let remaining = (deadline - Utc::now())
+                    .to_std()
+                    .unwrap_or(std::time::Duration::ZERO);
+                Box::pin(futures::StreamExt::take_until(
+                    live,
+                    tokio::time::sleep(remaining),
+                ))
+            }
+            None => Box::pin(live),
+        };
+        Ok(Response::new(stream))
     }
 
     type ReceivePublicOrderBookStreamStream = BoxStream<ReceivePublicOrderBookStreamResponse>;
